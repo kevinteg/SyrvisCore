@@ -229,28 +229,40 @@ class TestCreateTraefikFiles:
     """Test creating required Traefik files."""
 
     def test_create_traefik_files(self, mock_docker_client, temp_syrvis_home_with_compose):
-        """Test that required Traefik files are created."""
+        """Test that required Traefik files are created with content."""
         manager = DockerManager()
         manager._create_traefik_files()
 
         traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
 
-        # Check acme.json exists with correct permissions
+        # Check acme.json exists with correct permissions (empty file)
         acme_file = traefik_data / "acme.json"
         assert acme_file.exists()
         assert acme_file.is_file()
         assert oct(acme_file.stat().st_mode)[-3:] == "600"
 
-        # Check traefik.yml exists with correct permissions
+        # Check traefik.yml exists with correct permissions and has content
         config_file = traefik_data / "traefik.yml"
         assert config_file.exists()
         assert config_file.is_file()
         assert oct(config_file.stat().st_mode)[-3:] == "644"
+        content = config_file.read_text()
+        assert "# Traefik Static Configuration" in content
+        assert "entryPoints:" in content
 
         # Check config directory exists
         config_dir = traefik_data / "config"
         assert config_dir.exists()
         assert config_dir.is_dir()
+
+        # Check dynamic config exists with content
+        dynamic_file = config_dir / "dynamic.yml"
+        assert dynamic_file.exists()
+        assert dynamic_file.is_file()
+        assert oct(dynamic_file.stat().st_mode)[-3:] == "644"
+        dynamic_content = dynamic_file.read_text()
+        assert "# Traefik Dynamic Configuration" in dynamic_content
+        assert "http:" in dynamic_content
 
     def test_create_traefik_files_idempotent(
         self, mock_docker_client, temp_syrvis_home_with_compose

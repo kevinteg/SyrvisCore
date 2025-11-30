@@ -16,6 +16,10 @@ from syrviscore.paths import (
     get_syrvis_home,
     validate_docker_compose_exists,
 )
+from syrviscore.traefik_config import (
+    generate_traefik_dynamic_config,
+    generate_traefik_static_config,
+)
 
 
 class DockerConnectionError(Exception):
@@ -113,12 +117,12 @@ class DockerManager:
 
     def _create_traefik_files(self) -> None:
         """
-        Create required Traefik files and directories.
+        Create required Traefik files and directories with configuration.
 
         Creates:
         - data/traefik/acme.json (mode 0600) - Let's Encrypt certificates
         - data/traefik/traefik.yml (mode 0644) - Static configuration
-        - data/traefik/config/ - Dynamic configuration directory
+        - data/traefik/config/dynamic.yml (mode 0644) - Dynamic configuration
         """
         syrvis_home = get_syrvis_home()
         traefik_data = syrvis_home / "data" / "traefik"
@@ -126,19 +130,24 @@ class DockerManager:
         # Ensure traefik data directory exists
         traefik_data.mkdir(parents=True, exist_ok=True)
 
-        # Create acme.json for Let's Encrypt certificates
+        # Create acme.json for Let's Encrypt certificates (empty file)
         acme_file = traefik_data / "acme.json"
         acme_file.touch(exist_ok=True)
         acme_file.chmod(0o600)
 
-        # Create traefik.yml for static configuration
-        config_file = traefik_data / "traefik.yml"
-        config_file.touch(exist_ok=True)
-        config_file.chmod(0o644)
+        # Write traefik.yml static configuration
+        traefik_yml = traefik_data / "traefik.yml"
+        traefik_yml.write_text(generate_traefik_static_config())
+        traefik_yml.chmod(0o644)
 
         # Create config directory for dynamic configuration
         config_dir = traefik_data / "config"
         config_dir.mkdir(exist_ok=True)
+
+        # Write dynamic configuration
+        dynamic_config = config_dir / "dynamic.yml"
+        dynamic_config.write_text(generate_traefik_dynamic_config())
+        dynamic_config.chmod(0o644)
 
     def start_core_services(self) -> None:
         """

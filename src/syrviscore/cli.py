@@ -6,7 +6,11 @@ from dotenv import load_dotenv
 from syrviscore.__version__ import __version__
 from syrviscore.compose import generate_compose_from_config
 from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
-from syrviscore.paths import SyrvisHomeError
+from syrviscore.paths import SyrvisHomeError, get_syrvis_home
+from syrviscore.traefik_config import (
+    generate_traefik_dynamic_config,
+    generate_traefik_static_config,
+)
 
 
 @click.group()
@@ -223,6 +227,65 @@ def logs(service, follow, tail):
         raise click.Abort()
     except Exception as e:
         click.echo(f"❌ Failed to get logs: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.group()
+def config():
+    """Manage configuration files."""
+    pass
+
+
+@config.command()
+def generate_traefik():
+    """Generate Traefik configuration files."""
+    try:
+        # Load environment variables
+        load_dotenv()
+
+        # Validate DOMAIN is set
+        import os
+
+        domain = os.getenv("DOMAIN")
+        if not domain:
+            click.echo("⚠️  Warning: DOMAIN environment variable not set", err=True)
+            click.echo("   Using default: example.com", err=True)
+            click.echo("   Set DOMAIN in .env file for production use", err=True)
+            click.echo()
+
+        # Get SYRVIS_HOME
+        syrvis_home = get_syrvis_home()
+        traefik_data = syrvis_home / "data" / "traefik"
+
+        # Ensure directories exist
+        traefik_data.mkdir(parents=True, exist_ok=True)
+        config_dir = traefik_data / "config"
+        config_dir.mkdir(exist_ok=True)
+
+        # Generate and write static config
+        static_config_path = traefik_data / "traefik.yml"
+        static_config = generate_traefik_static_config()
+        static_config_path.write_text(static_config)
+        static_config_path.chmod(0o644)
+        click.echo(f"✅ Generated static config: {static_config_path}")
+
+        # Generate and write dynamic config
+        dynamic_config_path = config_dir / "dynamic.yml"
+        dynamic_config = generate_traefik_dynamic_config()
+        dynamic_config_path.write_text(dynamic_config)
+        dynamic_config_path.chmod(0o644)
+        click.echo(f"✅ Generated dynamic config: {dynamic_config_path}")
+
+        click.echo("\n📝 Configuration files created successfully!")
+        click.echo(f"   Static config:  {static_config_path}")
+        click.echo(f"   Dynamic config: {dynamic_config_path}")
+        click.echo("\n💡 Tip: Review and customize these files before starting services")
+
+    except SyrvisHomeError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"❌ Failed to generate config: {e}", err=True)
         raise click.Abort()
 
 
