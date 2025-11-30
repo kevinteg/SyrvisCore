@@ -174,6 +174,72 @@ When helping with this project:
 7. Suggest tests for new functionality
 8. Keep security in mind (secrets handling, file permissions)
 
+## Task Summary Format
+
+When creating end-of-session summaries, keep them **concise and scannable**:
+
+**Maximum Length:** 20 lines total (not including the template structure)
+
+**Required Structure:**
+```
+## Task: [One-line description]
+
+### Completed
+- [3-5 bullet points maximum - high-level accomplishments only]
+
+### Key Files Changed
+- [2-4 most important files/directories only]
+
+### Next Steps
+- [2-3 immediate action items]
+
+### Issues/Notes (optional)
+- [Critical issues only - omit if none]
+```
+
+**What to Include:**
+- ✅ High-level accomplishments (what was built/fixed)
+- ✅ Most important file changes only
+- ✅ Concrete next steps for user
+- ✅ Critical issues that block progress
+
+**What to Omit:**
+- ❌ Detailed file listings (user can see git status)
+- ❌ Verbose explanations already discussed during session
+- ❌ Full success criteria checklists (just state "all criteria met" or list failures)
+- ❌ Repeating task requirements from prompt
+- ❌ Implementation details (user was present for the work)
+- ❌ Celebratory language or filler text
+
+**Example - Good Summary:**
+```
+## Task: Migrate to Standard Python Packaging
+
+### Completed
+- Replaced custom tarballs with standard Python wheels
+- SPK now uses `pip install` for CLI installation
+- Fixed all hardcoded IP addresses (192.168.8.x → 192.168.0.x)
+
+### Key Files Changed
+- build-tools/build-python-package.sh (new)
+- spk/scripts/postinst (simplified)
+- All scripts/*.sh (generic IPs)
+
+### Next Steps
+- Test SPK installation on Synology NAS
+- Create GitHub Actions workflow for automated builds
+```
+
+**Example - Bad Summary (too verbose):**
+```
+## Task: SPK Development - Phase 1 Complete! 🎉
+
+Successfully created a complete, production-ready SPK package...
+[50+ lines of detailed explanations, file listings, and repeated information]
+```
+
+The goal is a **quick scan** that tells the user what changed and what to do next.
+
 ## Current Phase: MVP (Phase 1)
 
 Focus areas:
