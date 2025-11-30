@@ -1,0 +1,225 @@
+"""
+Tests for Docker manager module.
+"""
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
+
+import pytest
+from docker.errors import DockerException
+
+from syrviscore.docker_manager import DockerConnectionError, DockerManager
+from syrviscore.paths import set_syrvis_home
+
+
+@pytest.fixture
+def temp_syrvis_home_with_compose(tmp_path):
+    """Create temp SYRVIS_HOME with docker-compose.yaml."""
+    syrvis_dir = tmp_path / "syrviscore"
+    syrvis_dir.mkdir()
+    compose_file = syrvis_dir / "docker-compose.yaml"
+    compose_file.write_text("version: '3.8'\nservices:\n  traefik: {}")
+    set_syrvis_home(str(syrvis_dir))
+    return syrvis_dir
+
+
+@pytest.fixture
+def mock_docker_client():
+    """Mock Docker client."""
+    with patch("syrviscore.docker_manager.docker.from_env") as mock:
+        client = Mock()
+        client.ping.return_value = True
+        mock.return_value = client
+        yield client
+
+
+class TestDockerManagerInit:
+    """Test Docker Manager initialization."""
+
+    def test_init_success(self, mock_docker_client):
+        """Test successful initialization."""
+        manager = DockerManager()
+        assert manager.client == mock_docker_client
+        mock_docker_client.ping.assert_called_once()
+
+    def test_init_docker_not_running(self):
+        """Test initialization when Docker not running."""
+        with patch("syrviscore.docker_manager.docker.from_env") as mock:
+            mock.side_effect = DockerException("Cannot connect")
+            with pytest.raises(DockerConnectionError, match="Cannot connect to Docker daemon"):
+                DockerManager()
+
+
+class TestGetCoreContainers:
+    """Test getting core containers."""
+
+    def test_get_core_containers_success(self, mock_docker_client):
+        """Test getting containers successfully."""
+        container1 = Mock()
+        container2 = Mock()
+        mock_docker_client.containers.list.return_value = [container1, container2]
+
+        manager = DockerManager()
+        containers = manager.get_core_containers()
+
+        assert len(containers) == 2
+        assert containers == [container1, container2]
+        mock_docker_client.containers.list.assert_called_once_with(
+            all=True,
+            filters={"label": "com.docker.compose.project=syrviscore"},
+        )
+
+    def test_get_core_containers_docker_error(self, mock_docker_client):
+        """Test error when Docker fails."""
+        mock_docker_client.containers.list.side_effect = DockerException("Connection failed")
+
+        manager = DockerManager()
+        with pytest.raises(DockerConnectionError, match="Failed to list containers"):
+            manager.get_core_containers()
+
+
+class TestStartStopRestart:
+    """Test start, stop, restart operations."""
+
+    def test_start_core_services(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test starting services."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0)
+
+            manager = DockerManager()
+            manager.start_core_services()
+
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert "docker-compose" in args
+            assert "up" in args
+            assert "-d" in args
+
+    def test_stop_core_services(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test stopping services."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0)
+
+            manager = DockerManager()
+            manager.stop_core_services()
+
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert "stop" in args
+
+    def test_restart_core_services(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test restarting services."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0)
+
+            manager = DockerManager()
+            manager.restart_core_services()
+
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            assert "restart" in args
+
+
+class TestGetContainerStatus:
+    """Test getting container status."""
+
+    def test_get_container_status(self, mock_docker_client):
+        """Test getting status of containers."""
+        # Mock container
+        container = Mock()
+        container.name = "traefik"
+        container.status = "running"
+        container.labels = {"com.docker.compose.service": "traefik"}
+        container.image.tags = ["traefik:v3.0.0"]
+
+        # Mock created time (2 hours ago)
+        created_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        container.attrs = {"Created": created_time.isoformat()}
+
+        mock_docker_client.containers.list.return_value = [container]
+
+        manager = DockerManager()
+        status = manager.get_container_status()
+
+        assert "traefik" in status
+        assert status["traefik"]["name"] == "traefik"
+        assert status["traefik"]["status"] == "running"
+        assert status["traefik"]["image"] == "traefik:v3.0.0"
+        assert "hour" in status["traefik"]["uptime"]
+
+    def test_get_container_status_empty(self, mock_docker_client):
+        """Test status with no containers."""
+        mock_docker_client.containers.list.return_value = []
+
+        manager = DockerManager()
+        status = manager.get_container_status()
+
+        assert status == {}
+
+
+class TestGetContainerLogs:
+    """Test getting container logs."""
+
+    def test_get_logs_single_service(self, mock_docker_client):
+        """Test getting logs for single service."""
+        container = Mock()
+        container.name = "traefik"
+        container.labels = {"com.docker.compose.service": "traefik"}
+        container.logs.return_value = b"2024-01-01 Test log\n"
+
+        mock_docker_client.containers.list.return_value = [container]
+
+        manager = DockerManager()
+        logs = manager.get_container_logs(service="traefik", follow=False)
+
+        assert "traefik" in logs
+        assert "Test log" in logs
+
+    def test_get_logs_all_services(self, mock_docker_client):
+        """Test getting logs for all services."""
+        container1 = Mock()
+        container1.labels = {"com.docker.compose.service": "traefik"}
+        container1.logs.return_value = b"Traefik log\n"
+
+        container2 = Mock()
+        container2.labels = {"com.docker.compose.service": "portainer"}
+        container2.logs.return_value = b"Portainer log\n"
+
+        mock_docker_client.containers.list.return_value = [container1, container2]
+
+        manager = DockerManager()
+        logs = manager.get_container_logs(follow=False)
+
+        assert "traefik" in logs
+        assert "portainer" in logs
+
+    def test_get_logs_service_not_found(self, mock_docker_client):
+        """Test error when service not found."""
+        mock_docker_client.containers.list.return_value = []
+
+        manager = DockerManager()
+        with pytest.raises(ValueError, match="Service 'nonexistent' not found"):
+            manager.get_container_logs(service="nonexistent")
+
+
+class TestFormatUptime:
+    """Test uptime formatting."""
+
+    def test_format_uptime_seconds(self):
+        """Test formatting seconds."""
+        assert DockerManager._format_uptime(30) == "30 seconds"
+
+    def test_format_uptime_minutes(self):
+        """Test formatting minutes."""
+        assert DockerManager._format_uptime(120) == "2 minutes"
+        assert DockerManager._format_uptime(60) == "1 minute"
+
+    def test_format_uptime_hours(self):
+        """Test formatting hours."""
+        assert DockerManager._format_uptime(7200) == "2 hours"
+        assert DockerManager._format_uptime(3600) == "1 hour"
+
+    def test_format_uptime_days(self):
+        """Test formatting days."""
+        assert DockerManager._format_uptime(172800) == "2 days"
+        assert DockerManager._format_uptime(86400) == "1 day"
