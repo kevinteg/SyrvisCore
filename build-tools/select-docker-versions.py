@@ -35,7 +35,7 @@ class DockerHubClient:
             List of tag dictionaries with name and metadata
         """
         url = f"{self.BASE_URL}/repositories/{repository}/tags"
-        params = {"page_size": limit, "ordering": "-last_updated"}
+        params = {"page_size": limit, "ordering": "last_updated"}
 
         try:
             response = requests.get(url, params=params, timeout=10)
