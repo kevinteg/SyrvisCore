@@ -65,6 +65,15 @@ def config_without_cloudflared() -> Dict:
 
 
 @pytest.fixture
+def network_env_vars(monkeypatch):
+    """Set network environment variables."""
+    monkeypatch.setenv("NETWORK_INTERFACE", "ovs_eth0")
+    monkeypatch.setenv("NETWORK_SUBNET", "192.168.0.0/24")
+    monkeypatch.setenv("NETWORK_GATEWAY", "192.168.0.1")
+    monkeypatch.setenv("TRAEFIK_IP", "192.168.0.100")
+
+
+@pytest.fixture
 def temp_config_file(valid_config, tmp_path):
     """Create temporary config file."""
     config_file = tmp_path / "config.yaml"
@@ -129,19 +138,23 @@ class TestComposeGenerator:
         with pytest.raises(ValueError, match="missing docker_images section"):
             generator.load_config()
 
-    def test_generate_traefik_service(self, temp_config_file):
-        """Test Traefik service generation."""
+    def test_generate_traefik_service(self, temp_config_file, network_env_vars):
+        """Test Traefik service generation with macvlan."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
 
-        service = generator._generate_traefik_service()
+        network_config = generator._get_network_config_from_env()
+        service = generator._generate_traefik_service(network_config)
 
         assert service["image"] == "library/traefik:v3.0.0"
         assert service["container_name"] == "traefik"
         assert service["restart"] == "unless-stopped"
-        assert "8080:80" in service["ports"]
-        assert "8443:443" in service["ports"]
-        assert "proxy" in service["networks"]
+        # Check standard ports (not 8080/8443)
+        assert "80:80" in service["ports"]
+        assert "443:443" in service["ports"]
+        # Check macvlan network with static IP
+        assert "syrvis-macvlan" in service["networks"]
+        assert service["networks"]["syrvis-macvlan"]["ipv4_address"] == "192.168.0.100"
         assert len(service["volumes"]) == 5
         assert "traefik.enable=true" in service["labels"]
 
@@ -181,7 +194,7 @@ class TestComposeGenerator:
 
         assert service is None
 
-    def test_generate_compose_with_all_services(self, temp_config_file):
+    def test_generate_compose_with_all_services(self, temp_config_file, network_env_vars):
         """Test complete compose generation with all services."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
@@ -194,9 +207,12 @@ class TestComposeGenerator:
         assert "portainer" in compose["services"]
         assert "cloudflared" in compose["services"]
         assert "networks" in compose
+        assert "syrvis-macvlan" in compose["networks"]
         assert "proxy" in compose["networks"]
 
-    def test_generate_compose_without_cloudflared(self, temp_config_without_cloudflared):
+    def test_generate_compose_without_cloudflared(
+        self, temp_config_without_cloudflared, network_env_vars
+    ):
         """Test compose generation without Cloudflared."""
         generator = ComposeGenerator(str(temp_config_without_cloudflared))
         generator.load_config()
@@ -214,7 +230,7 @@ class TestComposeGenerator:
         with pytest.raises(ValueError, match="Build config not loaded"):
             generator.generate_compose()
 
-    def test_save_compose(self, temp_config_file, tmp_path):
+    def test_save_compose(self, temp_config_file, tmp_path, network_env_vars):
         """Test saving compose file."""
         output_file = tmp_path / "docker-compose.yaml"
         generator = ComposeGenerator(str(temp_config_file))
@@ -232,7 +248,7 @@ class TestComposeGenerator:
         assert "traefik" in saved_compose["services"]
         assert "portainer" in saved_compose["services"]
 
-    def test_save_compose_creates_directory(self, temp_config_file, tmp_path):
+    def test_save_compose_creates_directory(self, temp_config_file, tmp_path, network_env_vars):
         """Test saving compose file creates parent directories."""
         output_file = tmp_path / "subdir" / "docker-compose.yaml"
         generator = ComposeGenerator(str(temp_config_file))
@@ -243,7 +259,7 @@ class TestComposeGenerator:
         assert output_file.exists()
         assert output_file.parent.exists()
 
-    def test_generate_and_save(self, temp_config_file, tmp_path):
+    def test_generate_and_save(self, temp_config_file, tmp_path, network_env_vars):
         """Test convenience method."""
         output_file = tmp_path / "docker-compose.yaml"
         generator = ComposeGenerator(str(temp_config_file))
@@ -254,7 +270,9 @@ class TestComposeGenerator:
         assert compose["version"] == "3.8"
         assert "traefik" in compose["services"]
 
-    def test_generate_and_save_with_new_config_path(self, temp_config_file, tmp_path):
+    def test_generate_and_save_with_new_config_path(
+        self, temp_config_file, tmp_path, network_env_vars
+    ):
         """Test convenience method with config path override."""
         output_file = tmp_path / "docker-compose.yaml"
         generator = ComposeGenerator("dummy.yaml")
@@ -270,7 +288,7 @@ class TestComposeGenerator:
 class TestHelperFunction:
     """Test module-level helper function."""
 
-    def test_generate_compose_from_config(self, temp_config_file, tmp_path):
+    def test_generate_compose_from_config(self, temp_config_file, tmp_path, network_env_vars):
         """Test helper function."""
         output_file = tmp_path / "docker-compose.yaml"
 
@@ -293,7 +311,7 @@ class TestHelperFunction:
 class TestDockerImageVersions:
     """Test that correct Docker image versions are used."""
 
-    def test_traefik_version_from_config(self, temp_config_file):
+    def test_traefik_version_from_config(self, temp_config_file, network_env_vars):
         """Test that Traefik uses version from config."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
@@ -302,7 +320,7 @@ class TestDockerImageVersions:
         traefik_image = compose["services"]["traefik"]["image"]
         assert traefik_image == "library/traefik:v3.0.0"
 
-    def test_portainer_version_from_config(self, temp_config_file):
+    def test_portainer_version_from_config(self, temp_config_file, network_env_vars):
         """Test that Portainer uses version from config."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
@@ -311,7 +329,7 @@ class TestDockerImageVersions:
         portainer_image = compose["services"]["portainer"]["image"]
         assert portainer_image == "portainer/portainer-ce:2.19.4"
 
-    def test_cloudflared_version_from_config(self, temp_config_file):
+    def test_cloudflared_version_from_config(self, temp_config_file, network_env_vars):
         """Test that Cloudflared uses version from config."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
@@ -321,31 +339,107 @@ class TestDockerImageVersions:
         assert cloudflared_image == "cloudflare/cloudflared:2024.1.5"
 
 
+class TestNetworkValidation:
+    """Test network configuration validation."""
+
+    def test_missing_env_vars(self, temp_config_file, monkeypatch):
+        """Test error when network env vars missing."""
+        # Ensure env vars are not set
+        monkeypatch.delenv("NETWORK_INTERFACE", raising=False)
+        monkeypatch.delenv("NETWORK_SUBNET", raising=False)
+        monkeypatch.delenv("NETWORK_GATEWAY", raising=False)
+        monkeypatch.delenv("TRAEFIK_IP", raising=False)
+        
+        generator = ComposeGenerator(str(temp_config_file))
+        generator.load_config()
+
+        with pytest.raises(ValueError, match="Missing required network environment variables"):
+            generator.generate_compose()
+
+    def test_invalid_subnet(self, temp_config_file, monkeypatch):
+        """Test error with invalid subnet."""
+        monkeypatch.setenv("NETWORK_INTERFACE", "ovs_eth0")
+        monkeypatch.setenv("NETWORK_SUBNET", "invalid-subnet")
+        monkeypatch.setenv("NETWORK_GATEWAY", "192.168.0.1")
+        monkeypatch.setenv("TRAEFIK_IP", "192.168.0.100")
+
+        generator = ComposeGenerator(str(temp_config_file))
+        generator.load_config()
+
+        with pytest.raises(ValueError, match="Invalid subnet format"):
+            generator.generate_compose()
+
+    def test_gateway_not_in_subnet(self, temp_config_file, monkeypatch):
+        """Test error when gateway not in subnet."""
+        monkeypatch.setenv("NETWORK_INTERFACE", "ovs_eth0")
+        monkeypatch.setenv("NETWORK_SUBNET", "192.168.0.0/24")
+        monkeypatch.setenv("NETWORK_GATEWAY", "10.0.0.1")  # Different subnet
+        monkeypatch.setenv("TRAEFIK_IP", "192.168.0.100")
+
+        generator = ComposeGenerator(str(temp_config_file))
+        generator.load_config()
+
+        with pytest.raises(ValueError, match="Gateway .* not in subnet"):
+            generator.generate_compose()
+
+    def test_traefik_ip_not_in_subnet(self, temp_config_file, monkeypatch):
+        """Test error when Traefik IP not in subnet."""
+        monkeypatch.setenv("NETWORK_INTERFACE", "ovs_eth0")
+        monkeypatch.setenv("NETWORK_SUBNET", "192.168.0.0/24")
+        monkeypatch.setenv("NETWORK_GATEWAY", "192.168.0.1")
+        monkeypatch.setenv("TRAEFIK_IP", "10.0.0.100")  # Different subnet
+
+        generator = ComposeGenerator(str(temp_config_file))
+        generator.load_config()
+
+        with pytest.raises(ValueError, match="Traefik IP .* not in subnet"):
+            generator.generate_compose()
+
+
 class TestComposeStructure:
     """Test the structure of generated compose file."""
 
-    def test_network_configuration(self, temp_config_file):
-        """Test network configuration."""
+    def test_network_configuration(self, temp_config_file, network_env_vars):
+        """Test network configuration includes macvlan."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
         compose = generator.generate_compose()
 
         assert "networks" in compose
+        assert "syrvis-macvlan" in compose["networks"]
         assert "proxy" in compose["networks"]
+
+        # Check macvlan config
+        macvlan = compose["networks"]["syrvis-macvlan"]
+        assert macvlan["driver"] == "macvlan"
+        assert macvlan["driver_opts"]["parent"] == "ovs_eth0"
+
+        # Check bridge config
         assert compose["networks"]["proxy"]["name"] == "proxy"
         assert compose["networks"]["proxy"]["driver"] == "bridge"
 
-    def test_all_services_use_proxy_network(self, temp_config_file):
-        """Test that all services use proxy network."""
+    def test_traefik_uses_macvlan(self, temp_config_file, network_env_vars):
+        """Test that Traefik uses macvlan network."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
         compose = generator.generate_compose()
 
-        for service_name, service in compose["services"].items():
+        traefik = compose["services"]["traefik"]
+        assert "syrvis-macvlan" in traefik["networks"]
+        assert traefik["networks"]["syrvis-macvlan"]["ipv4_address"] == "192.168.0.100"
+
+    def test_other_services_use_bridge(self, temp_config_file, network_env_vars):
+        """Test that Portainer and Cloudflared use bridge network."""
+        generator = ComposeGenerator(str(temp_config_file))
+        generator.load_config()
+        compose = generator.generate_compose()
+
+        for service_name in ["portainer", "cloudflared"]:
+            service = compose["services"][service_name]
             assert "networks" in service
             assert "proxy" in service["networks"]
 
-    def test_security_options(self, temp_config_file):
+    def test_security_options(self, temp_config_file, network_env_vars):
         """Test security options are set."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
@@ -357,7 +451,7 @@ class TestComposeStructure:
             assert "security_opt" in service
             assert "no-new-privileges:true" in service["security_opt"]
 
-    def test_restart_policies(self, temp_config_file):
+    def test_restart_policies(self, temp_config_file, network_env_vars):
         """Test restart policies are set."""
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()

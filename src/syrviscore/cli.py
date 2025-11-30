@@ -49,8 +49,17 @@ def generate_compose(config, output):
             service = compose["services"][service_name]
             click.echo(f"  • {service_name:<15} {service['image']}")
 
-        click.echo("\n⚠️  Note: Traefik runs on ports 8080/8443 (not 80/443)")
-        click.echo("   Configure DSM Application Portal to forward 80/443 -> 8080/8443")
+        # Show Traefik's dedicated IP
+        traefik_networks = compose["services"]["traefik"]["networks"]
+        if isinstance(traefik_networks, dict) and "syrvis-macvlan" in traefik_networks:
+            traefik_ip = traefik_networks["syrvis-macvlan"]["ipv4_address"]
+            click.echo("\n🌐 Network Configuration:")
+            click.echo(f"   Traefik IP: {traefik_ip} (from TRAEFIK_IP env var)")
+            click.echo(
+                f"   Interface: {compose['networks']['syrvis-macvlan']['driver_opts']['parent']}"
+            )
+            click.echo(f"   Access services: http://{traefik_ip} or https://{traefik_ip}")
+
         click.echo("\n✨ Done! Run 'docker-compose up -d' to start services.")
     except FileNotFoundError as e:
         click.echo(f"❌ Error: {e}", err=True)

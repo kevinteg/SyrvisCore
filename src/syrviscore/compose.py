@@ -1,10 +1,13 @@
 """
 Docker Compose configuration generator for SyrvisCore.
 
-This module reads build/config.yaml and generates a docker-compose.yaml
-with Traefik, Portainer, and Cloudflared services.
+This module reads build/config.yaml (for Docker images) and environment variables
+(for network settings) to generate docker-compose.yaml with Traefik, Portainer,
+and Cloudflared services.
 """
 
+import ipaddress
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -12,7 +15,7 @@ import yaml
 
 
 class ComposeGenerator:
-    """Generate docker-compose.yaml from build configuration."""
+    """Generate docker-compose.yaml from build configuration and environment variables."""
 
     def __init__(self, config_path: str = "build/config.yaml"):
         """
@@ -46,28 +49,109 @@ class ComposeGenerator:
 
         return self.build_config
 
-    def _generate_traefik_service(self) -> Dict[str, Any]:
+    def _get_network_config_from_env(self) -> Dict[str, str]:
         """
-        Generate Traefik service configuration.
+        Read network configuration from environment variables.
 
-        Traefik uses ports 8080/8443 to avoid conflict with Synology's nginx
-        which binds to ports 80/443 for DSM. Use DSM Application Portal to
-        reverse proxy external 80/443 traffic to Traefik's 8080/8443.
+        Returns:
+            Dictionary with network configuration
 
-        This approach:
-        - Avoids fighting with Synology system configuration
-        - Survives DSM updates
-        - Uses built-in Application Portal feature
+        Raises:
+            ValueError: If required environment variables are missing
+        """
+        required_vars = {
+            "NETWORK_INTERFACE": "Network interface (e.g., ovs_eth0)",
+            "NETWORK_SUBNET": "Network subnet in CIDR notation (e.g., 192.168.8.0/24)",
+            "NETWORK_GATEWAY": "Network gateway IP (e.g., 192.168.8.1)",
+            "TRAEFIK_IP": "Traefik dedicated IP address (e.g., 192.168.8.4)",
+        }
+
+        missing = []
+        for var, description in required_vars.items():
+            if not os.getenv(var):
+                missing.append(f"  - {var}: {description}")
+
+        if missing:
+            error_msg = (
+                "Missing required network environment variables:\n"
+                + "\n".join(missing)
+                + "\n\nPlease set these variables in your .env file."
+            )
+            raise ValueError(error_msg)
+
+        return {
+            "interface": os.getenv("NETWORK_INTERFACE"),
+            "subnet": os.getenv("NETWORK_SUBNET"),
+            "gateway": os.getenv("NETWORK_GATEWAY"),
+            "traefik_ip": os.getenv("TRAEFIK_IP"),
+        }
+
+    def _validate_network_config(self, network_config: Dict[str, str]) -> None:
+        """
+        Validate network configuration.
+
+        Args:
+            network_config: Dictionary with network settings
+
+        Raises:
+            ValueError: If network config is invalid
+        """
+        # Validate subnet format
+        try:
+            subnet = ipaddress.ip_network(network_config["subnet"], strict=False)
+        except ValueError as e:
+            raise ValueError(f"Invalid subnet format '{network_config['subnet']}': {e}")
+
+        # Validate gateway is in subnet
+        try:
+            gateway = ipaddress.ip_address(network_config["gateway"])
+            if gateway not in subnet:
+                raise ValueError(
+                    f"Gateway {gateway} not in subnet {subnet}. "
+                    "Check your NETWORK_GATEWAY and NETWORK_SUBNET values."
+                )
+        except ValueError as e:
+            if "not in subnet" in str(e):
+                raise
+            raise ValueError(f"Invalid gateway IP '{network_config['gateway']}': {e}")
+
+        # Validate Traefik IP is in subnet
+        try:
+            traefik_ip = ipaddress.ip_address(network_config["traefik_ip"])
+            if traefik_ip not in subnet:
+                raise ValueError(
+                    f"Traefik IP {traefik_ip} not in subnet {subnet}. "
+                    "Check your TRAEFIK_IP and NETWORK_SUBNET values."
+                )
+        except ValueError as e:
+            if "not in subnet" in str(e):
+                raise
+            raise ValueError(f"Invalid Traefik IP '{network_config['traefik_ip']}': {e}")
+
+    def _generate_traefik_service(self, network_config: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Generate Traefik service configuration with macvlan network.
+
+        Traefik gets its own dedicated IP via macvlan network, allowing it
+        to bind to standard ports 80/443 without conflicting with Synology nginx.
+
+        Args:
+            network_config: Network configuration from environment variables
         """
         image = self.build_config["docker_images"]["traefik"]["full_image"]
+        traefik_ip = network_config["traefik_ip"]
 
         return {
             "image": image,
             "container_name": "traefik",
             "restart": "unless-stopped",
             "security_opt": ["no-new-privileges:true"],
-            "networks": ["proxy"],
-            "ports": ["8080:80", "8443:443"],  # Use 8080/8443 to avoid Synology nginx conflict
+            "networks": {
+                "syrvis-macvlan": {
+                    "ipv4_address": traefik_ip,
+                }
+            },
+            "ports": ["80:80", "443:443"],
             "environment": ["TZ=UTC"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
@@ -85,7 +169,7 @@ class ComposeGenerator:
         }
 
     def _generate_portainer_service(self) -> Dict[str, Any]:
-        """Generate Portainer service configuration."""
+        """Generate Portainer service configuration on bridge network."""
         image = self.build_config["docker_images"]["portainer"]["full_image"]
 
         return {
@@ -107,7 +191,7 @@ class ComposeGenerator:
         }
 
     def _generate_cloudflared_service(self) -> Optional[Dict[str, Any]]:
-        """Generate Cloudflared service configuration."""
+        """Generate Cloudflared service configuration on bridge network."""
         if "cloudflared" not in self.build_config["docker_images"]:
             return None
 
@@ -122,6 +206,38 @@ class ComposeGenerator:
             "command": "tunnel --no-autoupdate run",
         }
 
+    def _generate_networks(self, network_config: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Generate network configurations.
+
+        Creates two networks:
+        - syrvis-macvlan: Macvlan network for Traefik with dedicated IP
+        - proxy: Bridge network for other services
+
+        Args:
+            network_config: Network configuration from environment variables
+        """
+        return {
+            "syrvis-macvlan": {
+                "driver": "macvlan",
+                "driver_opts": {
+                    "parent": network_config["interface"],
+                },
+                "ipam": {
+                    "config": [
+                        {
+                            "subnet": network_config["subnet"],
+                            "gateway": network_config["gateway"],
+                        }
+                    ]
+                },
+            },
+            "proxy": {
+                "name": "proxy",
+                "driver": "bridge",
+            },
+        }
+
     def generate_compose(self) -> Dict[str, Any]:
         """
         Generate complete docker-compose configuration.
@@ -130,23 +246,22 @@ class ComposeGenerator:
             Docker Compose configuration dictionary
 
         Raises:
-            ValueError: If build config not loaded
+            ValueError: If build config not loaded or network config invalid
         """
         if not self.build_config:
             raise ValueError("Build config not loaded. Call load_config() first.")
 
+        # Get and validate network configuration from environment
+        network_config = self._get_network_config_from_env()
+        self._validate_network_config(network_config)
+
         compose = {
             "version": "3.8",
             "services": {
-                "traefik": self._generate_traefik_service(),
+                "traefik": self._generate_traefik_service(network_config),
                 "portainer": self._generate_portainer_service(),
             },
-            "networks": {
-                "proxy": {
-                    "name": "proxy",
-                    "driver": "bridge",
-                }
-            },
+            "networks": self._generate_networks(network_config),
         }
 
         # Add Cloudflared if configured
