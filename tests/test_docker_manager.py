@@ -369,6 +369,24 @@ class TestCreateTraefikFiles:
             assert (traefik_data / "traefik.yml").exists()
             assert (traefik_data / "config" / "dynamic.yml").exists()
 
+    def test_config_is_directory_not_file(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that config is created as a DIRECTORY, not a file."""
+        manager = DockerManager()
+        manager._create_traefik_files()
+
+        traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+        config_path = traefik_data / "config"
+
+        # Verify config exists and is a directory
+        assert config_path.exists(), "config should exist"
+        assert config_path.is_dir(), "config must be a DIRECTORY, not a file"
+        assert not config_path.is_file(), "config must NOT be a file"
+
+        # Verify dynamic.yml exists inside the directory
+        dynamic_yml = config_path / "dynamic.yml"
+        assert dynamic_yml.exists(), "dynamic.yml should exist inside config directory"
+        assert dynamic_yml.is_file(), "dynamic.yml should be a file"
+
 
 class TestDockerErrorHandling:
     """Test Docker error handling and output capture."""

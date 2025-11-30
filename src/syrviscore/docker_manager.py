@@ -137,14 +137,14 @@ class DockerManager:
         traefik_yml.write_text(generate_traefik_static_config())
         traefik_yml.chmod(0o644)
 
-        # Create config directory for dynamic configuration
+        # Create config DIRECTORY for dynamic configuration files
         config_dir = traefik_data / "config"
-        config_dir.mkdir(exist_ok=True)
+        config_dir.mkdir(parents=True, exist_ok=True)
 
         # Write dynamic configuration (always update)
-        dynamic_config = config_dir / "dynamic.yml"
-        dynamic_config.write_text(generate_traefik_dynamic_config())
-        dynamic_config.chmod(0o644)
+        dynamic_yml = config_dir / "dynamic.yml"
+        dynamic_yml.write_text(generate_traefik_dynamic_config())
+        dynamic_yml.chmod(0o644)
 
         # Create acme.json ONLY if it doesn't exist (preserves certificates)
         acme_file = traefik_data / "acme.json"
