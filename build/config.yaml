@@ -1,0 +1,18 @@
+metadata:
+  syrviscore_version: 0.1.0-dev
+  created_at: '2024-11-29T00:00:00Z'
+  created_by: manual-setup
+
+docker_images:
+  traefik:
+    image: traefik
+    tag: v3.0.0
+    full_image: traefik:v3.0.0
+  portainer:
+    image: portainer/portainer-ce
+    tag: 2.19.4
+    full_image: portainer/portainer-ce:2.19.4
+  cloudflared:
+    image: cloudflare/cloudflared
+    tag: 2024.1.5
+    full_image: cloudflare/cloudflared:2024.1.5

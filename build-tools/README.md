@@ -32,18 +32,25 @@ Interactive tool for discovering and selecting Docker image versions.
 - Generates YAML build configuration
 
 **Requirements:**
+
+Dependencies are automatically installed when you set up the development environment:
+
 ```bash
-pip install requests pyyaml
+pip install -e ".[dev]"
 ```
+
+This installs all required packages including `requests`, `pyyaml`, `click`, and `docker`.
 
 **Output Example:**
 
-Creates `build/config.yaml`:
+Creates `build/config.yaml` with Docker image versions only:
+
 ```yaml
 metadata:
   syrviscore_version: 0.1.0-dev
   created_at: '2024-11-29T12:00:00Z'
   created_by: select-docker-versions
+
 docker_images:
   traefik:
     image: traefik
@@ -57,11 +64,9 @@ docker_images:
     image: cloudflare/cloudflared
     tag: 2024.10.0
     full_image: cloudflare/cloudflared:2024.10.0
-python_dependencies:
-  click: '>=8.1.0'
-  pyyaml: '>=6.0'
-  requests: '>=2.31.0'
 ```
+
+**Note:** Python dependencies are managed in `pyproject.toml`, not in `build/config.yaml`. The build config only contains Docker image versions for reproducible builds.
 
 ---
 
@@ -110,7 +115,7 @@ This generates the installable `.spk` file.
 
 ## Build Configuration Schema
 
-The `build/config.yaml` file follows this schema:
+The `build/config.yaml` file contains **Docker image versions only**:
 
 ```yaml
 metadata:
@@ -123,10 +128,9 @@ docker_images:
     image: string                 # Docker Hub repository
     tag: string                   # Specific version tag
     full_image: string            # Combined image:tag
-
-python_dependencies:
-  <package_name>: string          # Version specifier (e.g., ">=8.1.0")
 ```
+
+**Important:** Python dependencies are managed in `pyproject.toml`, not in this file.
 
 ---
 
@@ -169,11 +173,16 @@ cat /tmp/test.yaml
 
 ## Troubleshooting
 
-### Error: "Required packages not installed"
+### Error: "ModuleNotFoundError" or import errors
+
+Ensure you've installed the package in development mode:
 
 ```bash
-pip install requests pyyaml
+# From the project root
+pip install -e ".[dev]"
 ```
+
+This installs all required dependencies including `requests`, `pyyaml`, `click`, and development tools.
 
 ### Error: "No versions found"
 

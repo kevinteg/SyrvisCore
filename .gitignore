@@ -8,7 +8,6 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-build/
 develop-eggs/
 dist/
 downloads/
@@ -25,6 +24,14 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+
+# SPK build artifacts
+*.spk
+
+# Build directory - BUT keep build/config.yaml versioned
+build/*
+!build/config.yaml
+!build/.gitkeep
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -136,6 +143,8 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
+!.env.template
 .envrc
 .venv
 env/
