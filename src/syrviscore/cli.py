@@ -91,8 +91,8 @@ def start():
         click.echo("🚀 Starting core services...")
         manager = DockerManager()
         manager.start_core_services()
-        click.echo("✅ Core services started successfully")
-        click.echo("Run 'syrvis core status' to check service status")
+        click.echo("✅ Start initiated for core services")
+        click.echo("ℹ️  Run 'syrvis core status' to verify services are running")
     except SyrvisHomeError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
@@ -118,7 +118,8 @@ def stop():
         click.echo("🛑 Stopping core services...")
         manager = DockerManager()
         manager.stop_core_services()
-        click.echo("✅ Core services stopped successfully")
+        click.echo("✅ Stop initiated for core services")
+        click.echo("ℹ️  Run 'syrvis core status' to verify services have stopped")
     except SyrvisHomeError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
@@ -144,7 +145,8 @@ def restart():
         click.echo("🔄 Restarting core services...")
         manager = DockerManager()
         manager.restart_core_services()
-        click.echo("✅ Core services restarted successfully")
+        click.echo("🔄 Restart initiated for core services")
+        click.echo("ℹ️  Run 'syrvis core status' to verify services are running")
     except SyrvisHomeError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
