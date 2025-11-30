@@ -267,19 +267,78 @@ class TestCreateTraefikFiles:
     def test_create_traefik_files_idempotent(
         self, mock_docker_client, temp_syrvis_home_with_compose
     ):
-        """Test that creating files multiple times is safe."""
+        """Test that creating files multiple times is safe and idempotent."""
         manager = DockerManager()
 
-        # Create files twice
-        manager._create_traefik_files()
+        # Create files first time
         manager._create_traefik_files()
 
         traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
         acme_file = traefik_data / "acme.json"
+        traefik_yml = traefik_data / "traefik.yml"
+
+        # Verify initial files exist
+        assert acme_file.exists()
+        assert traefik_yml.exists()
+
+        # Get initial traefik.yml content
+        initial_content = traefik_yml.read_text()
+
+        # Create files second time (should be safe)
+        manager._create_traefik_files()
 
         # Should still exist with correct permissions
         assert acme_file.exists()
         assert oct(acme_file.stat().st_mode)[-3:] == "600"
+
+        # traefik.yml should be updated (content same in this case)
+        assert traefik_yml.exists()
+        assert oct(traefik_yml.stat().st_mode)[-3:] == "644"
+        updated_content = traefik_yml.read_text()
+        assert updated_content == initial_content
+
+    def test_acme_json_not_overwritten(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that acme.json is NOT overwritten if it already exists."""
+        manager = DockerManager()
+
+        traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+        traefik_data.mkdir(parents=True, exist_ok=True)
+
+        # Create acme.json with certificate data
+        acme_file = traefik_data / "acme.json"
+        cert_data = '{"certificates": "important data"}'
+        acme_file.write_text(cert_data)
+        acme_file.chmod(0o600)
+
+        # Call _create_traefik_files() - should NOT overwrite acme.json
+        manager._create_traefik_files()
+
+        # Verify acme.json still has original content
+        assert acme_file.read_text() == cert_data
+
+    def test_config_files_are_overwritten(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that traefik.yml and dynamic.yml ARE overwritten to allow updates."""
+        manager = DockerManager()
+
+        traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+        traefik_data.mkdir(parents=True, exist_ok=True)
+        config_dir = traefik_data / "config"
+        config_dir.mkdir(exist_ok=True)
+
+        # Create old config files with different content
+        traefik_yml = traefik_data / "traefik.yml"
+        dynamic_yml = config_dir / "dynamic.yml"
+        traefik_yml.write_text("old static config")
+        dynamic_yml.write_text("old dynamic config")
+
+        # Call _create_traefik_files() - should overwrite with new content
+        manager._create_traefik_files()
+
+        # Verify files were overwritten with new content
+        assert "old static config" not in traefik_yml.read_text()
+        assert "# Traefik Static Configuration" in traefik_yml.read_text()
+        assert "old dynamic config" not in dynamic_yml.read_text()
+        assert "# Traefik Dynamic Configuration" in dynamic_yml.read_text()
 
     def test_start_creates_traefik_files(self, mock_docker_client, temp_syrvis_home_with_compose):
         """Test that start_core_services creates Traefik files."""
@@ -294,6 +353,21 @@ class TestCreateTraefikFiles:
             assert (traefik_data / "acme.json").exists()
             assert (traefik_data / "traefik.yml").exists()
             assert (traefik_data / "config").exists()
+            assert (traefik_data / "config" / "dynamic.yml").exists()
+
+    def test_restart_creates_traefik_files(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that restart_core_services creates/updates Traefik files."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
+
+            manager = DockerManager()
+            manager.restart_core_services()
+
+            # Verify files were created
+            traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+            assert (traefik_data / "acme.json").exists()
+            assert (traefik_data / "traefik.yml").exists()
+            assert (traefik_data / "config" / "dynamic.yml").exists()
 
 
 class TestDockerErrorHandling:

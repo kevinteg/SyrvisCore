@@ -119,10 +119,12 @@ class DockerManager:
         """
         Create required Traefik files and directories with configuration.
 
-        Creates:
-        - data/traefik/acme.json (mode 0600) - Let's Encrypt certificates
-        - data/traefik/traefik.yml (mode 0644) - Static configuration
-        - data/traefik/config/dynamic.yml (mode 0644) - Dynamic configuration
+        Creates/updates:
+        - data/traefik/traefik.yml (mode 0644) - Static configuration (always updated)
+        - data/traefik/config/dynamic.yml (mode 0644) - Dynamic configuration (always updated)
+        - data/traefik/acme.json (mode 0600) - Let's Encrypt certificates (created if missing, never overwritten)
+
+        This method is idempotent and safe to call multiple times.
         """
         syrvis_home = get_syrvis_home()
         traefik_data = syrvis_home / "data" / "traefik"
@@ -130,12 +132,7 @@ class DockerManager:
         # Ensure traefik data directory exists
         traefik_data.mkdir(parents=True, exist_ok=True)
 
-        # Create acme.json for Let's Encrypt certificates (empty file)
-        acme_file = traefik_data / "acme.json"
-        acme_file.touch(exist_ok=True)
-        acme_file.chmod(0o600)
-
-        # Write traefik.yml static configuration
+        # Write traefik.yml static configuration (always update)
         traefik_yml = traefik_data / "traefik.yml"
         traefik_yml.write_text(generate_traefik_static_config())
         traefik_yml.chmod(0o644)
@@ -144,10 +141,16 @@ class DockerManager:
         config_dir = traefik_data / "config"
         config_dir.mkdir(exist_ok=True)
 
-        # Write dynamic configuration
+        # Write dynamic configuration (always update)
         dynamic_config = config_dir / "dynamic.yml"
         dynamic_config.write_text(generate_traefik_dynamic_config())
         dynamic_config.chmod(0o644)
+
+        # Create acme.json ONLY if it doesn't exist (preserves certificates)
+        acme_file = traefik_data / "acme.json"
+        if not acme_file.exists():
+            acme_file.touch()
+            acme_file.chmod(0o600)
 
     def start_core_services(self) -> None:
         """
@@ -179,10 +182,16 @@ class DockerManager:
         """
         Restart core services using docker-compose.
 
+        Ensures Traefik configuration files are valid before restarting.
+
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
             DockerError: If docker-compose fails
         """
+        # Ensure Traefik configs exist and are up-to-date before restarting
+        self._create_traefik_files()
+
+        # Restart services
         self._run_compose_command(["restart"])
 
     def get_container_status(self) -> Dict[str, Dict[str, str]]:
