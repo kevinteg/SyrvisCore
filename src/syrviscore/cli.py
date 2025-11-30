@@ -1,6 +1,8 @@
 """SyrvisCore CLI - Main entry point."""
 
 import click
+from dotenv import load_dotenv
+
 from syrviscore.__version__ import __version__
 from syrviscore.compose import generate_compose_from_config
 from syrviscore.docker_manager import DockerConnectionError, DockerManager
@@ -40,6 +42,9 @@ def hello():
 def generate_compose(config, output):
     """Generate docker-compose.yaml from build configuration."""
     try:
+        # Load environment variables from .env file
+        load_dotenv()
+        
         click.echo(f"📦 Reading build config from: {config}")
         compose = generate_compose_from_config(config_path=config, output_path=output)
 

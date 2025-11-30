@@ -1,7 +1,7 @@
 """
 Docker Compose configuration generator for SyrvisCore.
 
-This module reads build/config.yaml (for Docker images) and environment variables
+This module reads build/config.yaml (for Docker images) and .env file
 (for network settings) to generate docker-compose.yaml with Traefik, Portainer,
 and Cloudflared services.
 """
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
+from dotenv import load_dotenv
 
 
 class ComposeGenerator:
@@ -61,9 +62,9 @@ class ComposeGenerator:
         """
         required_vars = {
             "NETWORK_INTERFACE": "Network interface (e.g., ovs_eth0)",
-            "NETWORK_SUBNET": "Network subnet in CIDR notation (e.g., 192.168.8.0/24)",
-            "NETWORK_GATEWAY": "Network gateway IP (e.g., 192.168.8.1)",
-            "TRAEFIK_IP": "Traefik dedicated IP address (e.g., 192.168.8.4)",
+            "NETWORK_SUBNET": "Network subnet in CIDR notation (e.g., 192.168.1.0/24)",
+            "NETWORK_GATEWAY": "Network gateway IP (e.g., 192.168.1.1)",
+            "TRAEFIK_IP": "Traefik dedicated IP address (e.g., 192.168.1.100)",
         }
 
         missing = []
