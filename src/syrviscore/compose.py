@@ -47,7 +47,18 @@ class ComposeGenerator:
         return self.build_config
 
     def _generate_traefik_service(self) -> Dict[str, Any]:
-        """Generate Traefik service configuration."""
+        """
+        Generate Traefik service configuration.
+
+        Traefik uses ports 8080/8443 to avoid conflict with Synology's nginx
+        which binds to ports 80/443 for DSM. Use DSM Application Portal to
+        reverse proxy external 80/443 traffic to Traefik's 8080/8443.
+
+        This approach:
+        - Avoids fighting with Synology system configuration
+        - Survives DSM updates
+        - Uses built-in Application Portal feature
+        """
         image = self.build_config["docker_images"]["traefik"]["full_image"]
 
         return {
@@ -56,7 +67,7 @@ class ComposeGenerator:
             "restart": "unless-stopped",
             "security_opt": ["no-new-privileges:true"],
             "networks": ["proxy"],
-            "ports": ["80:80", "443:443"],
+            "ports": ["8080:80", "8443:443"],  # Use 8080/8443 to avoid Synology nginx conflict
             "environment": ["TZ=UTC"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",

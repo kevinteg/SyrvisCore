@@ -139,8 +139,8 @@ class TestComposeGenerator:
         assert service["image"] == "library/traefik:v3.0.0"
         assert service["container_name"] == "traefik"
         assert service["restart"] == "unless-stopped"
-        assert "80:80" in service["ports"]
-        assert "443:443" in service["ports"]
+        assert "8080:80" in service["ports"]
+        assert "8443:443" in service["ports"]
         assert "proxy" in service["networks"]
         assert len(service["volumes"]) == 5
         assert "traefik.enable=true" in service["labels"]
