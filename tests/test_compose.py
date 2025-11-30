@@ -349,7 +349,7 @@ class TestNetworkValidation:
         monkeypatch.delenv("NETWORK_SUBNET", raising=False)
         monkeypatch.delenv("NETWORK_GATEWAY", raising=False)
         monkeypatch.delenv("TRAEFIK_IP", raising=False)
-        
+
         generator = ComposeGenerator(str(temp_config_file))
         generator.load_config()
 

@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 from docker.errors import DockerException
 
-from syrviscore.docker_manager import DockerConnectionError, DockerManager
+from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
 from syrviscore.paths import set_syrvis_home
 
 
@@ -223,3 +223,112 @@ class TestFormatUptime:
         """Test formatting days."""
         assert DockerManager._format_uptime(172800) == "2 days"
         assert DockerManager._format_uptime(86400) == "1 day"
+
+
+class TestCreateTraefikFiles:
+    """Test creating required Traefik files."""
+
+    def test_create_traefik_files(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that required Traefik files are created."""
+        manager = DockerManager()
+        manager._create_traefik_files()
+
+        traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+
+        # Check acme.json exists with correct permissions
+        acme_file = traefik_data / "acme.json"
+        assert acme_file.exists()
+        assert acme_file.is_file()
+        assert oct(acme_file.stat().st_mode)[-3:] == "600"
+
+        # Check traefik.yml exists with correct permissions
+        config_file = traefik_data / "traefik.yml"
+        assert config_file.exists()
+        assert config_file.is_file()
+        assert oct(config_file.stat().st_mode)[-3:] == "644"
+
+        # Check config directory exists
+        config_dir = traefik_data / "config"
+        assert config_dir.exists()
+        assert config_dir.is_dir()
+
+    def test_create_traefik_files_idempotent(
+        self, mock_docker_client, temp_syrvis_home_with_compose
+    ):
+        """Test that creating files multiple times is safe."""
+        manager = DockerManager()
+
+        # Create files twice
+        manager._create_traefik_files()
+        manager._create_traefik_files()
+
+        traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+        acme_file = traefik_data / "acme.json"
+
+        # Should still exist with correct permissions
+        assert acme_file.exists()
+        assert oct(acme_file.stat().st_mode)[-3:] == "600"
+
+    def test_start_creates_traefik_files(self, mock_docker_client, temp_syrvis_home_with_compose):
+        """Test that start_core_services creates Traefik files."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=0, stderr="", stdout="")
+
+            manager = DockerManager()
+            manager.start_core_services()
+
+            # Verify files were created
+            traefik_data = temp_syrvis_home_with_compose / "data" / "traefik"
+            assert (traefik_data / "acme.json").exists()
+            assert (traefik_data / "traefik.yml").exists()
+            assert (traefik_data / "config").exists()
+
+
+class TestDockerErrorHandling:
+    """Test Docker error handling and output capture."""
+
+    def test_run_compose_command_captures_stderr(
+        self, mock_docker_client, temp_syrvis_home_with_compose
+    ):
+        """Test that docker-compose stderr is captured in error."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(
+                returncode=1, stderr="Error: network not found\ndetailed error message", stdout=""
+            )
+
+            manager = DockerManager()
+            with pytest.raises(DockerError) as exc_info:
+                manager.start_core_services()
+
+            # Error should contain the actual docker-compose error
+            assert "network not found" in str(exc_info.value)
+            assert "detailed error message" in str(exc_info.value)
+
+    def test_run_compose_command_captures_stdout_if_no_stderr(
+        self, mock_docker_client, temp_syrvis_home_with_compose
+    ):
+        """Test that stdout is used if stderr is empty."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=1, stderr="", stdout="Error in stdout message")
+
+            manager = DockerManager()
+            with pytest.raises(DockerError) as exc_info:
+                manager.stop_core_services()
+
+            # Error should contain stdout if stderr empty
+            assert "Error in stdout message" in str(exc_info.value)
+
+    def test_run_compose_command_includes_command_in_error(
+        self, mock_docker_client, temp_syrvis_home_with_compose
+    ):
+        """Test that error message includes the command that failed."""
+        with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
+            mock_run.return_value = Mock(returncode=1, stderr="Some error", stdout="")
+
+            manager = DockerManager()
+            with pytest.raises(DockerError) as exc_info:
+                manager.restart_core_services()
+
+            # Error should mention which command failed
+            assert "restart" in str(exc_info.value)
+            assert "docker-compose" in str(exc_info.value)

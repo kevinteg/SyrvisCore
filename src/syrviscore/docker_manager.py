@@ -24,6 +24,12 @@ class DockerConnectionError(Exception):
     pass
 
 
+class DockerError(Exception):
+    """Raised when Docker operations fail."""
+
+    pass
+
+
 class DockerManager:
     """Manage Docker containers for SyrvisCore core services."""
 
@@ -81,7 +87,7 @@ class DockerManager:
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
-            subprocess.CalledProcessError: If command fails
+            DockerError: If command fails
         """
         validate_docker_compose_exists()
         syrvis_home = get_syrvis_home()
@@ -94,18 +100,60 @@ class DockerManager:
             self.PROJECT_NAME,
         ] + command
 
-        return subprocess.run(
-            full_command, cwd=str(syrvis_home), capture_output=True, text=True, check=True
+        result = subprocess.run(
+            full_command, cwd=str(syrvis_home), capture_output=True, text=True, check=False
         )
+
+        if result.returncode != 0:
+            # Show actual docker-compose error output
+            error_msg = result.stderr.strip() if result.stderr else result.stdout.strip()
+            raise DockerError(f"Failed to run docker-compose {' '.join(command)}:\n{error_msg}")
+
+        return result
+
+    def _create_traefik_files(self) -> None:
+        """
+        Create required Traefik files and directories.
+
+        Creates:
+        - data/traefik/acme.json (mode 0600) - Let's Encrypt certificates
+        - data/traefik/traefik.yml (mode 0644) - Static configuration
+        - data/traefik/config/ - Dynamic configuration directory
+        """
+        syrvis_home = get_syrvis_home()
+        traefik_data = syrvis_home / "data" / "traefik"
+
+        # Ensure traefik data directory exists
+        traefik_data.mkdir(parents=True, exist_ok=True)
+
+        # Create acme.json for Let's Encrypt certificates
+        acme_file = traefik_data / "acme.json"
+        acme_file.touch(exist_ok=True)
+        acme_file.chmod(0o600)
+
+        # Create traefik.yml for static configuration
+        config_file = traefik_data / "traefik.yml"
+        config_file.touch(exist_ok=True)
+        config_file.chmod(0o644)
+
+        # Create config directory for dynamic configuration
+        config_dir = traefik_data / "config"
+        config_dir.mkdir(exist_ok=True)
 
     def start_core_services(self) -> None:
         """
         Start core services using docker-compose.
 
+        Creates required Traefik files before starting services.
+
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
-            subprocess.CalledProcessError: If docker-compose fails
+            DockerError: If docker-compose fails
         """
+        # Create required Traefik files
+        self._create_traefik_files()
+
+        # Start services
         self._run_compose_command(["up", "-d"])
 
     def stop_core_services(self) -> None:
@@ -114,7 +162,7 @@ class DockerManager:
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
-            subprocess.CalledProcessError: If docker-compose fails
+            DockerError: If docker-compose fails
         """
         self._run_compose_command(["stop"])
 
@@ -124,7 +172,7 @@ class DockerManager:
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
-            subprocess.CalledProcessError: If docker-compose fails
+            DockerError: If docker-compose fails
         """
         self._run_compose_command(["restart"])
 

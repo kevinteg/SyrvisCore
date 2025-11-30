@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from syrviscore.__version__ import __version__
 from syrviscore.compose import generate_compose_from_config
-from syrviscore.docker_manager import DockerConnectionError, DockerManager
+from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
 from syrviscore.paths import SyrvisHomeError
 
 
@@ -44,7 +44,7 @@ def generate_compose(config, output):
     try:
         # Load environment variables from .env file
         load_dotenv()
-        
+
         click.echo(f"📦 Reading build config from: {config}")
         compose = generate_compose_from_config(config_path=config, output_path=output)
 
@@ -98,6 +98,10 @@ def start():
     except DockerConnectionError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
+    except DockerError as e:
+        # DockerError already contains the full error message from docker-compose
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
     except Exception as e:
         click.echo(f"❌ Failed to start services: {e}", err=True)
         raise click.Abort()
@@ -120,6 +124,10 @@ def stop():
     except DockerConnectionError as e:
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
+    except DockerError as e:
+        # DockerError already contains the full error message from docker-compose
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
     except Exception as e:
         click.echo(f"❌ Failed to stop services: {e}", err=True)
         raise click.Abort()
@@ -140,6 +148,10 @@ def restart():
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
     except DockerConnectionError as e:
+        click.echo(f"❌ {e}", err=True)
+        raise click.Abort()
+    except DockerError as e:
+        # DockerError already contains the full error message from docker-compose
         click.echo(f"❌ {e}", err=True)
         raise click.Abort()
     except Exception as e:
