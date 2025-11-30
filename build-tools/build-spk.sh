@@ -210,11 +210,36 @@ fi
 log_info "Build directory contents:"
 ls -lh "$BUILD_DIR" | tail -n +2 | awk '{print "  " $9 " (" $5 ")"}'
 
+# Reset ownership and permissions to avoid error 313
+# "failed to revise file attributes"
+log_info "Resetting ownership and permissions"
+cd "$BUILD_DIR"
+
+# Reset ownership to current user (avoids permission issues)
+find . -exec chown $(id -u):$(id -g) {} \; 2>/dev/null || true
+
+# Set standard permissions
+find . -type d -exec chmod 755 {} \;  # Directories: rwxr-xr-x
+find . -type f -exec chmod 644 {} \;  # Files: rw-r--r--
+
+# Scripts must be executable
+if [ -f scripts ]; then
+    # Extract scripts archive temporarily to fix permissions
+    mkdir -p scripts_temp
+    cd scripts_temp
+    tar -xf ../scripts
+    find scripts -type f -exec chmod 755 {} \;  # Make all scripts executable
+    tar -cf ../scripts scripts/
+    cd ..
+    rm -rf scripts_temp
+fi
+
+log_success "Ownership and permissions set correctly"
+
 # Create final SPK package
 # CRITICAL: Outer SPK archive MUST be uncompressed tar (no -z flag)
 # Using gzip causes Synology error 263 "invalid file format"
 log_info "Creating final SPK package (uncompressed tar)"
-cd "$BUILD_DIR"
 
 # SPK is an UNCOMPRESSED tar archive containing:
 # - INFO
