@@ -1,0 +1,197 @@
+# Cline Rules for SyrvisCore Project
+
+## Project Overview
+SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packages Traefik (reverse proxy), Portainer (container management), and Cloudflared (tunnel) into a single SPK package. The project uses modern Python packaging with a CLI built on Click.
+
+## Core Principles
+
+### Python Packaging
+- Use `pyproject.toml` for ALL dependency management (no separate requirements.txt)
+- Package dependencies go in `[project.dependencies]`
+- Development/testing dependencies go in `[project.optional-dependencies.dev]`
+- Never manually pip install packages - they should be in pyproject.toml
+- Use editable installs: `pip install -e .` or `pip install -e ".[dev]"`
+- Python package name: `syrviscore` (lowercase, no hyphen)
+- CLI command name: `syrvis`
+
+### File Naming Conventions
+- YAML files: Use `.yaml` extension (not `.yml`) except for GitHub Actions
+- GitHub Actions: Use `.yml` extension (follows GitHub convention)
+- Python files: Use snake_case
+- Prefer descriptive names over abbreviations
+
+### Code Style
+- Use Black for formatting (line length: 100)
+- Use Ruff for linting
+- Type hints encouraged but not required for MVP
+- Docstrings for public functions using Google style
+- CLI help text should be clear and user-friendly
+
+### Build System
+- `build/config.yaml` contains ONLY Docker image versions (Traefik, Portainer, Cloudflared)
+- Python dependencies managed via pyproject.toml, NOT build/config.yaml
+- Build tools in `build-tools/` directory
+- Build tools should be standalone Python scripts with shebang
+- Generated artifacts go in `dist/` (SPK files) or `build/` (intermediate files)
+
+### Version Management
+- Follow semantic versioning (MAJOR.MINOR.PATCH)
+- Development versions use `-dev` suffix (e.g., "0.1.0-dev")
+- Version defined in `src/syrviscore/__version__.py`
+- Keep version DRY - single source of truth
+
+### Project Structure
+```
+SyrvisCore/
+├── .github/workflows/       # CI/CD (use .yml extension)
+├── .vscode/                 # VS Code config
+├── src/syrviscore/          # Main package
+│   ├── __init__.py
+│   ├── __version__.py       # Version info
+│   └── cli.py               # CLI entry point
+├── tests/                   # Pytest tests
+├── build-tools/             # Build utilities
+│   └── select-docker-versions
+├── build/                   # Generated build configs
+│   └── config.yaml          # Docker versions ONLY
+├── docs/                    # Documentation
+├── pyproject.toml           # Package config & dependencies
+├── tox.ini                  # Multi-env testing (optional)
+├── README.md
+└── .gitignore
+```
+
+### Git Practices
+- Keep commits atomic and well-described
+- Don't commit secrets (.env files)
+- Don't commit venv/ or __pycache__/
+- Don't commit build artifacts (*.spk, dist/)
+- DO commit build/config.yaml (it's versioned Docker tags)
+
+### Testing
+- Use pytest for testing
+- Tests go in `tests/` directory
+- Mirror source structure in tests (tests/test_cli.py for src/syrviscore/cli.py)
+- Run tests with `pytest` or `tox`
+
+### Documentation
+- User-facing docs in `docs/` directory
+- API docs via docstrings
+- README.md should have quick start, not comprehensive docs
+- Keep design doc (design-doc.md) updated with major decisions
+
+### Synology-Specific
+- Target DSM 7.0+
+- Package filename: `syrviscore-{version}.spk`
+- Installation path: `/volume1/docker/syrviscore/`
+- User service account: `syrvis-bot`
+- Requires Docker package on Synology
+
+### Security
+- Secrets go in `/volume1/secrets/` on Synology
+- Use `.env` files for local secrets (never commit)
+- Provide `.env.template` as reference
+- SSH keys for GitHub deployment
+
+### External Dependencies
+- Traefik - reverse proxy with SSL termination
+- Portainer - container management UI
+- Cloudflared - Cloudflare Tunnel (optional)
+- All Docker images use specific version tags (no :latest)
+
+## Common Tasks
+
+### Adding a CLI Command
+1. Add function to `src/syrviscore/cli.py` with `@cli.command()` decorator
+2. Use Click decorators for options/arguments
+3. Add docstring for help text
+4. Test with `syrvis <command>`
+
+### Adding a Dependency
+1. Add to `pyproject.toml` under `[project.dependencies]`
+2. Reinstall: `pip install -e .`
+3. Update if needed for specific version constraint
+
+### Creating a New Build Tool
+1. Create executable Python script in `build-tools/`
+2. Add shebang: `#!/usr/bin/env python3`
+3. Make executable: `chmod +x`
+4. Document in `build-tools/README.md`
+5. Use argparse for CLI arguments
+
+### Running Tests
+```bash
+pytest                    # Run all tests
+pytest tests/test_cli.py  # Run specific test
+pytest -v                 # Verbose output
+tox                       # Test all Python versions
+```
+
+## What to Avoid
+
+- ❌ Don't use `requirements.txt` - use `pyproject.toml`
+- ❌ Don't put Python packages in `build/config.yaml`
+- ❌ Don't use `setup.py` - use `pyproject.toml`
+- ❌ Don't hardcode version strings (use __version__.py)
+- ❌ Don't use `:latest` tags for Docker images
+- ❌ Don't commit sensitive data (API keys, passwords, etc.)
+- ❌ Don't use `sudo pip install` - use venv
+- ❌ Don't mix tabs and spaces (use spaces)
+
+## Project-Specific Reminders
+
+### This is NOT a web service
+- No Flask/FastAPI/Django
+- CLI-first design
+- Optional web UI is future enhancement
+
+### This is NOT Kubernetes
+- Single-node deployment
+- Docker Compose for orchestration
+- Simple is better than complex
+
+### Build System Philosophy
+- Reproducible builds via version pinning
+- Clear separation: build-time vs runtime dependencies
+- Docker versions frozen in build/config.yaml
+- Python dependencies frozen in pyproject.toml
+
+### Community-First Design
+- No hardcoded personal info
+- Configuration-driven from day one
+- Clear documentation for newcomers
+- MIT License - permissive and friendly
+
+## AI Assistant Guidelines
+
+When helping with this project:
+1. Always check pyproject.toml for existing dependencies before suggesting pip install
+2. Prefer adding new dependencies to pyproject.toml over manual installation
+3. Follow the file structure and naming conventions above
+4. Keep code simple and readable (target audience: technical home users, not enterprise devs)
+5. When suggesting commands, assume venv is already activated
+6. Reference the design doc (docs/design-doc.md) for architecture decisions
+7. Suggest tests for new functionality
+8. Keep security in mind (secrets handling, file permissions)
+
+## Current Phase: MVP (Phase 1)
+
+Focus areas:
+- Build system (select-docker-versions, build-spk)
+- Basic CLI commands (status, logs, version, config)
+- SPK package structure
+- Installation/upgrade scripts
+
+NOT in scope yet:
+- Web UI
+- Auto-updates
+- Stack catalog
+- Extensive monitoring
+
+## Resources
+
+- Design Doc: `docs/design-doc.md`
+- Docker Hub API: https://hub.docker.com/v2/
+- Click docs: https://click.palletsprojects.com/
+- Python packaging: https://packaging.python.org/
+- Synology DSM: https://www.synology.com/en-us/dsm
