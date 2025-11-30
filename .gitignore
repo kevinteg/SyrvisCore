@@ -27,6 +27,7 @@ MANIFEST
 
 # SPK build artifacts
 *.spk
+build-spk-tmp/
 
 # Build directory - BUT keep build/config.yaml versioned
 build/*

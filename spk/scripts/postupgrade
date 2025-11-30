@@ -1,0 +1,235 @@
+#!/bin/bash
+# postupgrade - Post-upgrade script for SyrvisCore
+# Reinstalls CLI, updates manifest, and restarts services
+
+set -e
+
+PACKAGE_NAME="syrviscore"
+LOG_FILE="/tmp/${PACKAGE_NAME}_upgrade.log"
+SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== SyrvisCore Post-Upgrade ====="
+
+# Get installation directory from preupgrade
+INSTALL_DIR=""
+if [ -f /tmp/syrviscore_install_dir ]; then
+    INSTALL_DIR=$(cat /tmp/syrviscore_install_dir)
+    rm -f /tmp/syrviscore_install_dir
+fi
+
+if [ -z "$INSTALL_DIR" ] || [ ! -d "$INSTALL_DIR" ]; then
+    log "ERROR: Installation directory not found"
+    exit 1
+fi
+
+log "Upgrading installation at: $INSTALL_DIR"
+
+# Get previous version
+PREVIOUS_VERSION="unknown"
+if [ -f /tmp/syrviscore_previous_version ]; then
+    PREVIOUS_VERSION=$(cat /tmp/syrviscore_previous_version)
+    rm -f /tmp/syrviscore_previous_version
+fi
+
+# Get new version
+NEW_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.1.0-dev")
+
+log "Upgrade: $PREVIOUS_VERSION -> $NEW_VERSION"
+
+# Step 1: Ensure docker group and permissions (same as postinst)
+log "Step 1: Ensuring Docker configuration"
+if ! synogroup --get docker > /dev/null 2>&1; then
+    synogroup --add docker
+    log "Created docker group"
+fi
+
+synogroup --member docker syrvis-bot 2>/dev/null || true
+synogroup --member administrators syrvis-bot 2>/dev/null || true
+log "Ensured syrvis-bot group memberships"
+
+if [ -S /var/run/docker.sock ]; then
+    chown root:docker /var/run/docker.sock
+    chmod 660 /var/run/docker.sock
+    log "Reset Docker socket permissions"
+fi
+
+# Step 2: Update startup script if needed
+log "Step 2: Updating startup script"
+STARTUP_SCRIPT="/usr/local/etc/rc.d/S99syrviscore-docker.sh"
+if [ ! -f "$STARTUP_SCRIPT" ]; then
+    log "Recreating startup script"
+    # Same script as in postinst
+    cat > "$STARTUP_SCRIPT" << 'STARTUP_EOF'
+#!/bin/bash
+# SyrvisCore Docker Group & Socket Permissions Startup Script
+# This script ensures docker group exists and socket permissions are correct after reboot
+
+LOG_FILE="/tmp/syrviscore_startup.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+case "$1" in
+    start)
+        log "SyrvisCore startup: Setting up Docker access"
+        
+        # Recreate docker group if needed
+        if ! synogroup --get docker > /dev/null 2>&1; then
+            log "Creating docker group"
+            synogroup --add docker
+        fi
+        
+        # Re-add syrvis-bot to groups (in case they were reset)
+        if id syrvis-bot > /dev/null 2>&1; then
+            synogroup --member docker syrvis-bot 2>/dev/null || true
+            synogroup --member administrators syrvis-bot 2>/dev/null || true
+            log "Re-added syrvis-bot to docker and administrators groups"
+        fi
+        
+        # Reset Docker socket permissions
+        if [ -S /var/run/docker.sock ]; then
+            chown root:docker /var/run/docker.sock
+            chmod 660 /var/run/docker.sock
+            log "Docker socket permissions reset"
+        fi
+        
+        log "SyrvisCore startup complete"
+        ;;
+    stop)
+        # Nothing to do on stop
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0
+STARTUP_EOF
+    chmod +x "$STARTUP_SCRIPT"
+    log "Startup script created"
+fi
+
+# Step 3: Reinstall Python CLI with new version
+log "Step 3: Upgrading Python CLI"
+
+# Remove old CLI installation
+rm -rf "$INSTALL_DIR/cli/venv"
+log "Removed old CLI virtual environment"
+
+# Create new virtual environment
+cd "$INSTALL_DIR/cli"
+python3 -m venv venv
+source venv/bin/activate
+
+# Install new version from wheel
+log "Installing new CLI version from wheel"
+pip install --upgrade pip > /dev/null 2>&1
+
+WHEEL_FILE="$SYNOPKG_PKGDEST/package"/syrviscore-*.whl
+if [ ! -f $WHEEL_FILE ]; then
+    log "ERROR: Wheel file not found in package"
+    exit 1
+fi
+
+pip install --no-cache-dir $WHEEL_FILE > /dev/null 2>&1
+
+# Verify installation
+if ! command -v syrvis > /dev/null 2>&1; then
+    log "ERROR: CLI installation failed"
+    exit 1
+fi
+
+INSTALLED_VERSION=$(syrvis --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+.*' || echo "unknown")
+log "Installed CLI version: $INSTALLED_VERSION"
+
+deactivate
+
+# Update symlink (should already exist, but ensure it's correct)
+ln -sf "$INSTALL_DIR/cli/venv/bin/syrvis" /usr/local/bin/syrvis
+log "Updated CLI symlink"
+
+# Copy updated template files
+log "Updating configuration templates"
+cp "$SYNOPKG_PKGDEST/package/.env.template" "$INSTALL_DIR/" 2>/dev/null || true
+cp -r "$SYNOPKG_PKGDEST/package/build" "$INSTALL_DIR/" 2>/dev/null || true
+
+# Step 4: Update manifest
+log "Step 4: Updating installation manifest"
+
+MANIFEST_FILE="$INSTALL_DIR/.syrviscore-manifest.json"
+cat > "$MANIFEST_FILE" << MANIFEST_EOF
+{
+    "version": "$NEW_VERSION",
+    "previous_version": "$PREVIOUS_VERSION",
+    "install_date": "$(grep 'install_date' "$INSTALL_DIR/versions/backup-"*/".syrviscore-manifest.json" 2>/dev/null | head -1 | cut -d'"' -f4 || date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "upgrade_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "install_dir": "$INSTALL_DIR",
+    "install_volume": "$(dirname $(dirname $INSTALL_DIR))",
+    "python_version": "$(python3 --version 2>&1 | awk '{print $2}')",
+    "docker_version": "$(docker --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1 || echo 'unknown')"
+}
+MANIFEST_EOF
+
+log "Updated manifest: $PREVIOUS_VERSION -> $NEW_VERSION"
+
+# Step 5: Check if docker-compose.yaml needs regeneration
+log "Step 5: Checking docker-compose.yaml"
+if [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
+    log "Existing docker-compose.yaml found"
+    log "You may need to regenerate it with: syrvis compose generate"
+else
+    log "No docker-compose.yaml found, user will need to generate it"
+fi
+
+# Step 6: Create upgrade notice
+UPGRADE_NOTICE="$INSTALL_DIR/versions/UPGRADE-${NEW_VERSION}.txt"
+cat > "$UPGRADE_NOTICE" << NOTICE_EOF
+SyrvisCore Upgraded: $PREVIOUS_VERSION -> $NEW_VERSION
+Date: $(date)
+
+Your data and configuration have been preserved.
+
+What Changed:
+- Python CLI upgraded to version $NEW_VERSION
+- All data preserved in: $INSTALL_DIR/data/
+- Configuration preserved: $INSTALL_DIR/.env
+
+Configuration Backup:
+Your previous configuration was backed up to:
+$INSTALL_DIR/versions/backup-*/
+
+Next Steps:
+1. Review any changes in the new version
+2. If needed, regenerate docker-compose.yaml:
+   syrvis compose generate
+
+3. Start services:
+   syrvis start
+
+4. Verify status:
+   syrvis status
+
+For changelog and release notes:
+https://github.com/kevinteg/SyrvisCore/releases
+
+For support:
+https://github.com/kevinteg/SyrvisCore/issues
+NOTICE_EOF
+
+log "Created upgrade notice: $UPGRADE_NOTICE"
+
+log "===== SyrvisCore Upgrade Complete ====="
+log "Upgraded from $PREVIOUS_VERSION to $NEW_VERSION"
+log "Next steps:"
+log "  1. Review upgrade notice: $UPGRADE_NOTICE"
+log "  2. Regenerate docker-compose.yaml if needed: syrvis compose generate"
+log "  3. Start services: syrvis start"
+
+exit 0

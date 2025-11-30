@@ -1,0 +1,158 @@
+[
+    {
+        "step_title": "Basic Configuration",
+        "items": [
+            {
+                "type": "combobox",
+                "desc": "Select the volume where SyrvisCore will be installed",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_volume",
+                        "desc": "Installation Volume",
+                        "defaultValue": "/volume1",
+                        "displayField": "volume",
+                        "valueField": "volume",
+                        "editable": false,
+                        "mode": "remote",
+                        "api_store": "SYNO.Core.Storage.Volume",
+                        "api_method": "list",
+                        "api_version": 1
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "step_title": "Network Configuration",
+        "items": [
+            {
+                "type": "textfield",
+                "desc": "Configure the macvlan network for Traefik. Use ovs_eth0 for Synology with Open vSwitch.",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_network_interface",
+                        "desc": "Network Interface",
+                        "defaultValue": "ovs_eth0",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^[a-zA-Z0-9_]+$/",
+                                "errorText": "Interface name must contain only letters, numbers, and underscores"
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "textfield",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_network_subnet",
+                        "desc": "Network Subnet (CIDR notation)",
+                        "defaultValue": "192.168.8.0/24",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$/",
+                                "errorText": "Enter a valid subnet in CIDR format (e.g., 192.168.8.0/24)"
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "textfield",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_gateway_ip",
+                        "desc": "Gateway IP Address",
+                        "defaultValue": "192.168.8.1",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/",
+                                "errorText": "Enter a valid IP address (e.g., 192.168.8.1)"
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "textfield",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_traefik_ip",
+                        "desc": "Traefik IP Address (must be in subnet)",
+                        "defaultValue": "192.168.8.4",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/",
+                                "errorText": "Enter a valid IP address (e.g., 192.168.8.4)"
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "step_title": "Domain and SSL Configuration",
+        "items": [
+            {
+                "type": "textfield",
+                "desc": "Configure your domain and email for Let's Encrypt SSL certificates",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_domain",
+                        "desc": "Domain Name",
+                        "defaultValue": "",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^([a-z0-9]+(-[a-z0-9]+)*\\.)+[a-z]{2,}$/i",
+                                "errorText": "Enter a valid domain name (e.g., example.com)"
+                            }
+                        }
+                    }
+                ]
+            },
+            {
+                "type": "textfield",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_acme_email",
+                        "desc": "Email for Let's Encrypt",
+                        "defaultValue": "",
+                        "validator": {
+                            "allowBlank": false,
+                            "regex": {
+                                "expr": "/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$/",
+                                "errorText": "Enter a valid email address"
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "step_title": "Optional: Cloudflare Tunnel",
+        "items": [
+            {
+                "type": "textfield",
+                "desc": "If you want to use Cloudflare Tunnel, enter your tunnel token. Leave blank to skip.",
+                "subitems": [
+                    {
+                        "key": "pkgwizard_cloudflare_token",
+                        "desc": "Cloudflare Tunnel Token (optional)",
+                        "defaultValue": "",
+                        "validator": {
+                            "allowBlank": true
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+]

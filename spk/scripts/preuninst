@@ -1,0 +1,61 @@
+#!/bin/bash
+# preuninst - Pre-uninstallation script for SyrvisCore
+# Stops services and prompts user about data preservation
+
+set -e
+
+PACKAGE_NAME="syrviscore"
+LOG_FILE="/tmp/${PACKAGE_NAME}_uninstall.log"
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== SyrvisCore Pre-Uninstallation ====="
+
+# Find installation directory from manifest
+INSTALL_DIR=""
+for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+    if [ -f "$VOLUME/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="$VOLUME/docker/${PACKAGE_NAME}"
+        break
+    fi
+done
+
+if [ -z "$INSTALL_DIR" ]; then
+    log "WARNING: Could not find installation directory"
+    log "Will proceed with cleanup of system components"
+else
+    log "Found installation at: $INSTALL_DIR"
+    
+    # Try to stop all running containers gracefully
+    log "Attempting to stop SyrvisCore services"
+    
+    # Check if docker-compose.yaml exists
+    if [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
+        cd "$INSTALL_DIR"
+        
+        # Try using the syrvis CLI if available
+        if command -v syrvis > /dev/null 2>&1; then
+            log "Stopping services via syrvis CLI"
+            syrvis stop 2>&1 | tee -a "$LOG_FILE" || true
+        else
+            # Fall back to direct docker-compose
+            log "Stopping services via docker-compose"
+            if command -v docker-compose > /dev/null 2>&1; then
+                docker-compose down 2>&1 | tee -a "$LOG_FILE" || true
+            elif command -v docker > /dev/null 2>&1; then
+                docker compose down 2>&1 | tee -a "$LOG_FILE" || true
+            fi
+        fi
+    else
+        log "No docker-compose.yaml found, skipping service shutdown"
+    fi
+    
+    # Store installation directory for postuninst
+    echo "$INSTALL_DIR" > /tmp/syrviscore_install_dir
+fi
+
+log "Pre-uninstallation complete"
+exit 0

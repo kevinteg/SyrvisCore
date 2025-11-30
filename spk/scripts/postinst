@@ -1,0 +1,390 @@
+#!/bin/bash
+# postinst - Post-installation script for SyrvisCore
+# Performs main installation tasks: user setup, directories, CLI installation, configuration
+
+set -e
+
+PACKAGE_NAME="syrviscore"
+LOG_FILE="/tmp/${PACKAGE_NAME}_install.log"
+SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== SyrvisCore Post-Installation ====="
+
+# Get configuration from wizard
+INSTALL_VOLUME="${pkgwizard_volume:-/volume1}"
+INSTALL_DIR="${INSTALL_VOLUME}/docker/${PACKAGE_NAME}"
+NETWORK_INTERFACE="${pkgwizard_network_interface:-ovs_eth0}"
+NETWORK_SUBNET="${pkgwizard_network_subnet:-192.168.8.0/24}"
+GATEWAY_IP="${pkgwizard_gateway_ip:-192.168.8.1}"
+TRAEFIK_IP="${pkgwizard_traefik_ip}"
+DOMAIN="${pkgwizard_domain}"
+ACME_EMAIL="${pkgwizard_acme_email}"
+CLOUDFLARE_TOKEN="${pkgwizard_cloudflare_token:-}"
+
+log "Configuration:"
+log "  Install Directory: $INSTALL_DIR"
+log "  Network Interface: $NETWORK_INTERFACE"
+log "  Network Subnet: $NETWORK_SUBNET"
+log "  Gateway IP: $GATEWAY_IP"
+log "  Traefik IP: $TRAEFIK_IP"
+log "  Domain: $DOMAIN"
+log "  ACME Email: $ACME_EMAIL"
+
+# Step 1: Create docker group if it doesn't exist
+log "Step 1: Setting up docker group"
+if ! synogroup --get docker > /dev/null 2>&1; then
+    log "Creating docker group"
+    synogroup --add docker
+else
+    log "Docker group already exists"
+fi
+
+# Step 2: Add syrvis-bot to docker and administrators groups
+# Note: syrvis-bot user is automatically created by conf/privilege
+log "Step 2: Configuring syrvis-bot user"
+
+# Add to docker group
+if synogroup --member docker syrvis-bot 2>&1 | grep -q "not a member"; then
+    log "Adding syrvis-bot to docker group"
+    synogroup --member docker syrvis-bot
+else
+    log "syrvis-bot already in docker group"
+fi
+
+# Add to administrators group (needed for Docker access)
+if synogroup --member administrators syrvis-bot 2>&1 | grep -q "not a member"; then
+    log "Adding syrvis-bot to administrators group"
+    synogroup --member administrators syrvis-bot
+else
+    log "syrvis-bot already in administrators group"
+fi
+
+# Step 3: Set Docker socket permissions
+log "Step 3: Configuring Docker socket permissions"
+if [ -S /var/run/docker.sock ]; then
+    chown root:docker /var/run/docker.sock
+    chmod 660 /var/run/docker.sock
+    log "Docker socket permissions set to root:docker 660"
+else
+    log "WARNING: Docker socket not found at /var/run/docker.sock"
+fi
+
+# Step 4: Create startup script (survives reboots)
+log "Step 4: Creating startup script"
+STARTUP_SCRIPT="/usr/local/etc/rc.d/S99syrviscore-docker.sh"
+
+cat > "$STARTUP_SCRIPT" << 'STARTUP_EOF'
+#!/bin/bash
+# SyrvisCore Docker Group & Socket Permissions Startup Script
+# This script ensures docker group exists and socket permissions are correct after reboot
+
+LOG_FILE="/tmp/syrviscore_startup.log"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"
+}
+
+case "$1" in
+    start)
+        log "SyrvisCore startup: Setting up Docker access"
+        
+        # Recreate docker group if needed
+        if ! synogroup --get docker > /dev/null 2>&1; then
+            log "Creating docker group"
+            synogroup --add docker
+        fi
+        
+        # Re-add syrvis-bot to groups (in case they were reset)
+        if id syrvis-bot > /dev/null 2>&1; then
+            synogroup --member docker syrvis-bot 2>/dev/null || true
+            synogroup --member administrators syrvis-bot 2>/dev/null || true
+            log "Re-added syrvis-bot to docker and administrators groups"
+        fi
+        
+        # Reset Docker socket permissions
+        if [ -S /var/run/docker.sock ]; then
+            chown root:docker /var/run/docker.sock
+            chmod 660 /var/run/docker.sock
+            log "Docker socket permissions reset"
+        fi
+        
+        log "SyrvisCore startup complete"
+        ;;
+    stop)
+        # Nothing to do on stop
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+        ;;
+esac
+
+exit 0
+STARTUP_EOF
+
+chmod +x "$STARTUP_SCRIPT"
+log "Startup script created at $STARTUP_SCRIPT"
+
+# Step 5: Create directory structure
+log "Step 5: Creating directory structure"
+mkdir -p "$INSTALL_DIR/data/traefik/config"
+mkdir -p "$INSTALL_DIR/data/portainer"
+mkdir -p "$INSTALL_DIR/data/cloudflared"
+mkdir -p "$INSTALL_DIR/cli"
+mkdir -p "$INSTALL_DIR/versions"
+
+# Create acme.json with strict permissions (CRITICAL for Traefik)
+touch "$INSTALL_DIR/data/traefik/acme.json"
+chmod 600 "$INSTALL_DIR/data/traefik/acme.json"
+chown syrvis-bot:users "$INSTALL_DIR/data/traefik/acme.json"
+log "Created acme.json with 600 permissions"
+
+# Set ownership for all data directories
+chown -R syrvis-bot:users "$INSTALL_DIR/data"
+log "Set ownership of data directories to syrvis-bot:users"
+
+# Step 6: Install Python CLI in virtual environment
+log "Step 6: Installing Python CLI"
+cd "$INSTALL_DIR/cli"
+
+# Create virtual environment
+log "Creating Python virtual environment"
+python3 -m venv venv
+source venv/bin/activate
+
+# Upgrade pip
+log "Upgrading pip"
+pip install --upgrade pip > /dev/null 2>&1
+
+# Install syrviscore package from wheel
+log "Installing syrviscore package from wheel"
+WHEEL_FILE="$SYNOPKG_PKGDEST/package"/syrviscore-*.whl
+if [ ! -f $WHEEL_FILE ]; then
+    log "ERROR: Wheel file not found in package"
+    exit 1
+fi
+
+pip install --no-cache-dir $WHEEL_FILE > /dev/null 2>&1
+
+# Verify installation
+if ! command -v syrvis > /dev/null 2>&1; then
+    log "ERROR: syrvis command not found after installation"
+    exit 1
+fi
+
+INSTALLED_VERSION=$(syrvis --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+.*' || echo "unknown")
+log "Installed syrvis CLI version: $INSTALLED_VERSION"
+
+deactivate
+
+# Create symlink to CLI
+log "Creating symlink to /usr/local/bin/syrvis"
+ln -sf "$INSTALL_DIR/cli/venv/bin/syrvis" /usr/local/bin/syrvis
+
+# Verify symlink works
+if /usr/local/bin/syrvis --version > /dev/null 2>&1; then
+    log "CLI symlink verified successfully"
+else
+    log "WARNING: CLI symlink verification failed"
+fi
+
+# Copy template files to installation directory
+log "Copying configuration templates"
+cp "$SYNOPKG_PKGDEST/package/.env.template" "$INSTALL_DIR/"
+cp -r "$SYNOPKG_PKGDEST/package/build" "$INSTALL_DIR/"
+
+# Step 7: Generate .env file from wizard inputs
+log "Step 7: Generating configuration files"
+
+ENV_FILE="$INSTALL_DIR/.env"
+cat > "$ENV_FILE" << ENV_EOF
+# SyrvisCore Configuration
+# Generated during installation on $(date)
+
+# Installation Paths
+SYRVISCORE_INSTALL_DIR=$INSTALL_DIR
+SYRVISCORE_DATA_DIR=$INSTALL_DIR/data
+
+# Network Configuration
+NETWORK_INTERFACE=$NETWORK_INTERFACE
+NETWORK_SUBNET=$NETWORK_SUBNET
+GATEWAY_IP=$GATEWAY_IP
+TRAEFIK_IP=$TRAEFIK_IP
+
+# Domain and SSL
+DOMAIN=$DOMAIN
+ACME_EMAIL=$ACME_EMAIL
+
+# Cloudflare Tunnel (optional)
+CLOUDFLARE_TUNNEL_TOKEN=$CLOUDFLARE_TOKEN
+
+# Docker Image Versions (from build/config.yaml)
+# These will be populated by the syrvis CLI when generating docker-compose.yaml
+
+# Traefik Configuration
+TRAEFIK_LOG_LEVEL=INFO
+TRAEFIK_API_DASHBOARD=true
+
+# Portainer Configuration
+PORTAINER_BIND_PORT=9443
+
+# Timezone
+TZ=$(cat /etc/TZ 2>/dev/null || echo "America/Los_Angeles")
+ENV_EOF
+
+chmod 600 "$ENV_FILE"
+chown syrvis-bot:users "$ENV_FILE"
+log "Created .env file at $ENV_FILE"
+
+# Create .env.template for reference
+ENV_TEMPLATE="$INSTALL_DIR/.env.template"
+cat > "$ENV_TEMPLATE" << 'TEMPLATE_EOF'
+# SyrvisCore Configuration Template
+# Copy this to .env and customize for your environment
+
+# Installation Paths
+SYRVISCORE_INSTALL_DIR=/volumeX/docker/syrviscore
+SYRVISCORE_DATA_DIR=/volumeX/docker/syrviscore/data
+
+# Network Configuration
+NETWORK_INTERFACE=ovs_eth0
+NETWORK_SUBNET=192.168.8.0/24
+GATEWAY_IP=192.168.8.1
+TRAEFIK_IP=192.168.8.4
+
+# Domain and SSL
+DOMAIN=example.com
+ACME_EMAIL=admin@example.com
+
+# Cloudflare Tunnel (optional, leave empty to disable)
+CLOUDFLARE_TUNNEL_TOKEN=
+
+# Traefik Configuration
+TRAEFIK_LOG_LEVEL=INFO
+TRAEFIK_API_DASHBOARD=true
+
+# Portainer Configuration
+PORTAINER_BIND_PORT=9443
+
+# Timezone (auto-detected from system)
+TZ=America/Los_Angeles
+TEMPLATE_EOF
+
+chmod 644 "$ENV_TEMPLATE"
+log "Created .env.template at $ENV_TEMPLATE"
+
+# Step 8: Create manifest file
+log "Step 8: Creating installation manifest"
+
+# Get version from INFO file or default
+PKG_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.1.0-dev")
+
+MANIFEST_FILE="$INSTALL_DIR/.syrviscore-manifest.json"
+cat > "$MANIFEST_FILE" << MANIFEST_EOF
+{
+    "version": "$PKG_VERSION",
+    "install_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "install_dir": "$INSTALL_DIR",
+    "install_volume": "$INSTALL_VOLUME",
+    "network": {
+        "interface": "$NETWORK_INTERFACE",
+        "subnet": "$NETWORK_SUBNET",
+        "gateway": "$GATEWAY_IP",
+        "traefik_ip": "$TRAEFIK_IP"
+    },
+    "domain": "$DOMAIN",
+    "python_version": "$(python3 --version 2>&1 | awk '{print $2}')",
+    "docker_version": "$(docker --version 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+' | head -1 || echo 'unknown')"
+}
+MANIFEST_EOF
+
+chmod 644 "$MANIFEST_FILE"
+log "Created manifest file at $MANIFEST_FILE"
+
+# Step 9: Create README in installation directory
+log "Step 9: Creating installation README"
+README_FILE="$INSTALL_DIR/README.md"
+cat > "$README_FILE" << 'README_EOF'
+# SyrvisCore Installation
+
+This directory contains your SyrvisCore installation.
+
+## Directory Structure
+
+- `data/` - Persistent data for all services
+  - `traefik/` - Traefik reverse proxy data
+    - `acme.json` - SSL certificates (DO NOT MODIFY)
+    - `config/` - Traefik dynamic configuration
+  - `portainer/` - Portainer data
+  - `cloudflared/` - Cloudflare tunnel data (if enabled)
+- `cli/` - Python CLI virtual environment
+- `.env` - Configuration file (DO NOT COMMIT TO GIT)
+- `.syrviscore-manifest.json` - Installation metadata
+
+## Quick Start
+
+1. Generate docker-compose.yaml:
+   ```bash
+   syrvis compose generate
+   ```
+
+2. Start services:
+   ```bash
+   syrvis start
+   ```
+
+3. Check status:
+   ```bash
+   syrvis status
+   ```
+
+4. View logs:
+   ```bash
+   syrvis logs traefik
+   ```
+
+## Important Files
+
+- **acme.json**: Contains SSL certificates. Must have 600 permissions.
+- **.env**: Contains sensitive configuration. Never commit to git.
+
+## Accessing Services
+
+- Traefik Dashboard: https://traefik.{your-domain}
+- Portainer: https://portainer.{your-domain}
+
+## Support
+
+- Documentation: https://github.com/kevinteg/SyrvisCore
+- Issues: https://github.com/kevinteg/SyrvisCore/issues
+
+## Backup
+
+To backup your installation:
+```bash
+tar -czf syrviscore-backup-$(date +%Y%m%d).tar.gz data/ .env
+```
+README_EOF
+
+chmod 644 "$README_FILE"
+log "Created README at $README_FILE"
+
+# Final permissions check
+log "Step 10: Final permissions check"
+chmod 600 "$INSTALL_DIR/data/traefik/acme.json"
+chown -R syrvis-bot:users "$INSTALL_DIR/data"
+
+log "===== SyrvisCore Installation Complete ====="
+log "Installation directory: $INSTALL_DIR"
+log "CLI command: syrvis"
+log "Next steps:"
+log "  1. Run 'syrvis compose generate' to create docker-compose.yaml"
+log "  2. Run 'syrvis start' to start all services"
+log "  3. Run 'syrvis status' to check service status"
+
+exit 0

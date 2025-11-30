@@ -28,9 +28,15 @@ Current version: `0.1.0-dev`
 
 ### For Synology (Production)
 
-Coming soon - SPK package not yet ready for installation.
+Download the latest SPK package from [Releases](https://github.com/kevinteg/SyrvisCore/releases) and install via Package Center.
 
-When available, you'll be able to add the SynoCommunity package source and install via Package Center.
+**Quick Install:**
+1. Download `syrviscore-{version}-noarch.spk`
+2. Open Package Center on your Synology
+3. Click "Manual Install"
+4. Select the SPK file and follow the wizard
+
+See [Installation Guide](docs/spk-installation-guide.md) for detailed instructions.
 
 ### For Development
 
@@ -90,16 +96,37 @@ tox -e lint
 
 ### Build Tools
 
+**Standard Python Package Build:**
 ```bash
-# Select Docker image versions interactively
-./build-tools/select-docker-versions
+# Build Python wheel and source distribution
+./build-tools/build-python-package.sh
 
-# Or use non-interactive mode for CI/CD
-./build-tools/select-docker-versions --non-interactive
-
-# Build SPK (coming soon)
-./build-tools/build-spk
+# Output:
+#   dist/syrviscore-{version}-py3-none-any.whl  (wheel)
+#   dist/syrviscore-{version}.tar.gz             (source dist)
 ```
+
+**SPK Package Build:**
+```bash
+# Build SPK package for Synology (requires wheel to exist)
+./build-tools/build-spk.sh
+
+# Output: dist/syrviscore-{version}-noarch.spk
+```
+
+**Complete Build Process:**
+```bash
+# 1. Build Python package with standard tools
+./build-tools/build-python-package.sh
+
+# 2. Package into SPK
+./build-tools/build-spk.sh
+```
+
+The build process uses:
+- **Standard Python packaging** - `python -m build` creates wheel
+- **pip installation** - SPK installer uses `pip install wheel`
+- **No custom packaging** - Follows PEP 517/518 standards
 
 See [build-tools/README.md](build-tools/README.md) for detailed documentation.
 
