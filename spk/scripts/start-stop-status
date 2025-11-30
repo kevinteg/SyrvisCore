@@ -1,0 +1,30 @@
+#!/bin/sh
+# start-stop-status - Required script for DSM 7.1+ compatibility
+# Since SyrvisCore uses Docker containers, not system services,
+# this script just returns success for all operations
+
+case "$1" in
+    start)
+        # Container management is handled by syrvis CLI
+        exit 0
+        ;;
+    stop)
+        # Container management is handled by syrvis CLI
+        exit 0
+        ;;
+    status)
+        # Always return running status (0)
+        exit 0
+        ;;
+    prestart)
+        # No pre-start actions needed
+        exit 0
+        ;;
+    prestop)
+        # No pre-stop actions needed
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac

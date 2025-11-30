@@ -49,12 +49,12 @@
                     {
                         "key": "pkgwizard_network_subnet",
                         "desc": "Network Subnet (CIDR notation)",
-                        "defaultValue": "192.168.8.0/24",
+                        "defaultValue": "192.168.0.0/24",
                         "validator": {
                             "allowBlank": false,
                             "regex": {
                                 "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}\\/[0-9]{1,2}$/",
-                                "errorText": "Enter a valid subnet in CIDR format (e.g., 192.168.8.0/24)"
+                                "errorText": "Enter a valid subnet in CIDR format (e.g., 192.168.0.0/24)"
                             }
                         }
                     }
@@ -66,12 +66,12 @@
                     {
                         "key": "pkgwizard_gateway_ip",
                         "desc": "Gateway IP Address",
-                        "defaultValue": "192.168.8.1",
+                        "defaultValue": "192.168.0.1",
                         "validator": {
                             "allowBlank": false,
                             "regex": {
                                 "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/",
-                                "errorText": "Enter a valid IP address (e.g., 192.168.8.1)"
+                                "errorText": "Enter a valid IP address (e.g., 192.168.0.1)"
                             }
                         }
                     }
@@ -83,12 +83,12 @@
                     {
                         "key": "pkgwizard_traefik_ip",
                         "desc": "Traefik IP Address (must be in subnet)",
-                        "defaultValue": "192.168.8.4",
+                        "defaultValue": "192.168.0.4",
                         "validator": {
                             "allowBlank": false,
                             "regex": {
                                 "expr": "/^([0-9]{1,3}\\.){3}[0-9]{1,3}$/",
-                                "errorText": "Enter a valid IP address (e.g., 192.168.8.4)"
+                                "errorText": "Enter a valid IP address (e.g., 192.168.0.4)"
                             }
                         }
                     }

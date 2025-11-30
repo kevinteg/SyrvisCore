@@ -185,7 +185,8 @@ log_info "Copying wizard files"
 cp -r spk/WIZARD_UIFILES "$BUILD_DIR/"
 
 # Create scripts archive
-log_info "Creating scripts archive"
+# IMPORTANT: Must be uncompressed tar (no -z flag) for Synology compatibility
+log_info "Creating scripts archive (uncompressed tar)"
 cd "$SPK_DIR"
 tar -cf "$BUILD_DIR/scripts" scripts/
 cd "$PROJECT_ROOT"
@@ -195,20 +196,30 @@ if [ ! -f "$BUILD_DIR/scripts" ]; then
     exit 1
 fi
 
-log_success "Created scripts archive"
+# Verify scripts archive is uncompressed tar
+SCRIPTS_TYPE=$(file "$BUILD_DIR/scripts")
+if echo "$SCRIPTS_TYPE" | grep -q "POSIX tar archive"; then
+    log_success "Created scripts archive (uncompressed tar - correct format)"
+else
+    log_error "Scripts archive has wrong format: $SCRIPTS_TYPE"
+    log_error "Expected: POSIX tar archive (uncompressed)"
+    exit 1
+fi
 
 # List build directory contents for verification
 log_info "Build directory contents:"
 ls -lh "$BUILD_DIR" | tail -n +2 | awk '{print "  " $9 " (" $5 ")"}'
 
 # Create final SPK package
-log_info "Creating final SPK package"
+# CRITICAL: Outer SPK archive MUST be uncompressed tar (no -z flag)
+# Using gzip causes Synology error 263 "invalid file format"
+log_info "Creating final SPK package (uncompressed tar)"
 cd "$BUILD_DIR"
 
-# SPK is a tar archive containing:
+# SPK is an UNCOMPRESSED tar archive containing:
 # - INFO
-# - package.tgz
-# - scripts (tar file, not gzipped)
+# - package.tgz (this one IS gzipped)
+# - scripts (uncompressed tar)
 # - WIZARD_UIFILES/
 # - conf/
 # - PACKAGE_ICON*.PNG
@@ -261,6 +272,18 @@ if [ $VERIFY_FAILED -eq 1 ]; then
 fi
 
 log_success "SPK contents verified"
+
+# Verify SPK format is uncompressed tar (critical for Synology)
+log_info "Verifying SPK format"
+SPK_TYPE=$(file "$DIST_DIR/$PACKAGE_NAME")
+if echo "$SPK_TYPE" | grep -q "POSIX tar archive"; then
+    log_success "SPK format correct: uncompressed tar archive"
+else
+    log_error "SPK has wrong format: $SPK_TYPE"
+    log_error "Expected: POSIX tar archive (uncompressed)"
+    log_error "This will cause Synology error 263 'invalid file format'"
+    exit 1
+fi
 
 # Clean up build directory
 log_info "Cleaning up temporary files"
