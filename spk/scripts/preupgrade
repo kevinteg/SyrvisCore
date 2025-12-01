@@ -2,6 +2,8 @@
 # preupgrade - Pre-upgrade script for SyrvisCore
 # Prepares for upgrade by backing up configuration and stopping services
 
+set -e
+
 # Enhanced logging
 SCRIPT_NAME=$(basename "$0")
 LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
@@ -10,25 +12,14 @@ set -x
 exec 2>>"$LOG_FILE"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')]  $*" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
 log "===== $SCRIPT_NAME START ====="
 log "User: $(whoami)"
 log "PATH: $PATH"
 
-
-set -e
-
 PACKAGE_NAME="syrviscore"
-LOG_FILE="/tmp/${PACKAGE_NAME}_upgrade.log"
-
-# Logging function
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-log "===== SyrvisCore Pre-Upgrade ====="
 
 # Find installation directory
 INSTALL_DIR=""
@@ -40,12 +31,13 @@ for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
 done
 
 if [ -z "$INSTALL_DIR" ]; then
-    log "ERROR: Could not find existing installation"
-    echo "Cannot upgrade: No existing SyrvisCore installation found."
-    exit 1
+    log "No previous installation found - fresh install"
+    log "Skipping upgrade tasks"
+    log "===== $SCRIPT_NAME SUCCESS (fresh install) ====="
+    exit 0
 fi
 
-log "Found installation at: $INSTALL_DIR"
+log "Found existing installation: $INSTALL_DIR"
 
 # Read current version from manifest
 if [ -f "$INSTALL_DIR/.syrviscore-manifest.json" ]; then
@@ -62,14 +54,14 @@ log "Stopping services before upgrade"
 if [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
     cd "$INSTALL_DIR"
     
-    if command -v syrvis > /dev/null 2>&1; then
+    if /usr/bin/which syrvis >/dev/null 2>&1; then
         log "Stopping via syrvis CLI"
         syrvis stop 2>&1 | tee -a "$LOG_FILE" || true
     else
         log "Stopping via docker-compose"
-        if command -v docker-compose > /dev/null 2>&1; then
+        if /usr/bin/which docker-compose >/dev/null 2>&1; then
             docker-compose down 2>&1 | tee -a "$LOG_FILE" || true
-        elif command -v docker > /dev/null 2>&1; then
+        elif /usr/bin/which docker >/dev/null 2>&1; then
             docker compose down 2>&1 | tee -a "$LOG_FILE" || true
         fi
     fi
@@ -93,4 +85,5 @@ log "Configuration backed up to: $BACKUP_DIR"
 echo "$INSTALL_DIR" > /tmp/syrviscore_install_dir
 
 log "Pre-upgrade preparation complete"
+log "===== $SCRIPT_NAME SUCCESS ====="
 exit 0

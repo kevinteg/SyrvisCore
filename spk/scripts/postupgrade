@@ -2,6 +2,8 @@
 # postupgrade - Post-upgrade script for SyrvisCore
 # Reinstalls CLI, updates manifest, and restarts services
 
+set -e
+
 # Enhanced logging
 SCRIPT_NAME=$(basename "$0")
 LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
@@ -10,26 +12,15 @@ set -x
 exec 2>>"$LOG_FILE"
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')]  $*" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
 log "===== $SCRIPT_NAME START ====="
 log "User: $(whoami)"
 log "PATH: $PATH"
 
-
-set -e
-
 PACKAGE_NAME="syrviscore"
-LOG_FILE="/tmp/${PACKAGE_NAME}_upgrade.log"
 SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
-
-# Logging function
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-log "===== SyrvisCore Post-Upgrade ====="
 
 # Get installation directory from preupgrade
 INSTALL_DIR=""
@@ -39,8 +30,10 @@ if [ -f /tmp/syrviscore_install_dir ]; then
 fi
 
 if [ -z "$INSTALL_DIR" ] || [ ! -d "$INSTALL_DIR" ]; then
-    log "ERROR: Installation directory not found"
-    exit 1
+    log "No previous installation found - fresh install"
+    log "Skipping upgrade tasks (fresh install handled by postinst)"
+    log "===== $SCRIPT_NAME SUCCESS (fresh install) ====="
+    exit 0
 fi
 
 log "Upgrading installation at: $INSTALL_DIR"
@@ -81,7 +74,7 @@ if [ ! -f "$STARTUP_SCRIPT" ]; then
     log "Recreating startup script"
     # Same script as in postinst
     cat > "$STARTUP_SCRIPT" << 'STARTUP_EOF'
-#!/bin/bash
+#!/bin/sh
 # SyrvisCore Docker Group & Socket Permissions Startup Script
 # This script ensures docker group exists and socket permissions are correct after reboot
 
@@ -142,7 +135,7 @@ log "Removed old CLI virtual environment"
 # Create new virtual environment
 cd "$INSTALL_DIR/cli"
 python3 -m venv venv
-source venv/bin/activate
+. venv/bin/activate
 
 # Install new version from wheel
 log "Installing new CLI version from wheel"
@@ -157,7 +150,7 @@ fi
 pip install --no-cache-dir $WHEEL_FILE > /dev/null 2>&1
 
 # Verify installation
-if ! command -v syrvis > /dev/null 2>&1; then
+if ! /usr/bin/which syrvis >/dev/null 2>&1; then
     log "ERROR: CLI installation failed"
     exit 1
 fi
@@ -248,4 +241,5 @@ log "  1. Review upgrade notice: $UPGRADE_NOTICE"
 log "  2. Regenerate docker-compose.yaml if needed: syrvis compose generate"
 log "  3. Start services: syrvis start"
 
+log "===== $SCRIPT_NAME SUCCESS ====="
 exit 0
