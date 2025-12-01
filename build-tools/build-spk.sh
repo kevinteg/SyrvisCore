@@ -91,15 +91,6 @@ fi
 
 log_success "All required files present"
 
-# Check that scripts are executable
-log_info "Checking script permissions"
-for script in spk/scripts/*; do
-    if [ ! -x "$script" ]; then
-        log_warn "Script not executable: $script (fixing)"
-        chmod +x "$script"
-    fi
-done
-
 # Update version in INFO file
 log_info "Updating version in INFO file"
 sed -i.bak "s/^version=.*/version=\"${VERSION}\"/" spk/INFO
@@ -155,8 +146,8 @@ log_success "Package contents verified"
 
 # Create package.tgz
 log_info "Creating package.tgz"
-cd "$BUILD_DIR"
-tar -czf package.tgz package/
+cd "$BUILD_DIR/package"
+tar -czf ../package.tgz .
 cd "$PROJECT_ROOT"
 
 if [ ! -f "$BUILD_DIR/package.tgz" ]; then
@@ -184,64 +175,61 @@ cp -r spk/conf "$BUILD_DIR/"
 log_info "Copying wizard files"
 cp -r spk/WIZARD_UIFILES "$BUILD_DIR/"
 
-# Create scripts archive
-# IMPORTANT: Must be uncompressed tar (no -z flag) for Synology compatibility
-log_info "Creating scripts archive (uncompressed tar)"
-cd "$SPK_DIR"
-tar -cf "$BUILD_DIR/scripts" scripts/
-cd "$PROJECT_ROOT"
+# CRITICAL FIX: Copy scripts as a DIRECTORY, not a tar archive
+log_info "Copying scripts directory"
+cp -r spk/scripts "$BUILD_DIR/"
 
-if [ ! -f "$BUILD_DIR/scripts" ]; then
-    log_error "Failed to create scripts archive"
+# Verify scripts were copied
+if [ ! -d "$BUILD_DIR/scripts" ]; then
+    log_error "Failed to copy scripts directory"
     exit 1
 fi
 
-# Verify scripts archive was created
-if [ -f "$BUILD_DIR/scripts" ] && [ -s "$BUILD_DIR/scripts" ]; then
-    log_success "Created scripts archive (uncompressed tar)"
-else
-    log_error "Scripts archive creation failed"
-    exit 1
-fi
+log_success "Scripts directory copied successfully"
 
 # List build directory contents for verification
 log_info "Build directory contents:"
 ls -lh "$BUILD_DIR" | tail -n +2 | awk '{print "  " $9 " (" $5 ")"}'
 
-# Reset ownership and permissions to avoid error 313
-# "failed to revise file attributes"
-log_info "Resetting ownership and permissions"
+# CRITICAL: Set proper ownership and permissions BEFORE creating SPK
+# This prevents error 313 "failed to revise file attributes"
+log_info "Setting ownership and permissions"
 cd "$BUILD_DIR"
 
-# Reset ownership to current user (avoids permission issues)
-find . -exec chown $(id -u):$(id -g) {} \; 2>/dev/null || true
+# Get current user's UID and GID
+CURRENT_UID=$(id -u)
+CURRENT_GID=$(id -g)
 
-# Set standard permissions
-find . -type d -exec chmod 755 {} \;  # Directories: rwxr-xr-x
-find . -type f -exec chmod 644 {} \;  # Files: rw-r--r--
+# Reset all ownership to current user (avoid root ownership issues)
+log_info "Resetting ownership to ${CURRENT_UID}:${CURRENT_GID}"
+find . -exec chown ${CURRENT_UID}:${CURRENT_GID} {} \; 2>/dev/null || true
 
-# Scripts must be executable
-if [ -f scripts ]; then
-    # Extract scripts archive temporarily to fix permissions
-    mkdir -p scripts_temp
-    cd scripts_temp
-    tar -xf ../scripts
-    find scripts -type f -exec chmod 755 {} \;  # Make all scripts executable
-    tar -cf ../scripts scripts/
-    cd ..
-    rm -rf scripts_temp
-fi
+# Set standard permissions on directories
+log_info "Setting directory permissions (755)"
+find . -type d -exec chmod 755 {} \;
 
-# Set explicit permissions on all SPK components (prevents error 313)
+# Set standard permissions on regular files
+log_info "Setting file permissions (644)"
+find . -type f -exec chmod 644 {} \;
+
+# Make all script files executable (CRITICAL)
+log_info "Making scripts executable (755)"
+find scripts -type f -exec chmod 755 {} \;
+
+# Set explicit permissions on SPK root components
 chmod 644 INFO
 chmod 644 package.tgz
 chmod 644 PACKAGE_ICON.PNG
 chmod 644 PACKAGE_ICON_256.PNG
-chmod 644 scripts  # The archive file itself
 chmod 755 conf
 chmod 755 WIZARD_UIFILES
+chmod 755 scripts
 chmod 644 conf/privilege
 chmod 644 WIZARD_UIFILES/install_uifile.json
+
+# Verify script permissions
+log_info "Verifying script permissions:"
+ls -la scripts/ | grep -E '\.(sh|py)$|^d|preinst|postinst|preupgrade|postupgrade|preuninst|postuninst' || ls -la scripts/
 
 log_success "Ownership and permissions set correctly"
 
@@ -251,12 +239,12 @@ log_success "Ownership and permissions set correctly"
 log_info "Creating final SPK package (uncompressed tar)"
 
 # SPK is an UNCOMPRESSED tar archive containing:
-# - INFO
-# - package.tgz (this one IS gzipped)
-# - scripts (uncompressed tar)
-# - WIZARD_UIFILES/
-# - conf/
-# - PACKAGE_ICON*.PNG
+# - INFO (file)
+# - package.tgz (gzipped tar)
+# - scripts/ (directory with executable scripts)
+# - WIZARD_UIFILES/ (directory)
+# - conf/ (directory)
+# - PACKAGE_ICON*.PNG (files)
 
 tar -cf "$DIST_DIR/$PACKAGE_NAME" \
     INFO \
@@ -280,22 +268,30 @@ log_success "Created SPK package: $PACKAGE_NAME ($SPK_SIZE)"
 # Verify SPK contents
 log_info "Verifying SPK contents"
 SPK_CONTENTS=$(tar -tf "$DIST_DIR/$PACKAGE_NAME" | sort)
+
+log_info "SPK contents:"
+echo "$SPK_CONTENTS" | head -20
+
+# Check for critical files
 EXPECTED_FILES=(
     "INFO"
     "PACKAGE_ICON.PNG"
     "PACKAGE_ICON_256.PNG"
-    "WIZARD_UIFILES/"
-    "WIZARD_UIFILES/install_uifile.json"
-    "conf/"
-    "conf/privilege"
     "package.tgz"
-    "scripts"
 )
 
 VERIFY_FAILED=0
 for expected in "${EXPECTED_FILES[@]}"; do
     if ! echo "$SPK_CONTENTS" | grep -q "^${expected}$"; then
         log_error "Missing expected file in SPK: $expected"
+        VERIFY_FAILED=1
+    fi
+done
+
+# Check for directories
+for dir in "scripts/" "conf/" "WIZARD_UIFILES/"; do
+    if ! echo "$SPK_CONTENTS" | grep -q "^${dir}"; then
+        log_error "Missing expected directory in SPK: $dir"
         VERIFY_FAILED=1
     fi
 done
@@ -307,12 +303,16 @@ fi
 
 log_success "SPK contents verified"
 
-# Verify SPK was created successfully
-log_info "Verifying SPK package"
+# Verify SPK format
+log_info "Verifying SPK package format"
 if [ -f "$DIST_DIR/$PACKAGE_NAME" ] && [ -s "$DIST_DIR/$PACKAGE_NAME" ]; then
-    # Test that tar can read it (simple format check)
+    # Check file type
+    FILE_TYPE=$(file "$DIST_DIR/$PACKAGE_NAME")
+    log_info "File type: $FILE_TYPE"
+    
+    # Test that tar can read it
     if tar -tf "$DIST_DIR/$PACKAGE_NAME" > /dev/null 2>&1; then
-        log_success "SPK package verified (uncompressed tar format)"
+        log_success "SPK package verified (valid uncompressed tar format)"
     else
         log_error "SPK package is not a valid tar archive"
         exit 1
@@ -341,6 +341,10 @@ log_info "     sudo synopkg install $DIST_DIR/$PACKAGE_NAME"
 log_info ""
 log_info "To inspect the package:"
 log_info "  tar -tzf $DIST_DIR/$PACKAGE_NAME"
+log_info ""
+log_info "To validate the package:"
+log_info "  tar -xf $DIST_DIR/$PACKAGE_NAME -C /tmp/spk-test"
+log_info "  ls -laR /tmp/spk-test"
 log_info ""
 
 exit 0
