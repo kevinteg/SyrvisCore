@@ -1,101 +1,36 @@
-#!/bin/bash
-# preinst - Pre-installation script for SyrvisCore
-# Runs before package installation to validate dependencies and detect existing installations
+#!/bin/sh
+# preinst - Pre-installation check for SyrvisCore
+# Runs as package user (syrvis-bot), not root - can only do basic checks
 
-set -e
-
-PACKAGE_NAME="syrviscore"
-LOG_FILE="/tmp/${PACKAGE_NAME}_install.log"
-
-# Logging function
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-log "===== SyrvisCore Pre-Installation Check ====="
-
-# Check Docker installation
-if ! synopkg status Docker > /dev/null 2>&1; then
-    log "ERROR: Docker package is not installed"
-    echo "SyrvisCore requires Docker to be installed. Please install Docker from Package Center first."
+# Check if Docker package is installed
+if ! synopkg status Docker >/dev/null 2>&1; then
+    echo "ERROR: Docker package not installed. Install Docker from Package Center first."
     exit 1
 fi
 
-if ! synopkg is_onoff Docker > /dev/null 2>&1 || [ "$(synopkg is_onoff Docker)" != "on" ]; then
-    log "ERROR: Docker package is not running"
-    echo "SyrvisCore requires Docker to be running. Please start Docker from Package Center first."
+# Check if Docker is running
+if ! synopkg is_onoff Docker >/dev/null 2>&1 || [ "$(synopkg is_onoff Docker)" != "on" ]; then
+    echo "ERROR: Docker not running. Start Docker from Package Center first."
     exit 1
 fi
 
 # Check if docker command is available
-if ! command -v docker > /dev/null 2>&1; then
-    log "ERROR: Docker command not found in PATH"
-    echo "Docker is installed but the docker command is not available. Please check your Docker installation."
+if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: Docker command not found. Check Docker installation."
     exit 1
 fi
 
-# Check if Python 3 is available
-if ! command -v python3 > /dev/null 2>&1; then
-    log "ERROR: Python 3 not found"
-    echo "SyrvisCore requires Python 3. Your DSM version may not be supported."
+# Check if python3 is available
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "ERROR: Python 3 not found. Your DSM version may not be supported."
     exit 1
 fi
 
-PYTHON_VERSION=$(python3 --version 2>&1 | awk '{print $2}')
-log "Found Python version: $PYTHON_VERSION"
-
-# Get installation volume from wizard
-INSTALL_VOLUME="${pkgwizard_volume:-/volume1}"
-INSTALL_DIR="${INSTALL_VOLUME}/docker/${PACKAGE_NAME}"
-
-log "Installation target: $INSTALL_DIR"
-
-# Check if installation already exists
-if [ -d "$INSTALL_DIR" ]; then
-    log "Existing installation detected at $INSTALL_DIR"
-    
-    # Check for manifest file to determine if this is an upgrade
-    MANIFEST_FILE="$INSTALL_DIR/.syrviscore-manifest.json"
-    if [ -f "$MANIFEST_FILE" ]; then
-        CURRENT_VERSION=$(grep -o '"version": *"[^"]*"' "$MANIFEST_FILE" | head -1 | cut -d'"' -f4)
-        log "Current version: $CURRENT_VERSION"
-        
-        # Store for postupgrade script
-        echo "$CURRENT_VERSION" > /tmp/syrviscore_previous_version
-        
-        log "This appears to be an upgrade from version $CURRENT_VERSION"
-    else
-        log "WARNING: Installation directory exists but no manifest found"
-        log "This may be a partially installed or corrupted installation"
-        
-        # Ask user what to do (in production, you'd want more sophisticated handling)
-        echo "An existing SyrvisCore directory was found, but it appears incomplete."
-        echo "The installation will attempt to proceed, but you may need to reconfigure."
-    fi
-else
-    log "No existing installation found - this is a fresh install"
-    echo "" > /tmp/syrviscore_previous_version
-fi
-
-# Validate network configuration from wizard
-NETWORK_INTERFACE="${pkgwizard_network_interface:-ovs_eth0}"
-TRAEFIK_IP="${pkgwizard_traefik_ip}"
-
-if [ -z "$TRAEFIK_IP" ]; then
-    log "ERROR: Traefik IP address not provided"
-    echo "Network configuration is incomplete. Please run the installation wizard again."
+# Check Docker daemon is accessible
+if ! docker ps >/dev/null 2>&1; then
+    echo "ERROR: Cannot access Docker daemon. This may be a permissions issue."
     exit 1
 fi
 
-log "Network interface: $NETWORK_INTERFACE"
-log "Traefik IP: $TRAEFIK_IP"
-
-# Check if network interface exists (non-fatal warning)
-if ! ip link show "$NETWORK_INTERFACE" > /dev/null 2>&1; then
-    log "WARNING: Network interface $NETWORK_INTERFACE not found"
-    echo "Warning: Network interface $NETWORK_INTERFACE was not found on this system."
-    echo "The installation will continue, but you may need to adjust network settings later."
-fi
-
-log "Pre-installation checks passed successfully"
+# Basic validation passed
 exit 0
