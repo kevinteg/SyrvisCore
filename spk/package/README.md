@@ -79,7 +79,7 @@ After installation:
 
 ## Version
 
-This package contains SyrvisCore version: **0.1.0-dev**
+This package contains SyrvisCore version: **0.0.1**
 
 ## License
 

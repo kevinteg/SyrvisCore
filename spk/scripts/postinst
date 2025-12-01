@@ -282,7 +282,7 @@ log "Created .env.template at $ENV_TEMPLATE"
 log "Step 8: Creating installation manifest"
 
 # Get version from INFO file or default
-PKG_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.1.0-dev")
+PKG_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.0.1")
 
 MANIFEST_FILE="$INSTALL_DIR/.syrviscore-manifest.json"
 cat > "$MANIFEST_FILE" << MANIFEST_EOF

@@ -36,7 +36,6 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 
 ### Version Management
 - Follow semantic versioning (MAJOR.MINOR.PATCH)
-- Development versions use `-dev` suffix (e.g., "0.1.0-dev")
 - Version defined in `src/syrviscore/__version__.py`
 - Keep version DRY - single source of truth
 

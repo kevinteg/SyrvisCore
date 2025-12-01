@@ -504,7 +504,7 @@ ruff check .  # Linting
 
 ```yaml
 metadata:
-  syrviscore_version: 0.1.0-dev
+  syrviscore_version: 0.0.1
   created_at: '2024-11-30T...'
   created_by: select-docker-versions
 

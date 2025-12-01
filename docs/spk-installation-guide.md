@@ -64,7 +64,7 @@ This guide walks you through installing, using, and troubleshooting the SyrvisCo
 ```bash
 # Upload SPK to your NAS (via SFTP or similar)
 # Then install via SSH:
-sudo synopkg install /path/to/syrviscore-0.1.0-dev-noarch.spk
+sudo synopkg install /path/to/syrviscore-0.0.1-noarch.spk
 
 # Check status
 sudo synopkg status syrviscore
@@ -84,7 +84,7 @@ which syrvis
 
 # Check version
 syrvis --version
-# Expected: syrviscore, version 0.1.0-dev
+# Expected: syrviscore, version 0.0.1
 ```
 
 ### 2. Verify Directory Structure

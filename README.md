@@ -16,7 +16,7 @@ SyrvisCore provides a complete reverse proxy and container management platform f
 
 🚧 **In Development** - MVP Phase
 
-Current version: `0.1.0-dev`
+Current version: `0.0.1`
 
 ## Requirements
 

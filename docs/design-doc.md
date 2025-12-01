@@ -1311,7 +1311,7 @@ git checkout -b update-traefik
 ./build-tools/select-docker-versions
 
 # Test build locally
-./build-tools/build-spk --version 1.1.0-dev
+./build-tools/build-spk --version 0.0.1
 
 # Commit changes
 git commit -am "Update Traefik to v3.2.1"

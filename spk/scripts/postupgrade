@@ -37,7 +37,7 @@ if [ -f /tmp/syrviscore_previous_version ]; then
 fi
 
 # Get new version
-NEW_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.1.0-dev")
+NEW_VERSION=$(grep '^version=' "$SYNOPKG_PKGDEST/../INFO" | cut -d'"' -f2 || echo "0.0.1")
 
 log "Upgrade: $PREVIOUS_VERSION -> $NEW_VERSION"
 

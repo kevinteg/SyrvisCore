@@ -213,7 +213,7 @@ class VersionSelector:
         """Create build configuration from selected versions."""
         config = {
             "metadata": {
-                "syrviscore_version": "0.1.0-dev",
+                "syrviscore_version": "0.0.1",
                 "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "created_by": "select-docker-versions",
             },

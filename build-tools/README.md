@@ -47,7 +47,7 @@ Creates `build/config.yaml` with Docker image versions only:
 
 ```yaml
 metadata:
-  syrviscore_version: 0.1.0-dev
+  syrviscore_version: 0.0.1
   created_at: '2024-11-29T12:00:00Z'
   created_by: select-docker-versions
 
@@ -79,7 +79,7 @@ Tool to build SyrvisCore SPK package from build configuration.
 ./build-tools/build-spk --config build/config.yaml
 ```
 
-Will generate: `dist/syrviscore-0.1.0-dev.spk`
+Will generate: `dist/syrviscore-0.0.1.spk`
 
 ---
 
