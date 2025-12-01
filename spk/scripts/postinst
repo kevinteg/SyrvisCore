@@ -4,16 +4,28 @@
 
 set -e
 
-PACKAGE_NAME="syrviscore"
-LOG_FILE="/tmp/${PACKAGE_NAME}_install.log"
-SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
+# Enhanced logging with command tracing
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+# Enable command tracing for debugging
+set -x
+exec 2>>"$LOG_FILE"
 
 # Logging function
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
-log "===== SyrvisCore Post-Installation ====="
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "UID: $(id -u)"
+log "GID: $(id -g)"
+log "PATH: $PATH"
+log "PWD: $PWD"
+
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
 
 # Get configuration from wizard
 INSTALL_VOLUME="${pkgwizard_volume:-/volume1}"
@@ -25,6 +37,16 @@ TRAEFIK_IP="${pkgwizard_traefik_ip}"
 DOMAIN="${pkgwizard_domain}"
 ACME_EMAIL="${pkgwizard_acme_email}"
 CLOUDFLARE_TOKEN="${pkgwizard_cloudflare_token:-}"
+
+log "Wizard Variables Received:"
+log "  pkgwizard_volume: ${pkgwizard_volume}"
+log "  pkgwizard_network_interface: ${pkgwizard_network_interface}"
+log "  pkgwizard_network_subnet: ${pkgwizard_network_subnet}"
+log "  pkgwizard_gateway_ip: ${pkgwizard_gateway_ip}"
+log "  pkgwizard_traefik_ip: ${pkgwizard_traefik_ip}"
+log "  pkgwizard_domain: ${pkgwizard_domain}"
+log "  pkgwizard_acme_email: ${pkgwizard_acme_email}"
+log "  pkgwizard_cloudflare_token: ${pkgwizard_cloudflare_token:-(empty)}"
 
 log "Configuration:"
 log "  Install Directory: $INSTALL_DIR"
@@ -386,5 +408,8 @@ log "Next steps:"
 log "  1. Run 'syrvis compose generate' to create docker-compose.yaml"
 log "  2. Run 'syrvis start' to start all services"
 log "  3. Run 'syrvis status' to check service status"
+
+log "===== $SCRIPT_NAME SUCCESS ====="
+log "Full log available at: $LOG_FILE"
 
 exit 0

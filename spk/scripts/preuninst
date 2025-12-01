@@ -2,6 +2,22 @@
 # preuninst - Pre-uninstallation script for SyrvisCore
 # Stops services and prompts user about data preservation
 
+# Enhanced logging
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+set -x
+exec 2>>"$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]  $*" | tee -a "$LOG_FILE"
+}
+
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "PATH: $PATH"
+
+
 set -e
 
 PACKAGE_NAME="syrviscore"

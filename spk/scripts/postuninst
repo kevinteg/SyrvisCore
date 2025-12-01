@@ -2,6 +2,22 @@
 # postuninst - Post-uninstallation script for SyrvisCore
 # Cleans up system components and optionally removes data
 
+# Enhanced logging
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+set -x
+exec 2>>"$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]  $*" | tee -a "$LOG_FILE"
+}
+
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "PATH: $PATH"
+
+
 set -e
 
 PACKAGE_NAME="syrviscore"

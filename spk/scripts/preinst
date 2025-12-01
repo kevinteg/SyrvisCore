@@ -2,35 +2,59 @@
 # preinst - Pre-installation check for SyrvisCore
 # Runs as package user (syrvis-bot), not root - can only do basic checks
 
+# Enhanced logging
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+set -x
+exec 2>>"$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "UID: $(id -u)"
+log "PATH: $PATH"
+
 # Check if Docker package is installed
+log "Checking if Docker is installed..."
 if ! synopkg status Docker >/dev/null 2>&1; then
-    echo "ERROR: Docker package not installed. Install Docker from Package Center first."
+    log "ERROR: Docker package not installed. Install Docker from Package Center first."
     exit 1
 fi
 
 # Check if Docker is running
+log "Checking if Docker is running..."
 if ! synopkg is_onoff Docker >/dev/null 2>&1 || [ "$(synopkg is_onoff Docker)" != "on" ]; then
-    echo "ERROR: Docker not running. Start Docker from Package Center first."
+    log "ERROR: Docker not running. Start Docker from Package Center first."
     exit 1
 fi
 
 # Check if docker command is available
-if ! command -v docker >/dev/null 2>&1; then
-    echo "ERROR: Docker command not found. Check Docker installation."
+log "Checking if docker command is available..."
+if ! /usr/bin/which docker >/dev/null 2>&1; then
+    log "ERROR: Docker command not found. Check Docker installation."
     exit 1
 fi
 
 # Check if python3 is available
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "ERROR: Python 3 not found. Your DSM version may not be supported."
+log "Checking if python3 is available..."
+if ! /usr/bin/which python3 >/dev/null 2>&1; then
+    log "ERROR: Python 3 not found. Your DSM version may not be supported."
     exit 1
 fi
 
 # Check Docker daemon is accessible
+log "Checking Docker daemon access..."
 if ! docker ps >/dev/null 2>&1; then
-    echo "ERROR: Cannot access Docker daemon. This may be a permissions issue."
+    log "ERROR: Cannot access Docker daemon. This may be a permissions issue."
     exit 1
 fi
 
+log "All pre-installation checks passed"
+
 # Basic validation passed
+log "===== $SCRIPT_NAME SUCCESS ====="
 exit 0
