@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # preuninst - Pre-uninstallation script for SyrvisCore
 # Stops services and prompts user about data preservation
 
@@ -37,15 +37,15 @@ else
         cd "$INSTALL_DIR"
         
         # Try using the syrvis CLI if available
-        if command -v syrvis > /dev/null 2>&1; then
+        if /usr/bin/which syrvis >/dev/null 2>&1; then
             log "Stopping services via syrvis CLI"
             syrvis stop 2>&1 | tee -a "$LOG_FILE" || true
         else
             # Fall back to direct docker-compose
             log "Stopping services via docker-compose"
-            if command -v docker-compose > /dev/null 2>&1; then
+            if /usr/bin/which docker-compose >/dev/null 2>&1; then
                 docker-compose down 2>&1 | tee -a "$LOG_FILE" || true
-            elif command -v docker > /dev/null 2>&1; then
+            elif /usr/bin/which docker >/dev/null 2>&1; then
                 docker compose down 2>&1 | tee -a "$LOG_FILE" || true
             fi
         fi

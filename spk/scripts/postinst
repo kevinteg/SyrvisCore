@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # postinst - Post-installation script for SyrvisCore
 # Performs main installation tasks: user setup, directories, CLI installation, configuration
 
@@ -79,7 +79,7 @@ log "Step 4: Creating startup script"
 STARTUP_SCRIPT="/usr/local/etc/rc.d/S99syrviscore-docker.sh"
 
 cat > "$STARTUP_SCRIPT" << 'STARTUP_EOF'
-#!/bin/bash
+#!/bin/sh
 # SyrvisCore Docker Group & Socket Permissions Startup Script
 # This script ensures docker group exists and socket permissions are correct after reboot
 
@@ -155,7 +155,7 @@ cd "$INSTALL_DIR/cli"
 # Create virtual environment
 log "Creating Python virtual environment"
 python3 -m venv venv
-source venv/bin/activate
+. venv/bin/activate
 
 # Upgrade pip
 log "Upgrading pip"
@@ -172,7 +172,7 @@ fi
 pip install --no-cache-dir $WHEEL_FILE > /dev/null 2>&1
 
 # Verify installation
-if ! command -v syrvis > /dev/null 2>&1; then
+if ! /usr/bin/which syrvis >/dev/null 2>&1; then
     log "ERROR: syrvis command not found after installation"
     exit 1
 fi
@@ -187,7 +187,7 @@ log "Creating symlink to /usr/local/bin/syrvis"
 ln -sf "$INSTALL_DIR/cli/venv/bin/syrvis" /usr/local/bin/syrvis
 
 # Verify symlink works
-if /usr/local/bin/syrvis --version > /dev/null 2>&1; then
+if /usr/local/bin/syrvis --version >/dev/null 2>&1; then
     log "CLI symlink verified successfully"
 else
     log "WARNING: CLI symlink verification failed"

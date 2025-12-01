@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # postupgrade - Post-upgrade script for SyrvisCore
 # Reinstalls CLI, updates manifest, and restarts services
 

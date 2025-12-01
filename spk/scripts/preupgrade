@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # preupgrade - Pre-upgrade script for SyrvisCore
 # Prepares for upgrade by backing up configuration and stopping services
 

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # postuninst - Post-uninstallation script for SyrvisCore
 # Cleans up system components and optionally removes data
 
