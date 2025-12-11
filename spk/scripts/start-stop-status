@@ -1,30 +1,26 @@
 #!/bin/sh
-# start-stop-status - Required script for DSM 7.1+ compatibility
-# Since SyrvisCore uses Docker containers, not system services,
-# this script just returns success for all operations
+# start-stop-status - Minimal status check
+
+INSTALL_DIR="/volume1/docker/syrviscore"
 
 case "$1" in
     start)
-        # Container management is handled by syrvis CLI
+        # Services managed by user via CLI
         exit 0
         ;;
     stop)
-        # Container management is handled by syrvis CLI
+        # Services managed by user via CLI
         exit 0
         ;;
     status)
-        # Always return running status (0)
-        exit 0
-        ;;
-    prestart)
-        # No pre-start actions needed
-        exit 0
-        ;;
-    prestop)
-        # No pre-stop actions needed
-        exit 0
-        ;;
-    *)
-        exit 1
+        # Check if setup is complete
+        if [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
+            if grep -q '"setup_complete": true' "${INSTALL_DIR}/.syrviscore-manifest.json" 2>/dev/null; then
+                exit 0  # Running (setup complete)
+            fi
+        fi
+        exit 1  # Not running (setup incomplete)
         ;;
 esac
+
+exit 0

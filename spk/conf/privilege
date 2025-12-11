@@ -1,6 +1,5 @@
 {
     "defaults": {
         "run-as": "package"
-    },
-    "username": "syrvis-bot"
+    }
 }
