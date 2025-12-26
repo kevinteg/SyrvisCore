@@ -250,16 +250,33 @@ source tests/dsm-sim/activate.sh
 
 ### Release Process
 
-1. Update versions in `pyproject.toml` files
-2. Update `build/config.yaml` with Docker versions
-3. Build and test:
+SyrvisCore uses separate release tags for manager (SPK) and service (wheel):
+
+| Release Tag | Package | Assets |
+|-------------|---------|--------|
+| `manager-vX.X.X` | Manager | SPK file |
+| `vX.X.X` | Service | Wheel + config.yaml |
+
+**Manager Release (SPK):**
+1. Update manager version in `packages/syrviscore-manager/pyproject.toml`
+2. Build and test:
    ```bash
    make build-spk
    make test-sim
    ```
-4. Create GitHub release with:
-   - `syrviscore-{version}-noarch.spk` (manager)
-   - `syrviscore-{version}-py3-none-any.whl` (service)
+3. Create GitHub release `manager-vX.X.X` with:
+   - `syrviscore-{version}-noarch.spk`
+
+**Service Release (Wheel):**
+1. Update service version in `packages/syrviscore/pyproject.toml`
+2. Update `build/config.yaml` with Docker versions
+3. Build service:
+   ```bash
+   ./build-tools/build-service.sh
+   ```
+4. Create GitHub release `vX.X.X` with:
+   - `syrviscore-{version}-py3-none-any.whl`
+   - `config.yaml`
 
 ## Troubleshooting
 

@@ -27,18 +27,30 @@ SyrvisCore uses a split-package architecture:
 - **Docker**: Installed from Package Center
 - **Python 3.8+**: For development
 
+## Releases
+
+SyrvisCore uses separate release tags for the two packages:
+
+| Release Tag | Package | Contains |
+|-------------|---------|----------|
+| `manager-vX.X.X` | Manager | SPK file (syrvisctl) |
+| `vX.X.X` | Service | Wheel + config.yaml (syrvis) |
+
+**Latest Releases:**
+- [Manager SPK](https://github.com/kevinteg/SyrvisCore/releases/tag/manager-v0.0.1) - Install this first
+- [Service v0.1.0](https://github.com/kevinteg/SyrvisCore/releases/tag/v0.1.0) - Downloaded automatically
+
 ## Installation
 
 ### For Synology (Production)
 
-1. Download the latest SPK from [Releases](https://github.com/kevinteg/SyrvisCore/releases)
+1. Download the [Manager SPK](https://github.com/kevinteg/SyrvisCore/releases/tag/manager-v0.0.1)
 2. Install via Package Center → Manual Install
-3. Follow the installation wizard
-4. Run the service installer:
+3. Install the service package:
    ```bash
    syrvisctl install
    ```
-5. Complete setup:
+4. Complete setup:
    ```bash
    syrvis setup
    syrvis start
