@@ -50,6 +50,7 @@ def get_default_network_settings() -> dict:
         "subnet": "192.168.1.0/24",
         "gateway": "192.168.1.1",
         "traefik_ip": "192.168.1.100",
+        "shim_ip": "192.168.1.101",  # For macvlan host-to-container communication
         "nas_ip": "",
     }
 
@@ -76,8 +77,9 @@ def get_default_network_settings() -> dict:
                     # Derive subnet from gateway
                     prefix = ".".join(gateway.split(".")[:3])
                     defaults["subnet"] = f"{prefix}.0/24"
-                    # Suggest traefik IP in same subnet
+                    # Suggest traefik IP and shim IP in same subnet
                     defaults["traefik_ip"] = f"{prefix}.100"
+                    defaults["shim_ip"] = f"{prefix}.101"
 
             # Get the interface from the default route
             if "dev" in parts:
@@ -165,6 +167,16 @@ def prompt_configuration(defaults: dict) -> dict:
         "    Traefik IP (dedicated macvlan IP)",
         default=defaults["traefik_ip"]
     )
+    # Calculate default shim IP from traefik IP (traefik + 1)
+    try:
+        parts = config["traefik_ip"].split('.')
+        default_shim = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
+    except (IndexError, ValueError):
+        default_shim = defaults.get("shim_ip", "")
+    config["shim_ip"] = click.prompt(
+        "    Shim IP (for host-to-container comm)",
+        default=default_shim
+    )
     config["nas_ip"] = click.prompt(
         "    NAS IP (for Synology services)",
         default=defaults.get("nas_ip", "")
@@ -214,6 +226,7 @@ def display_configuration(config: dict) -> None:
     click.echo(f"  Subnet:       {config['subnet']}")
     click.echo(f"  Gateway:      {config['gateway']}")
     click.echo(f"  Traefik IP:   {config['traefik_ip']}")
+    click.echo(f"  Shim IP:      {config.get('shim_ip', 'not set')}")
     click.echo(f"  NAS IP:       {config.get('nas_ip', 'not set')}")
     click.echo(f"  Cloudflare:   {'configured' if config.get('cloudflare_token') else 'not configured'}")
 
@@ -319,6 +332,7 @@ NETWORK_INTERFACE={config['interface']}
 NETWORK_SUBNET={config['subnet']}
 NETWORK_GATEWAY={config['gateway']}
 TRAEFIK_IP={config['traefik_ip']}
+SHIM_IP={config.get('shim_ip', '')}
 
 # Synology NAS
 NAS_IP={config.get('nas_ip', '')}
@@ -479,14 +493,21 @@ def get_service_status() -> dict:
 @click.option('--traefik-ip', help='Traefik IP address (e.g., 192.168.1.100)')
 def setup(non_interactive, skip_start, domain, email, traefik_ip):
     """
-    Complete SyrvisCore setup.
+    Complete SyrvisCore setup (initial install or reconfiguration).
 
-    This command handles all setup tasks including:
-    - Privilege elevation (automatically runs with sudo if needed)
-    - Interactive configuration prompts
-    - Docker group and socket setup
-    - Configuration file generation
-    - Service startup
+    SETUP creates or updates your configuration:
+    - Prompts for domain, network settings, and services
+    - Configures Docker group and permissions
+    - Generates .env, docker-compose.yaml, and Traefik configs
+    - Starts services
+
+    Use SETUP when:
+    - First-time installation
+    - Changing domain, IPs, or enabled services
+    - After reinstalling SyrvisCore
+
+    Use RESET instead if you just need to restart services
+    without changing any configuration.
     """
 
     # Get the system operations provider
@@ -498,6 +519,13 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo("=" * 60)
     click.echo(f"Version: {__version__}")
     click.echo(f"Mode: {ops.mode_name}")
+    click.echo()
+    click.echo("SETUP configures SyrvisCore from scratch:")
+    click.echo("  - Prompts for domain, network, and service settings")
+    click.echo("  - Creates .env, docker-compose.yaml, Traefik configs")
+    click.echo("  - Sets up Docker permissions and starts services")
+    click.echo()
+    click.echo("(Use 'syrvis reset' to restart existing configuration)")
 
     # Step 1: Check prerequisites
     click.echo()
@@ -579,6 +607,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             "subnet": network_defaults["subnet"],
             "gateway": network_defaults["gateway"],
             "traefik_ip": traefik_ip or network_defaults["traefik_ip"],
+            "shim_ip": network_defaults.get("shim_ip", ""),
             "nas_ip": network_defaults.get("nas_ip", ""),
             "synology_dsm": True,  # DSM portal enabled by default
             "synology_dsfile": False,

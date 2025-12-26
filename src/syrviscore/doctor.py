@@ -515,6 +515,95 @@ def doctor(fix, verbose, network):
             click.echo()
 
     # ==========================================================================
+    # Macvlan Configuration
+    # ==========================================================================
+    # Check macvlan shim interface (required for host-to-container communication)
+    try:
+        env_path = paths.get_env_path()
+        if env_path.exists():
+            env_content = env_path.read_text()
+            env_vars = {}
+            for line in env_content.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    env_vars[key.strip()] = value.strip()
+
+            traefik_ip = env_vars.get('TRAEFIK_IP', '')
+            shim_ip = env_vars.get('SHIM_IP', '')
+
+            # Calculate shim IP for backwards compatibility
+            if traefik_ip and not shim_ip:
+                try:
+                    parts = traefik_ip.split('.')
+                    shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
+                except (IndexError, ValueError):
+                    pass
+
+            if traefik_ip:
+                click.echo("Macvlan Configuration")
+                click.echo("-" * 70)
+
+                # Check if shim interface exists
+                shim_exists = False
+                shim_has_ip = False
+                route_exists = False
+
+                try:
+                    # Check interface exists
+                    result = subprocess.run(
+                        ["ip", "link", "show", "syrvis-shim"],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    shim_exists = result.returncode == 0
+
+                    if shim_exists:
+                        # Check interface has correct IP
+                        result = subprocess.run(
+                            ["ip", "addr", "show", "syrvis-shim"],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if result.returncode == 0 and shim_ip in result.stdout:
+                            shim_has_ip = True
+
+                        # Check route to traefik IP exists
+                        result = subprocess.run(
+                            ["ip", "route", "show", f"{traefik_ip}/32"],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if result.returncode == 0 and "syrvis-shim" in result.stdout:
+                            route_exists = True
+
+                except subprocess.TimeoutExpired:
+                    pass
+                except FileNotFoundError:
+                    # ip command not available (e.g., macOS)
+                    click.echo("  - Skipped: 'ip' command not available")
+
+                if shim_exists:
+                    click.echo(f"  ✓ Shim interface exists (syrvis-shim)")
+                    if shim_has_ip:
+                        click.echo(f"  ✓ Shim IP configured ({shim_ip})")
+                    else:
+                        click.echo(f"  ✗ Shim IP missing (expected {shim_ip})")
+                        issues.append(f"Shim interface missing IP - run: syrvis core start")
+                    if route_exists:
+                        click.echo(f"  ✓ Route to Traefik configured ({traefik_ip})")
+                    else:
+                        click.echo(f"  ✗ Route to Traefik missing")
+                        issues.append(f"Route to Traefik missing - run: syrvis core start")
+                else:
+                    click.echo(f"  ✗ Shim interface missing (syrvis-shim)")
+                    click.echo(f"     The shim enables host-to-container communication with macvlan.")
+                    click.echo(f"     Run: syrvis core start")
+                    issues.append("Macvlan shim missing - run: syrvis core start")
+
+                click.echo()
+    except Exception as e:
+        if verbose:
+            click.echo(f"  ⚠ Shim check failed: {e}")
+
+    # ==========================================================================
     # Network & Endpoints Validation
     # ==========================================================================
     endpoints = get_configured_endpoints()

@@ -170,18 +170,19 @@ class DockerManager:
         # Get network settings from environment
         interface = os.getenv("NETWORK_INTERFACE", "")
         traefik_ip = os.getenv("TRAEFIK_IP", "")
+        shim_ip = os.getenv("SHIM_IP", "")
 
         if not interface or not traefik_ip:
             return  # Skip if not configured
 
-        # Calculate shim IP: use traefik_ip + 1
-        # e.g., if traefik_ip is 192.168.8.4, shim_ip is 192.168.8.5
-        try:
-            parts = traefik_ip.split('.')
-            last_octet = int(parts[3])
-            shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
-        except (IndexError, ValueError):
-            return  # Skip if IP format is unexpected
+        # If SHIM_IP not set, calculate from traefik_ip + 1 for backwards compatibility
+        if not shim_ip:
+            try:
+                parts = traefik_ip.split('.')
+                last_octet = int(parts[3])
+                shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
+            except (IndexError, ValueError):
+                return  # Skip if IP format is unexpected
 
         # Create shim (requires root, but we're already elevated for Docker)
         ok, msg = privileged_ops.ensure_macvlan_shim(interface, traefik_ip, shim_ip)
@@ -237,8 +238,11 @@ class DockerManager:
         """
         results = {
             "containers_removed": 0,
+            "containers_stopped": [],  # List of stopped container names
             "networks_removed": 0,
+            "networks_cleaned": [],  # List of removed network names
             "volumes_removed": 0,
+            "volumes_cleaned": [],  # List of removed volume names
             "errors": [],
         }
 
@@ -249,6 +253,7 @@ class DockerManager:
                 container.stop(timeout=10)
                 container.remove(force=True)
                 results["containers_removed"] += 1
+                results["containers_stopped"].append(container_name)
             except docker.errors.NotFound:
                 pass  # Container doesn't exist
             except Exception as e:
@@ -262,9 +267,12 @@ class DockerManager:
             )
             for container in containers:
                 try:
+                    container_name = container.name
                     container.stop(timeout=10)
                     container.remove(force=True)
                     results["containers_removed"] += 1
+                    if container_name not in results["containers_stopped"]:
+                        results["containers_stopped"].append(container_name)
                 except Exception as e:
                     results["errors"].append(f"Container {container.name}: {e}")
         except Exception as e:
@@ -295,6 +303,7 @@ class DockerManager:
                     pass
                 network.remove()
                 results["networks_removed"] += 1
+                results["networks_cleaned"].append(network_name)
             except docker.errors.NotFound:
                 pass  # Network doesn't exist
             except Exception as e:
@@ -313,6 +322,7 @@ class DockerManager:
                     volume = self.client.volumes.get(volume_name)
                     volume.remove(force=True)
                     results["volumes_removed"] += 1
+                    results["volumes_cleaned"].append(volume_name)
                 except docker.errors.NotFound:
                     pass
                 except Exception as e:

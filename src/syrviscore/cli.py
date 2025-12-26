@@ -211,10 +211,25 @@ def clean(volumes, yes):
 
         click.echo()
         click.echo("Cleanup Results:")
-        click.echo(f"  Containers removed: {results['containers_removed']}")
-        click.echo(f"  Networks removed:   {results['networks_removed']}")
+
+        # Show containers
+        if results.get("containers_stopped"):
+            click.echo(f"  Containers stopped: {', '.join(results['containers_stopped'])}")
+        else:
+            click.echo(f"  Containers stopped: (none)")
+
+        # Show networks
+        if results.get("networks_cleaned"):
+            click.echo(f"  Networks removed:   {', '.join(results['networks_cleaned'])}")
+        else:
+            click.echo(f"  Networks removed:   (none)")
+
+        # Show volumes if requested
         if volumes:
-            click.echo(f"  Volumes removed:    {results['volumes_removed']}")
+            if results.get("volumes_cleaned"):
+                click.echo(f"  Volumes removed:    {', '.join(results['volumes_cleaned'])}")
+            else:
+                click.echo(f"  Volumes removed:    (none)")
 
         if results["errors"]:
             click.echo()
@@ -243,23 +258,41 @@ def reset(yes):
     - Reinstalling after an update
     - Containers/networks are in a broken state
     - Port conflicts or network issues
+
+    Unlike 'setup', this does NOT reconfigure anything - it just restarts
+    the existing configuration. Use 'setup' if you need to change settings.
     """
     privilege.ensure_elevated("Resetting services requires elevated privileges.")
 
     if not yes:
-        click.echo("This will remove all containers/networks and restart from scratch.")
+        click.echo()
+        click.echo("RESET: Restart services from scratch (keeps existing configuration)")
+        click.echo("-" * 60)
+        click.echo("This will:")
+        click.echo(f"  1. Stop and remove containers: {', '.join(DockerManager.CORE_SERVICES)}")
+        click.echo("  2. Remove Docker networks (proxy, syrvis-macvlan)")
+        click.echo("  3. Recreate macvlan shim for host-to-container communication")
+        click.echo("  4. Start all services fresh")
+        click.echo()
+        click.echo("Your configuration (.env) and certificates (acme.json) are preserved.")
+        click.echo()
         if not click.confirm("Continue?", default=False):
             click.echo("Aborted")
             return
 
     try:
+        click.echo()
         click.echo("Resetting services...")
         click.echo()
         click.echo("[1/2] Cleaning up...")
         manager = DockerManager()
         results = manager.reset_core_services()
 
-        click.echo(f"      Removed {results['containers_removed']} containers, {results['networks_removed']} networks")
+        # Show what was stopped/removed
+        if results.get("containers_stopped"):
+            click.echo(f"      Stopped: {', '.join(results['containers_stopped'])}")
+        if results.get("networks_cleaned"):
+            click.echo(f"      Removed networks: {', '.join(results['networks_cleaned'])}")
 
         if results["errors"]:
             click.echo("      Warnings:", err=True)
@@ -268,7 +301,8 @@ def reset(yes):
 
         click.echo()
         click.echo("[2/2] Starting services...")
-        click.echo("      Services started")
+        # Show what's being started
+        click.echo(f"      Starting: {', '.join(DockerManager.CORE_SERVICES)}")
 
         click.echo()
         click.echo("Reset complete. Run 'syrvis status' to verify.")
