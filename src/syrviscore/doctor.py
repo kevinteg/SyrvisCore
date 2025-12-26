@@ -148,7 +148,7 @@ def doctor(fix, verbose):
             # Check 11: .env has required values
             try:
                 env_content = env_path.read_text()
-                required_vars = ['DOMAIN', 'ACME_EMAIL', 'NETWORK_SUBNET', 'GATEWAY_IP', 'TRAEFIK_IP']
+                required_vars = ['DOMAIN', 'ACME_EMAIL', 'NETWORK_SUBNET', 'NETWORK_GATEWAY', 'TRAEFIK_IP']
                 missing_vars = []
                 
                 for var in required_vars:

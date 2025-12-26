@@ -246,7 +246,7 @@ SYRVIS_DATA_DIR={install_dir}/data
 # Network (macvlan)
 NETWORK_INTERFACE={config['interface']}
 NETWORK_SUBNET={config['subnet']}
-GATEWAY_IP={config['gateway']}
+NETWORK_GATEWAY={config['gateway']}
 TRAEFIK_IP={config['traefik_ip']}
 
 # Domain & SSL
@@ -308,6 +308,25 @@ def generate_docker_compose(install_dir: Path) -> bool:
         return False
 
 
+def ensure_data_directories() -> None:
+    """Ensure all data directories exist with proper permissions."""
+    data_dir = paths.get_data_dir()
+
+    # Create all required data directories with 755 permissions
+    directories = [
+        data_dir,
+        data_dir / "traefik",
+        data_dir / "traefik" / "config",
+        data_dir / "traefik" / "logs",
+        data_dir / "portainer",
+        data_dir / "cloudflared",
+    ]
+
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+        directory.chmod(0o755)
+
+
 def generate_traefik_config() -> bool:
     """Generate Traefik configuration files."""
     try:
@@ -319,6 +338,7 @@ def generate_traefik_config() -> bool:
         # Static config goes in data directory (mounted by container)
         traefik_data = paths.get_traefik_data_dir()
         traefik_data.mkdir(parents=True, exist_ok=True)
+        traefik_data.chmod(0o755)
 
         static_path = traefik_data / "traefik.yml"
         static_path.write_text(generate_traefik_static_config())
@@ -327,9 +347,15 @@ def generate_traefik_config() -> bool:
         # Dynamic config
         config_dir = traefik_data / "config"
         config_dir.mkdir(exist_ok=True)
+        config_dir.chmod(0o755)
         dynamic_path = config_dir / "dynamic.yml"
         dynamic_path.write_text(generate_traefik_dynamic_config())
         dynamic_path.chmod(0o644)
+
+        # Logs directory
+        logs_dir = traefik_data / "logs"
+        logs_dir.mkdir(exist_ok=True)
+        logs_dir.chmod(0o755)
 
         # Create empty acme.json with proper permissions
         acme_path = traefik_data / "acme.json"
@@ -497,6 +523,9 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     # Step 6: Generate configuration files
     click.echo()
     click.echo("[6/7] Generating configuration files...")
+
+    # Ensure data directories exist with proper permissions
+    ensure_data_directories()
 
     env_path = generate_env_file(config, install_dir, username)
     click.echo(f"      Created: {env_path}")

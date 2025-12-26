@@ -69,21 +69,81 @@ def reexec_with_sudo():
     os.execv(sudo_path, args)
 
 
+def run_syrvis_clean():
+    """Run 'syrvis clean -y' to remove containers and networks."""
+    import subprocess
+    import shutil
+
+    # Find syrvis command
+    syrvis_paths = [
+        paths.get_syrvis_home() / "bin" / "syrvis",
+        paths.get_syrvis_home() / "current" / "cli" / "venv" / "bin" / "syrvis",
+    ]
+
+    syrvis_cmd = None
+    for p in syrvis_paths:
+        try:
+            if p.exists():
+                syrvis_cmd = str(p)
+                break
+        except Exception:
+            pass
+
+    if not syrvis_cmd:
+        # Try PATH
+        syrvis_cmd = shutil.which("syrvis")
+
+    if not syrvis_cmd:
+        return False, "syrvis command not found"
+
+    try:
+        result = subprocess.run(
+            [syrvis_cmd, "clean", "-y"],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        return True, result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        return False, "Clean operation timed out"
+    except Exception as e:
+        return False, str(e)
+
+
 @cli.command()
 @click.argument('version', required=False)
 @click.option('--force', is_flag=True, help='Force reinstall even if version exists')
+@click.option('--clean', is_flag=True, help='Clean Docker containers/networks before reinstall')
 @click.option('--path', type=click.Path(), help='Installation path (default: auto-detect)')
 @click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompts')
-def install(version, force, path, yes):
+def install(version, force, clean, path, yes):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
+
+    Use --clean to remove existing Docker containers and networks before
+    reinstalling. This is recommended when reinstalling to avoid conflicts.
     """
     import os
 
     click.echo()
     click.echo("Installing SyrvisCore service...")
     click.echo()
+
+    # Clean Docker resources if requested
+    if clean:
+        click.echo("[0/4] Cleaning Docker resources...")
+        try:
+            success, output = run_syrvis_clean()
+            if success:
+                click.echo("      Containers and networks removed")
+            else:
+                click.echo(f"      Warning: Clean failed - {output}", err=True)
+                click.echo("      Continuing with install...")
+        except Exception as e:
+            click.echo(f"      Warning: Clean failed - {e}", err=True)
+            click.echo("      Continuing with install...")
+        click.echo()
 
     # Determine installation path
     try:
@@ -123,6 +183,19 @@ def install(version, force, path, yes):
         click.echo()
         click.echo("Installation complete!")
         click.echo()
+
+        # Show how to add syrvis to PATH
+        try:
+            profile_path = paths.get_syrvis_profile_path()
+            click.echo("To add 'syrvis' to your PATH:")
+            click.echo(f"  source {profile_path}")
+            click.echo()
+            click.echo("Or add to your shell profile for permanent access:")
+            click.echo(f"  echo 'source {profile_path}' >> ~/.profile")
+            click.echo()
+        except paths.SyrvisHomeError:
+            pass
+
         click.echo("Next steps:")
         click.echo("  1. Run 'syrvis setup' to configure the service")
         click.echo("  2. Run 'syrvis start' to start the services")

@@ -4,6 +4,7 @@ Version manager for SyrvisCore.
 Handles installation, activation, and rollback of service versions.
 """
 
+import os
 import sys
 import subprocess
 import shutil
@@ -16,6 +17,33 @@ import click
 from . import paths
 from . import manifest
 from . import downloader
+
+
+def set_readable_permissions(path: Path) -> None:
+    """Set directory permissions to be readable by all users (755)."""
+    try:
+        # Set directory to 755 (rwxr-xr-x)
+        os.chmod(path, 0o755)
+    except OSError:
+        pass  # Ignore permission errors
+
+
+def set_tree_readable(path: Path) -> None:
+    """Recursively set all directories to 755 and files to 644 (bin/* to 755)."""
+    try:
+        for root, dirs, files in os.walk(path):
+            root_path = Path(root)
+            # Set directory permissions
+            os.chmod(root_path, 0o755)
+            # Set file permissions
+            for f in files:
+                file_path = root_path / f
+                if root_path.name == "bin":
+                    os.chmod(file_path, 0o755)  # Executables
+                else:
+                    os.chmod(file_path, 0o644)  # Regular files
+    except OSError:
+        pass  # Ignore permission errors
 
 
 def install_version(version: str, wheel_path: Path, config_path: Optional[Path] = None) -> bool:
@@ -36,6 +64,13 @@ def install_version(version: str, wheel_path: Path, config_path: Optional[Path] 
 
         # Create version directory structure
         paths.ensure_directory_structure(syrvis_home, version)
+
+        # Set readable permissions on key directories
+        set_readable_permissions(syrvis_home)
+        set_readable_permissions(syrvis_home / "versions")
+        set_readable_permissions(syrvis_home / "config")
+        set_readable_permissions(syrvis_home / "data")
+        set_readable_permissions(syrvis_home / "bin")
 
         # Copy wheel file
         cli_dir = version_dir / "cli"
@@ -81,6 +116,10 @@ def install_version(version: str, wheel_path: Path, config_path: Optional[Path] 
         if not syrvis_bin.exists():
             click.echo("      Error: syrvis command not found after install", err=True)
             return False
+
+        # Set readable permissions on entire version directory tree
+        # (directories created as root may have restrictive permissions)
+        set_tree_readable(version_dir)
 
         # Add version to manifest
         manifest.add_version_to_manifest(version, "available")
@@ -153,8 +192,9 @@ def activate_version(version: str) -> bool:
         # Update symlink
         paths.update_current_symlink(version)
 
-        # Update wrapper script
+        # Update wrapper script and profile
         paths.create_syrvis_wrapper()
+        paths.create_syrvis_profile()
 
         # Update manifest
         manifest.set_active_version(version)
@@ -218,10 +258,12 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
     # Check if already installed
     try:
         version_dir = paths.get_version_dir(version)
-        if version_dir.exists() and not force:
-            click.echo(f"      Version {version} already installed")
-            if not click.confirm("      Reinstall?", default=False):
-                return True  # Not an error, just skip
+        if version_dir.exists():
+            if not force:
+                click.echo(f"      Version {version} already installed")
+                if not click.confirm("      Reinstall?", default=False):
+                    return True  # Not an error, just skip
+            # Remove existing version directory for reinstall
             shutil.rmtree(version_dir)
     except paths.SyrvisHomeError:
         pass  # Will create directory structure

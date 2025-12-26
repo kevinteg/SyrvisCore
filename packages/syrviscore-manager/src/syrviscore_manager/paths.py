@@ -365,6 +365,28 @@ fi
     wrapper_path.chmod(0o755)
 
 
+def create_syrvis_profile() -> Path:
+    """Create a profile snippet for the syrvis CLI."""
+    syrvis_home = get_syrvis_home()
+    bin_dir = syrvis_home / "bin"
+
+    profile_path = syrvis_home / "syrvis.profile"
+    profile_content = f'''# SyrvisCore Service CLI PATH configuration
+# Source this file to add syrvis to your PATH:
+#   source {profile_path}
+export SYRVIS_HOME="{syrvis_home}"
+export PATH="${{PATH}}:{bin_dir}"
+'''
+    profile_path.write_text(profile_content)
+    profile_path.chmod(0o644)
+    return profile_path
+
+
+def get_syrvis_profile_path() -> Path:
+    """Get the path to the syrvis profile snippet."""
+    return get_syrvis_home() / "syrvis.profile"
+
+
 # =============================================================================
 # Testing Helpers
 # =============================================================================

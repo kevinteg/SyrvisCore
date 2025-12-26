@@ -256,7 +256,9 @@ class DsmOperations(SystemOperations):
         if not target.exists():
             return False, f"Target script not found: {target}"
 
-        if symlink_path.exists():
+        # Check if symlink exists (including broken symlinks)
+        # exists() returns False for broken symlinks, but is_symlink() returns True
+        if symlink_path.exists() or symlink_path.is_symlink():
             if symlink_path.is_symlink():
                 current_target = os.readlink(str(symlink_path))
                 if str(current_target) == str(target):
@@ -410,7 +412,8 @@ class SimulationOperations(SystemOperations):
         if not target.exists():
             return False, f"Target script not found: {target}"
 
-        if symlink_path.exists():
+        # Check if symlink exists (including broken symlinks)
+        if symlink_path.exists() or symlink_path.is_symlink():
             if symlink_path.is_symlink():
                 current_target = os.readlink(str(symlink_path))
                 if str(current_target) == str(target):

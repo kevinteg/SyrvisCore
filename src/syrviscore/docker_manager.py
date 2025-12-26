@@ -178,6 +178,131 @@ class DockerManager:
         """
         self._run_compose_command(["stop"])
 
+    def clean_core_services(self, remove_volumes: bool = False) -> dict:
+        """
+        Remove all SyrvisCore containers and networks.
+
+        This is useful for cleaning up before reinstall or when containers/networks
+        are in a bad state.
+
+        Args:
+            remove_volumes: If True, also remove named volumes
+
+        Returns:
+            Dictionary with counts of removed resources
+
+        Raises:
+            DockerConnectionError: If Docker daemon unreachable
+        """
+        results = {
+            "containers_removed": 0,
+            "networks_removed": 0,
+            "volumes_removed": 0,
+            "errors": [],
+        }
+
+        # Stop and remove containers by name (more reliable than compose labels)
+        for container_name in self.CORE_SERVICES:
+            try:
+                container = self.client.containers.get(container_name)
+                container.stop(timeout=10)
+                container.remove(force=True)
+                results["containers_removed"] += 1
+            except docker.errors.NotFound:
+                pass  # Container doesn't exist
+            except Exception as e:
+                results["errors"].append(f"Container {container_name}: {e}")
+
+        # Also try to get containers by compose project label (catches renamed containers)
+        try:
+            containers = self.client.containers.list(
+                all=True,
+                filters={"label": f"com.docker.compose.project={self.PROJECT_NAME}"},
+            )
+            for container in containers:
+                try:
+                    container.stop(timeout=10)
+                    container.remove(force=True)
+                    results["containers_removed"] += 1
+                except Exception as e:
+                    results["errors"].append(f"Container {container.name}: {e}")
+        except Exception as e:
+            results["errors"].append(f"Listing containers: {e}")
+
+        # Remove networks - try various naming patterns
+        network_patterns = [
+            "proxy",
+            "syrvis-macvlan",
+            f"{self.PROJECT_NAME}_syrvis-macvlan",
+            f"{self.PROJECT_NAME}_proxy",
+            "config_syrvis-macvlan",  # Old naming pattern
+            "config_proxy",
+        ]
+
+        for network_name in network_patterns:
+            try:
+                network = self.client.networks.get(network_name)
+                # Disconnect any remaining containers first
+                try:
+                    network.reload()
+                    for container_id in network.attrs.get("Containers", {}).keys():
+                        try:
+                            network.disconnect(container_id, force=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                network.remove()
+                results["networks_removed"] += 1
+            except docker.errors.NotFound:
+                pass  # Network doesn't exist
+            except Exception as e:
+                # Only log error if it's not a "not found" type error
+                if "not found" not in str(e).lower():
+                    results["errors"].append(f"Network {network_name}: {e}")
+
+        # Optionally remove volumes
+        if remove_volumes:
+            volume_patterns = [
+                f"{self.PROJECT_NAME}_traefik_data",
+                f"{self.PROJECT_NAME}_portainer_data",
+            ]
+            for volume_name in volume_patterns:
+                try:
+                    volume = self.client.volumes.get(volume_name)
+                    volume.remove(force=True)
+                    results["volumes_removed"] += 1
+                except docker.errors.NotFound:
+                    pass
+                except Exception as e:
+                    results["errors"].append(f"Volume {volume_name}: {e}")
+
+        return results
+
+    def reset_core_services(self) -> dict:
+        """
+        Clean all containers/networks and start fresh.
+
+        This is the nuclear option - removes everything and starts from scratch.
+        Useful when reinstalling or when things are in a broken state.
+
+        Returns:
+            Dictionary with clean results and start status
+
+        Raises:
+            DockerConnectionError: If Docker daemon unreachable
+            DockerError: If start fails after clean
+        """
+        # First clean everything
+        clean_results = self.clean_core_services()
+
+        # Now start fresh
+        self._create_traefik_files()
+        self._run_compose_command(["up", "-d"])
+
+        clean_results["started"] = True
+        return clean_results
+
     def restart_core_services(self) -> None:
         """
         Restart core services using docker-compose.

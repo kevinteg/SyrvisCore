@@ -447,6 +447,7 @@ def ensure_directory_structure(install_path: Path, version: str) -> None:
     (install_path / "data").mkdir(exist_ok=True)
     (install_path / "data" / "traefik").mkdir(exist_ok=True)
     (install_path / "data" / "traefik" / "config").mkdir(exist_ok=True)
+    (install_path / "data" / "traefik" / "logs").mkdir(exist_ok=True)
     (install_path / "data" / "portainer").mkdir(exist_ok=True)
     (install_path / "data" / "cloudflared").mkdir(exist_ok=True)
 

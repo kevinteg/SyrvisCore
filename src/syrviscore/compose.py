@@ -149,22 +149,20 @@ class ComposeGenerator:
             "networks": {
                 "syrvis-macvlan": {
                     "ipv4_address": traefik_ip,
-                }
+                },
+                "proxy": {},
             },
-            "ports": ["80:80", "443:443"],
+            # No port bindings needed - traefik has its own IP via macvlan
             "environment": ["TZ=UTC"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
-                "./data/traefik/traefik.yml:/traefik.yml:ro",
-                "./data/traefik/config/:/config/:ro",
-                "./data/traefik/acme.json:/acme.json",
-                "./data/traefik/logs:/logs",
+                "../data/traefik/traefik.yml:/traefik.yml:ro",
+                "../data/traefik/config/:/config/:ro",
+                "../data/traefik/acme.json:/acme.json",
+                "../data/traefik/logs:/logs",
             ],
             "labels": [
-                "traefik.enable=true",
-                "traefik.http.routers.traefik.entrypoints=https",
-                "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)",
-                "traefik.http.routers.traefik.service=api@internal",
+                "traefik.enable=false",
             ],
         }
 
@@ -180,12 +178,13 @@ class ComposeGenerator:
             "networks": ["proxy"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
-                "./data/portainer:/data",
+                "../data/portainer:/data",
             ],
             "labels": [
                 "traefik.enable=true",
-                "traefik.http.routers.portainer.entrypoints=https",
+                "traefik.http.routers.portainer.entrypoints=websecure",
                 "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)",
+                "traefik.http.routers.portainer.tls=true",
                 "traefik.http.services.portainer.loadbalancer.server.port=9000",
             ],
         }

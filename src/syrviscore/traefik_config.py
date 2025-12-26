@@ -81,18 +81,19 @@ def generate_traefik_dynamic_config() -> str:
 
 http:
   routers:
-    # Traefik Dashboard
+    # Traefik Dashboard (HTTP)
     dashboard:
       rule: "Host(`traefik.{domain}`)"
       service: api@internal
       entryPoints:
-        - websecure
-      # Uncomment to enable TLS
-      # tls:
-      #   certResolver: letsencrypt
+        - web
 
-  # Add custom services, middleware, and routers here
-  services: {{}}
-  middlewares: {{}}
+    # Traefik Dashboard (HTTPS)
+    dashboard-secure:
+      rule: "Host(`traefik.{domain}`)"
+      service: api@internal
+      entryPoints:
+        - websecure
+      tls: {{}}
 """
     return config

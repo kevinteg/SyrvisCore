@@ -14,6 +14,7 @@ from syrviscore.traefik_config import (
 from syrviscore.setup import setup
 from syrviscore.doctor import doctor
 from syrviscore.update import update
+from syrviscore import privilege
 
 
 @click.group()
@@ -113,6 +114,7 @@ def logs(service, follow, tail):
 @cli.command()
 def start():
     """Start all services (alias for 'core start')."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Starting services...")
         manager = DockerManager()
@@ -136,6 +138,7 @@ def start():
 @cli.command()
 def stop():
     """Stop all services (alias for 'core stop')."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Stopping services...")
         manager = DockerManager()
@@ -158,6 +161,7 @@ def stop():
 @cli.command()
 def restart():
     """Restart all services (alias for 'core restart')."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Restarting services...")
         manager = DockerManager()
@@ -175,6 +179,111 @@ def restart():
         raise click.Abort()
     except Exception as e:
         click.echo(f"Failed to restart services: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.command()
+@click.option("--volumes", "-v", is_flag=True, help="Also remove named volumes")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def clean(volumes, yes):
+    """Remove all SyrvisCore containers and networks.
+
+    Useful for cleaning up before reinstall or when containers/networks
+    are in a bad state. This stops and removes:
+    - traefik, portainer, cloudflared containers
+    - proxy and syrvis-macvlan networks
+    """
+    privilege.ensure_docker_access()
+
+    if not yes:
+        msg = "This will remove all SyrvisCore containers and networks."
+        if volumes:
+            msg += " Named volumes will also be removed."
+        click.echo(msg)
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    try:
+        click.echo("Cleaning up containers and networks...")
+        manager = DockerManager()
+        results = manager.clean_core_services(remove_volumes=volumes)
+
+        click.echo()
+        click.echo("Cleanup Results:")
+        click.echo(f"  Containers removed: {results['containers_removed']}")
+        click.echo(f"  Networks removed:   {results['networks_removed']}")
+        if volumes:
+            click.echo(f"  Volumes removed:    {results['volumes_removed']}")
+
+        if results["errors"]:
+            click.echo()
+            click.echo("Warnings:", err=True)
+            for error in results["errors"]:
+                click.echo(f"  - {error}", err=True)
+
+        click.echo()
+        click.echo("Cleanup complete")
+
+    except DockerConnectionError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to clean: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def reset(yes):
+    """Clean everything and start services fresh.
+
+    This is the nuclear option - removes all containers and networks,
+    then starts services from scratch. Useful when:
+    - Reinstalling after an update
+    - Containers/networks are in a broken state
+    - Port conflicts or network issues
+    """
+    privilege.ensure_docker_access()
+
+    if not yes:
+        click.echo("This will remove all containers/networks and restart from scratch.")
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    try:
+        click.echo("Resetting services...")
+        click.echo()
+        click.echo("[1/2] Cleaning up...")
+        manager = DockerManager()
+        results = manager.reset_core_services()
+
+        click.echo(f"      Removed {results['containers_removed']} containers, {results['networks_removed']} networks")
+
+        if results["errors"]:
+            click.echo("      Warnings:", err=True)
+            for error in results["errors"]:
+                click.echo(f"        - {error}", err=True)
+
+        click.echo()
+        click.echo("[2/2] Starting services...")
+        click.echo("      Services started")
+
+        click.echo()
+        click.echo("Reset complete. Run 'syrvis status' to verify.")
+
+    except SyrvisHomeError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except DockerConnectionError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except DockerError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to reset: {e}", err=True)
         raise click.Abort()
 
 
@@ -265,6 +374,7 @@ def core():
 @core.command('start')
 def core_start():
     """Start core services."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Starting core services...")
         manager = DockerManager()
@@ -291,6 +401,7 @@ def core_start():
 @core.command('stop')
 def core_stop():
     """Stop core services."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Stopping core services...")
         manager = DockerManager()
@@ -316,6 +427,7 @@ def core_stop():
 @core.command('restart')
 def core_restart():
     """Restart core services."""
+    privilege.ensure_docker_access()
     try:
         click.echo("Restarting core services...")
         manager = DockerManager()
