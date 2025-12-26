@@ -61,7 +61,12 @@ def validate_dns_for_domain(domain: str, expected_ip: str = None) -> Dict:
     """
     Validate DNS for a domain against local and public resolvers.
 
-    Returns dict with 'local', 'public' results and 'consistent' flag.
+    For split-horizon DNS setups (common with Traefik + Cloudflare):
+    - Local DNS should resolve to TRAEFIK_IP (internal access)
+    - Public DNS may resolve to external IP (via Cloudflare tunnel)
+    - This is CORRECT, not an error!
+
+    Returns dict with 'local', 'public' results and status flags.
     """
     local_ok, local_ip = dns_lookup(domain)
     public_ok, public_ip = dns_lookup(domain, "8.8.8.8")
@@ -75,7 +80,13 @@ def validate_dns_for_domain(domain: str, expected_ip: str = None) -> Dict:
 
     if expected_ip:
         result["expected_ip"] = expected_ip
-        result["correct"] = (local_ok and local_ip == expected_ip) or (public_ok and public_ip == expected_ip)
+        # For split-horizon: local should match expected_ip (Traefik)
+        # Public can be different (Cloudflare tunnel) - that's OK
+        result["local_correct"] = local_ok and local_ip == expected_ip
+        # Split-horizon is valid: local matches expected AND public resolves (to anything)
+        result["split_horizon_ok"] = result["local_correct"] and public_ok
+        # Overall correctness: either consistent match OR valid split-horizon
+        result["correct"] = (result["consistent"] and local_ip == expected_ip) or result["split_horizon_ok"]
 
     return result
 
@@ -274,6 +285,8 @@ def get_configured_endpoints() -> List[Dict]:
             "expected_ip": traefik_ip,
             "backend_host": None,
             "backend_port": None,
+            # Traefik API returns 405 for HEAD requests - this is expected
+            "expected_status": [200, 401, 405],
         })
 
         endpoints.append({
@@ -283,19 +296,21 @@ def get_configured_endpoints() -> List[Dict]:
             "expected_ip": traefik_ip,
             "backend_host": None,
             "backend_port": None,
+            "expected_status": [200, 301, 302, 303, 307, 308],
         })
 
-        # Synology services
+        # Synology services: (name, subdomain, port, expected_status_codes)
         synology_services = {
-            "SYNOLOGY_DSM_ENABLED": ("DSM Portal", "dsm", 5001),
-            "SYNOLOGY_DSFILE_ENABLED": ("DS File", "files", 5006),
-            "SYNOLOGY_PHOTOS_ENABLED": ("Synology Photos", "photos", 5001),
-            "SYNOLOGY_DRIVE_ENABLED": ("Synology Drive", "drive", 6690),
-            "SYNOLOGY_AUDIO_ENABLED": ("Audio Station", "audio", 5001),
-            "SYNOLOGY_VIDEO_ENABLED": ("Video Station", "video", 5001),
+            "SYNOLOGY_DSM_ENABLED": ("DSM Portal", "dsm", 5001, [200, 302]),
+            # DS File/WebDAV returns 404 at root path - this is expected
+            "SYNOLOGY_DSFILE_ENABLED": ("DS File", "files", 5006, [200, 401, 404]),
+            "SYNOLOGY_PHOTOS_ENABLED": ("Synology Photos", "photos", 5001, [200, 302]),
+            "SYNOLOGY_DRIVE_ENABLED": ("Synology Drive", "drive", 6690, [200, 302, 400]),
+            "SYNOLOGY_AUDIO_ENABLED": ("Audio Station", "audio", 5001, [200, 302]),
+            "SYNOLOGY_VIDEO_ENABLED": ("Video Station", "video", 5001, [200, 302]),
         }
 
-        for env_key, (name, subdomain, port) in synology_services.items():
+        for env_key, (name, subdomain, port, expected_status) in synology_services.items():
             if env_vars.get(env_key, '').lower() in ('true', '1', 'yes'):
                 endpoints.append({
                     "name": name,
@@ -304,6 +319,7 @@ def get_configured_endpoints() -> List[Dict]:
                     "expected_ip": traefik_ip,
                     "backend_host": nas_ip,
                     "backend_port": port,
+                    "expected_status": expected_status,
                 })
 
     except Exception:
@@ -380,13 +396,40 @@ def doctor(fix, verbose, network):
             click.echo(f"  ✗ Manifest error: {e}")
             issues.append(f"Manifest error: {e}")
 
-        # Check 4: Python venv
-        venv_path = install_dir / "cli" / "venv"
-        if venv_path.exists():
-            click.echo(f"  ✓ Python venv exists")
+        # Check 4: Python venv (check versioned structure)
+        venv_found = False
+        venv_path = None
+
+        # Try versioned structure first: install_dir/current/cli/venv
+        current_venv = install_dir / "current" / "cli" / "venv"
+        if current_venv.exists():
+            venv_found = True
+            venv_path = current_venv
         else:
-            click.echo(f"  ✗ Python venv missing")
-            issues.append("Python virtual environment not found")
+            # Fallback: check versions directory
+            versions_dir = install_dir / "versions"
+            if versions_dir.exists():
+                for version_dir in versions_dir.iterdir():
+                    candidate = version_dir / "cli" / "venv"
+                    if candidate.exists():
+                        venv_found = True
+                        venv_path = candidate
+                        break
+
+            # Legacy fallback: direct cli/venv
+            if not venv_found:
+                legacy_venv = install_dir / "cli" / "venv"
+                if legacy_venv.exists():
+                    venv_found = True
+                    venv_path = legacy_venv
+
+        if venv_found:
+            click.echo(f"  ✓ Python venv exists")
+            if verbose and venv_path:
+                click.echo(f"     Path: {venv_path}")
+        else:
+            click.echo(f"  ⚠ Python venv missing (optional)")
+            # Don't add to issues - venv is optional if syrvis command works
 
         click.echo()
 
@@ -622,7 +665,13 @@ def doctor(fix, verbose, network):
             public = dns_result["public"]
 
             if local["ok"] and public["ok"]:
-                if dns_result.get("consistent"):
+                # Check for valid split-horizon DNS (local → Traefik, public → external)
+                if dns_result.get("split_horizon_ok"):
+                    # Split-horizon is correct: local points to Traefik, public resolves (Cloudflare)
+                    click.echo(f"  ✓ {domain}")
+                    if verbose or not dns_result.get("consistent"):
+                        click.echo(f"     Local: {local['ip']} | Public: {public['ip']} (split-horizon OK)")
+                elif dns_result.get("consistent"):
                     if expected_ip and local["ip"] == expected_ip:
                         click.echo(f"  ✓ {domain}")
                         if verbose:
@@ -632,10 +681,16 @@ def doctor(fix, verbose, network):
                         dns_issues.append(f"{domain}: points to {local['ip']}, expected {expected_ip}")
                     else:
                         click.echo(f"  ✓ {domain} → {local['ip']}")
+                elif expected_ip and local["ip"] != expected_ip:
+                    # Local doesn't point to Traefik - this is wrong
+                    click.echo(f"  ⚠ {domain}: Local DNS incorrect")
+                    click.echo(f"     Local: {local['ip']} (expected {expected_ip}) | Public: {public['ip']}")
+                    dns_issues.append(f"{domain}: local ({local['ip']}) should be {expected_ip}")
                 else:
-                    click.echo(f"  ⚠ {domain}: DNS inconsistent")
-                    click.echo(f"     Local: {local['ip']} | Public: {public['ip']}")
-                    dns_issues.append(f"{domain}: local ({local['ip']}) != public ({public['ip']})")
+                    # No expected IP, just note the inconsistency
+                    click.echo(f"  ✓ {domain}")
+                    if verbose:
+                        click.echo(f"     Local: {local['ip']} | Public: {public['ip']}")
             elif public["ok"]:
                 click.echo(f"  ⚠ {domain}: Local NXDOMAIN, Public: {public['ip']}")
                 dns_issues.append(f"{domain}: not in local DNS")
@@ -710,12 +765,16 @@ def doctor(fix, verbose, network):
         for endpoint in endpoints:
             domain = endpoint["domain"]
             name = endpoint["name"]
+            expected_status = endpoint.get("expected_status", [200, 301, 302, 303, 307, 308])
 
             http_result = check_http_endpoint(f"https://{domain}")
 
             if http_result["reachable"]:
                 status = http_result["status_code"]
-                if status in (200, 301, 302, 303, 307, 308):
+                if status in expected_status:
+                    click.echo(f"  ✓ {domain}: HTTP {status}")
+                elif status in (200, 301, 302, 303, 307, 308):
+                    # Still reachable but unexpected status for this service
                     click.echo(f"  ✓ {domain}: HTTP {status}")
                 else:
                     click.echo(f"  ⚠ {domain}: HTTP {status}")
