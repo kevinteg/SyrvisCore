@@ -17,7 +17,7 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 | Manager CLI | `syrvisctl` |
 | Service CLI | `syrvis` |
 | Target Platform | Synology DSM 7.0+ |
-| Installation Path | `/volume1/docker/syrviscore/` |
+| Installation Path | `/volumeX/syrviscore/` (auto-detected from package volume) |
 | Python Version | 3.8.12 (matches Synology DSM) |
 
 ## Architecture: Split Packages
@@ -34,9 +34,10 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 ```
 /var/packages/syrviscore/target/      # SPK install (IMMUTABLE)
 ├── venv/bin/syrvisctl                 # Manager CLI
-└── syrviscore_manager-*.whl
+├── syrviscore_manager-*.whl
+└── syrviscore.profile                 # Source this to add to PATH
 
-/volumeX/docker/syrviscore/            # SYRVIS_HOME (managed by syrvisctl)
+/volumeX/syrviscore/                   # SYRVIS_HOME (auto-detected from package volume)
 ├── current -> versions/0.2.0          # Symlink to active version
 ├── versions/
 │   ├── 0.1.0/cli/venv/bin/syrvis      # Previous version
