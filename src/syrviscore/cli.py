@@ -114,7 +114,7 @@ def logs(service, follow, tail):
 @cli.command()
 def start():
     """Start all services (alias for 'core start')."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Starting services requires elevated privileges.")
     try:
         click.echo("Starting services...")
         manager = DockerManager()
@@ -138,7 +138,7 @@ def start():
 @cli.command()
 def stop():
     """Stop all services (alias for 'core stop')."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Stopping services requires elevated privileges.")
     try:
         click.echo("Stopping services...")
         manager = DockerManager()
@@ -161,7 +161,7 @@ def stop():
 @cli.command()
 def restart():
     """Restart all services (alias for 'core restart')."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Restarting services requires elevated privileges.")
     try:
         click.echo("Restarting services...")
         manager = DockerManager()
@@ -193,7 +193,7 @@ def clean(volumes, yes):
     - traefik, portainer, cloudflared containers
     - proxy and syrvis-macvlan networks
     """
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Cleaning up containers requires elevated privileges.")
 
     if not yes:
         msg = "This will remove all SyrvisCore containers and networks."
@@ -244,7 +244,7 @@ def reset(yes):
     - Containers/networks are in a broken state
     - Port conflicts or network issues
     """
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Resetting services requires elevated privileges.")
 
     if not yes:
         click.echo("This will remove all containers/networks and restart from scratch.")
@@ -374,7 +374,7 @@ def core():
 @core.command('start')
 def core_start():
     """Start core services."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Starting services requires elevated privileges.")
     try:
         click.echo("Starting core services...")
         manager = DockerManager()
@@ -401,7 +401,7 @@ def core_start():
 @core.command('stop')
 def core_stop():
     """Stop core services."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Stopping services requires elevated privileges.")
     try:
         click.echo("Stopping core services...")
         manager = DockerManager()
@@ -427,7 +427,7 @@ def core_stop():
 @core.command('restart')
 def core_restart():
     """Restart core services."""
-    privilege.ensure_docker_access()
+    privilege.ensure_elevated("Restarting services requires elevated privileges.")
     try:
         click.echo("Restarting core services...")
         manager = DockerManager()
