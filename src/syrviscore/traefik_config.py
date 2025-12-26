@@ -21,19 +21,20 @@ from typing import Dict, List, Optional
 
 SYNOLOGY_SERVICES = {
     # Service key: (subdomain, port, protocol, description)
-    "dsfile": {
-        "subdomain": "files",
-        "port": 5006,
-        "protocol": "https",
-        "description": "DS File / WebDAV",
-        "env_enabled": "SYNOLOGY_DSFILE_ENABLED",
-    },
+    # Note: DS File removed - use SMB directly to NAS IP instead
     "photos": {
         "subdomain": "photos",
         "port": 5001,
         "protocol": "https",
         "description": "Synology Photos",
         "env_enabled": "SYNOLOGY_PHOTOS_ENABLED",
+    },
+    "photostation": {
+        "subdomain": "photostation",
+        "port": 5001,
+        "protocol": "https",
+        "description": "Photo Station",
+        "env_enabled": "SYNOLOGY_PHOTOSTATION_ENABLED",
     },
     "dsm": {
         "subdomain": "dsm",

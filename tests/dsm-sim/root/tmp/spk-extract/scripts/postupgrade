@@ -1,0 +1,143 @@
+#!/bin/sh
+# postupgrade - Upgrade SyrvisCore Manager
+# POSIX shell compatible
+#
+# This script upgrades the MANAGER package only.
+# Service versions are managed separately via 'syrvisctl'.
+#
+# All dependencies are bundled in the SPK - NO NETWORK ACCESS REQUIRED.
+
+set -e
+
+SCRIPT_NAME="postupgrade"
+LOG_FILE="/tmp/syrviscore-install.log"
+
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
+
+log_info "==================================================================="
+log_info "Upgrading SyrvisCore Manager"
+log_info "==================================================================="
+log_info "Target directory: ${SYNOPKG_PKGDEST}"
+log_info ""
+
+# === Upgrade manager virtual environment ===
+log_info "[1/3] Upgrading manager virtual environment..."
+
+MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
+
+# Remove old venv
+if [ -d "$MANAGER_VENV" ]; then
+    rm -rf "$MANAGER_VENV"
+    log_info "  Removed old venv"
+fi
+
+# Create new venv
+python3 -m venv "$MANAGER_VENV"
+log_info "  Created new venv"
+
+# === Install manager package from bundled wheels ===
+log_info "[2/3] Installing manager package (offline from bundled wheels)..."
+
+# Find wheels directory
+WHEELS_DIR="${SYNOPKG_PKGDEST}/wheels"
+
+if [ ! -d "$WHEELS_DIR" ]; then
+    log_error "Wheels directory not found: $WHEELS_DIR"
+    exit 1
+fi
+
+WHEEL_COUNT=$(ls -1 "${WHEELS_DIR}"/*.whl 2>/dev/null | wc -l | tr -d ' ')
+log_info "  Found $WHEEL_COUNT bundled wheel(s)"
+
+# Find the manager wheel specifically
+MANAGER_WHEEL=$(ls "${WHEELS_DIR}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
+
+if [ -z "$MANAGER_WHEEL" ]; then
+    log_error "Manager wheel not found in wheels directory"
+    exit 1
+fi
+
+log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
+
+# Install manager and dependencies from bundled wheels
+# In production (Synology): --no-index ensures offline installation
+# In simulation (macOS): Allow network for platform-specific wheels
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
+    # Simulation mode: use bundled wheels but allow network for platform-specific deps
+    log_info "  (Simulation mode: allowing network for platform-specific wheels)"
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+else
+    # Production mode: fully offline installation
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --no-index \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+fi
+
+log_info "  Manager package and dependencies installed (offline)"
+
+# Verify installation
+if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
+    log_error "syrvisctl command not found after install"
+    exit 1
+fi
+
+log_info "  Verified: syrvisctl command available"
+
+# === Update global symlink ===
+log_info "[3/3] Updating global symlink..."
+
+SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
+
+mkdir -p /usr/local/bin
+
+if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
+    rm -f "$SYRVISCTL_LINK"
+fi
+
+ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK"
+log_info "  Updated symlink: ${SYRVISCTL_LINK}"
+
+log_info ""
+log_info "==================================================================="
+log_info "SyrvisCore Manager Upgrade Complete"
+log_info "==================================================================="
+log_info ""
+log_info "The manager has been upgraded."
+log_info ""
+log_info "Service versions are not affected by this upgrade."
+log_info "To update the service package, run:"
+log_info "  syrvisctl install"
+log_info ""
+log_info "==================================================================="
+log_info "Detailed logs: $LOG_FILE"
+
+exit 0

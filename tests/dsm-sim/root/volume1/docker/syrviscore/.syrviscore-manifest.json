@@ -1,0 +1,68 @@
+{
+  "schema_version": 3,
+  "active_version": "0.1.0",
+  "install_path": "/Users/kevinteg/code/synology/SyrvisCore/tests/dsm-sim/root/volume1/docker/syrviscore",
+  "setup_complete": true,
+  "created_at": "2025-12-25T21:23:09.010654",
+  "versions": {
+    "0.0.1": {
+      "installed_at": "2025-12-25T21:45:23.586914",
+      "status": "available",
+      "activated_at": "2025-12-25T21:45:28.166632"
+    },
+    "0.0.2": {
+      "installed_at": "2025-12-25T21:45:27.638235",
+      "status": "available",
+      "activated_at": "2025-12-25T21:45:28.035554"
+    },
+    "0.1.0": {
+      "installed_at": "2025-12-25T21:53:10.846044",
+      "status": "active",
+      "activated_at": "2025-12-25T21:53:10.846813"
+    }
+  },
+  "update_history": [
+    {
+      "from": "0.0.1",
+      "to": "0.0.2",
+      "timestamp": "2025-12-25T21:45:27.638915",
+      "type": "upgrade"
+    },
+    {
+      "from": "0.0.2",
+      "to": "0.0.1",
+      "timestamp": "2025-12-25T21:45:27.903997",
+      "type": "rollback"
+    },
+    {
+      "from": "0.0.1",
+      "to": "0.0.2",
+      "timestamp": "2025-12-25T21:45:28.035558",
+      "type": "upgrade"
+    },
+    {
+      "from": "0.0.2",
+      "to": "0.0.1",
+      "timestamp": "2025-12-25T21:45:28.166637",
+      "type": "rollback"
+    },
+    {
+      "from": "0.0.1",
+      "to": "0.1.0",
+      "timestamp": "2025-12-25T21:53:10.846815",
+      "type": "upgrade"
+    }
+  ],
+  "privileged_setup": {
+    "docker_group_created": true,
+    "user_added_to_docker": "kevinteg",
+    "global_symlink": "/usr/local/bin/syrvis",
+    "startup_script": "/Users/kevinteg/code/synology/SyrvisCore/tests/dsm-sim/root/volume1/docker/syrviscore/bin/syrvis-startup.sh"
+  },
+  "setup_completed_at": "2025-12-26T05:40:17.683074",
+  "setup_user": "kevinteg",
+  "config": {
+    "domain": "example.com",
+    "traefik_ip": "192.168.1.100"
+  }
+}

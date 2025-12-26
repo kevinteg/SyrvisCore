@@ -1,0 +1,129 @@
+#!/bin/sh
+# preuninst - Pre-uninstallation cleanup
+# POSIX shell compatible
+
+# === Logging Functions ===
+SCRIPT_NAME="preuninst"
+LOG_FILE="/tmp/syrviscore-install.log"
+
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+    
+    # Write to stdout/stderr
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+    
+    # Append to log file
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_warn() {
+    log_msg "WARN" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+# === Pre-Uninstallation Start ===
+log_info "==================================================================="
+log_info "Starting SyrvisCore pre-uninstallation cleanup"
+log_info "==================================================================="
+
+log_info "Environment:"
+log_info "  User: $(whoami)"
+log_info "  UID: $(id -u)"
+log_info "  Working directory: $(pwd)"
+
+# === SECTION 1: Detect installation directory ===
+log_info "[1/3] Detecting installation directory..."
+INSTALL_DIR=""
+for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+    if [ -f "${VOLUME}/docker/syrviscore/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="${VOLUME}/docker/syrviscore"
+        log_info "  Found installation at: $INSTALL_DIR"
+        break
+    fi
+done
+
+if [ -z "$INSTALL_DIR" ]; then
+    log_warn "  Installation directory not found"
+    log_warn "  Skipping service stop"
+else
+    log_info "  Installation directory: $INSTALL_DIR"
+fi
+
+# === SECTION 2: Stop services gracefully ===
+log_info "[2/3] Stopping SyrvisCore services..."
+if [ -n "$INSTALL_DIR" ] && [ -f "${INSTALL_DIR}/bin/syrvis" ]; then
+    log_info "  CLI found at: ${INSTALL_DIR}/bin/syrvis"
+    log_info "  Attempting to stop services gracefully..."
+    
+    if "${INSTALL_DIR}/bin/syrvis" stop > /tmp/syrviscore-stop.log 2>&1; then
+        log_info "  Services stopped successfully"
+    else
+        log_warn "  Failed to stop services gracefully"
+        log_warn "  See /tmp/syrviscore-stop.log for details"
+        cat /tmp/syrviscore-stop.log >> "$LOG_FILE" 2>/dev/null || true
+    fi
+else
+    log_warn "  CLI not found, skipping service stop"
+fi
+
+# === SECTION 3: Cleanup privileged system resources ===
+log_info "[3/3] Cleaning up privileged system resources..."
+if [ "$(id -u)" -eq 0 ]; then
+    log_info "  Running as root, cleaning up system resources..."
+    
+    # Remove startup script
+    if [ -f /usr/local/etc/rc.d/S99syrviscore.sh ]; then
+        log_info "  Removing startup script..."
+        if rm -f /usr/local/etc/rc.d/S99syrviscore.sh; then
+            log_info "    Removed: /usr/local/etc/rc.d/S99syrviscore.sh"
+        else
+            log_error "    Failed to remove startup script"
+        fi
+    else
+        log_info "  No startup script found"
+    fi
+    
+    # Remove global symlink
+    if [ -L /usr/local/bin/syrvis ] || [ -f /usr/local/bin/syrvis ]; then
+        log_info "  Removing global CLI symlink..."
+        if rm -f /usr/local/bin/syrvis; then
+            log_info "    Removed: /usr/local/bin/syrvis"
+        else
+            log_error "    Failed to remove CLI symlink"
+        fi
+    else
+        log_info "  No global CLI symlink found"
+    fi
+    
+    log_info "  System resources cleaned up successfully"
+else
+    log_warn "  Not running as root (UID: $(id -u))"
+    log_warn "  Some system resources may not be cleaned up:"
+    log_warn "    - /usr/local/etc/rc.d/S99syrviscore.sh"
+    log_warn "    - /usr/local/bin/syrvis"
+    log_warn "  You may need to manually remove these files"
+fi
+
+log_info "==================================================================="
+log_info "Pre-uninstallation cleanup completed"
+log_info "==================================================================="
+log_info "Detailed logs: $LOG_FILE"
+
+echo "Stopping SyrvisCore services..."
+echo "Cleaning up system resources..."
+
+exit 0

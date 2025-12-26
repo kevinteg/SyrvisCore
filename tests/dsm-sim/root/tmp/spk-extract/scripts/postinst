@@ -1,0 +1,155 @@
+#!/bin/sh
+# postinst - Install SyrvisCore Manager
+# POSIX shell compatible
+#
+# This script installs the MANAGER package only.
+# The service package is installed separately via 'syrvisctl install'.
+#
+# All dependencies are bundled in the SPK - NO NETWORK ACCESS REQUIRED.
+
+set -e
+
+SCRIPT_NAME="postinst"
+LOG_FILE="/tmp/syrviscore-install.log"
+
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
+
+log_info "==================================================================="
+log_info "Installing SyrvisCore Manager"
+log_info "==================================================================="
+log_info "Target directory: ${SYNOPKG_PKGDEST}"
+log_info ""
+
+# === Create manager virtual environment ===
+log_info "[1/3] Creating manager virtual environment..."
+
+MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
+
+# Create venv
+python3 -m venv "$MANAGER_VENV"
+log_info "  Created venv at: ${MANAGER_VENV}"
+
+# === Install manager package from bundled wheels ===
+log_info "[2/3] Installing manager package (offline from bundled wheels)..."
+
+# Find wheels directory
+WHEELS_DIR="${SYNOPKG_PKGDEST}/wheels"
+
+if [ ! -d "$WHEELS_DIR" ]; then
+    log_error "Wheels directory not found: $WHEELS_DIR"
+    log_error "Contents of ${SYNOPKG_PKGDEST}:"
+    ls -la "${SYNOPKG_PKGDEST}" >> "$LOG_FILE" 2>&1
+    exit 1
+fi
+
+WHEEL_COUNT=$(ls -1 "${WHEELS_DIR}"/*.whl 2>/dev/null | wc -l | tr -d ' ')
+log_info "  Found $WHEEL_COUNT bundled wheel(s)"
+
+# Find the manager wheel specifically
+MANAGER_WHEEL=$(ls "${WHEELS_DIR}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
+
+if [ -z "$MANAGER_WHEEL" ]; then
+    log_error "Manager wheel not found in wheels directory"
+    exit 1
+fi
+
+log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
+
+# Install manager and dependencies from bundled wheels
+# In production (Synology): --no-index ensures offline installation
+# In simulation (macOS): Allow network for platform-specific wheels
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
+    # Simulation mode: use bundled wheels but allow network for platform-specific deps
+    log_info "  (Simulation mode: allowing network for platform-specific wheels)"
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+else
+    # Production mode: fully offline installation
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --no-index \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+fi
+
+log_info "  Manager package and dependencies installed (offline)"
+
+# Verify installation
+if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
+    log_error "syrvisctl command not found after install"
+    exit 1
+fi
+
+log_info "  Verified: syrvisctl command available"
+
+# === Create global symlink ===
+log_info "[3/3] Creating global symlink..."
+
+# Use simulation root if in simulation mode
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ] && [ -n "$DSM_SIM_ROOT" ]; then
+    SYRVISCTL_LINK="${DSM_SIM_ROOT}/usr/local/bin/syrvisctl"
+    mkdir -p "${DSM_SIM_ROOT}/usr/local/bin"
+else
+    SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
+    mkdir -p /usr/local/bin
+fi
+
+# Remove old symlink if exists
+if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
+    rm -f "$SYRVISCTL_LINK"
+fi
+
+# Create new symlink
+ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK"
+log_info "  Created symlink: ${SYRVISCTL_LINK}"
+
+log_info ""
+log_info "==================================================================="
+log_info "SyrvisCore Manager Installation Complete"
+log_info "==================================================================="
+log_info ""
+log_info "NEXT STEPS:"
+log_info ""
+log_info "  1. Install the service package:"
+log_info "     syrvisctl install"
+log_info ""
+log_info "  2. Run setup to configure:"
+log_info "     syrvis setup"
+log_info ""
+log_info "  3. Start services:"
+log_info "     syrvis start"
+log_info ""
+log_info "For help:"
+log_info "  syrvisctl --help"
+log_info ""
+log_info "Documentation: https://github.com/kevinteg/SyrvisCore"
+log_info "==================================================================="
+log_info "Detailed logs: $LOG_FILE"
+
+exit 0

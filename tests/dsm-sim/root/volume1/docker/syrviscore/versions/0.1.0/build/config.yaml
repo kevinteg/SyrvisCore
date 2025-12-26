@@ -1,0 +1,29 @@
+# SyrvisCore Build Configuration
+# Generated for v0.1.0 release
+#
+# This file specifies Docker image versions for the core services.
+# Update these versions using: ./build-tools/select-docker-versions.py
+
+metadata:
+  syrviscore_version: "0.1.0"
+  created_at: "2025-12-25T00:00:00Z"
+  description: "SyrvisCore v0.1.0 - Initial stable release"
+
+docker_images:
+  traefik:
+    image: traefik
+    tag: v3.2.3
+    full_image: traefik:v3.2.3
+    description: "Cloud native application proxy and load balancer"
+
+  portainer:
+    image: portainer/portainer-ce
+    tag: "2.21.4"
+    full_image: portainer/portainer-ce:2.21.4
+    description: "Container management UI"
+
+  cloudflared:
+    image: cloudflare/cloudflared
+    tag: "2024.11.1"
+    full_image: cloudflare/cloudflared:2024.11.1
+    description: "Cloudflare Tunnel client (optional)"

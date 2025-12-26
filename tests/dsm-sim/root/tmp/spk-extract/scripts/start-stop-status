@@ -1,0 +1,90 @@
+#!/bin/sh
+# start-stop-status - DSM service control for SyrvisCore
+# POSIX shell compatible
+#
+# The SyrvisCore Manager is a CLI tool, not a running service.
+# Service management (start/stop) is handled by 'syrvis' command.
+
+SCRIPT_NAME="start-stop-status"
+LOG_FILE="/tmp/syrviscore-install.log"
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
+
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+# Detect service installation directory
+find_syrvis_home() {
+    for VOLUME in /volume1 /volume2 /volume3 /volume4; do
+        if [ -f "${VOLUME}/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+            echo "${VOLUME}/docker/${PACKAGE_NAME}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+case "$1" in
+    start)
+        log_info "SyrvisCore Manager is ready."
+        log_info "Use 'syrvisctl' for version management."
+        log_info "Use 'syrvis start' to start Docker services."
+        exit 0
+        ;;
+
+    stop)
+        log_info "SyrvisCore Manager stopped."
+        log_info "Note: Docker services may still be running."
+        log_info "Use 'syrvis stop' to stop Docker services."
+        exit 0
+        ;;
+
+    status)
+        # Check if manager is installed properly
+        if [ ! -f "${SYNOPKG_PKGDEST}/venv/bin/syrvisctl" ]; then
+            log_info "Status: Manager not installed"
+            exit 1
+        fi
+
+        # Check if any service version is installed
+        SYRVIS_HOME=$(find_syrvis_home)
+
+        if [ -n "$SYRVIS_HOME" ] && [ -L "${SYRVIS_HOME}/current" ]; then
+            # Service is installed, check if setup is complete
+            if grep -q '"setup_complete": true' "${SYRVIS_HOME}/.syrviscore-manifest.json" 2>/dev/null; then
+                log_info "Status: Running (setup complete)"
+                exit 0
+            else
+                log_info "Status: Installed (setup pending)"
+                log_info "Run 'syrvis setup' to complete configuration"
+                exit 0
+            fi
+        else
+            # Manager installed but no service version
+            log_info "Status: Manager ready, no service installed"
+            log_info "Run 'syrvisctl install' to install service"
+            exit 0
+        fi
+        ;;
+
+    *)
+        log_info "Usage: $0 {start|stop|status}"
+        exit 1
+        ;;
+esac

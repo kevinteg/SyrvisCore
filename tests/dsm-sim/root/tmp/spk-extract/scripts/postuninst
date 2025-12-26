@@ -1,0 +1,145 @@
+#!/bin/sh
+# postuninst - Post-uninstallation script for SyrvisCore
+# Cleans up system components and optionally removes data
+
+# Enhanced logging
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+set -x
+exec 2>>"$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')]  $*" | tee -a "$LOG_FILE"
+}
+
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "PATH: $PATH"
+
+
+set -e
+
+PACKAGE_NAME="syrviscore"
+LOG_FILE="/tmp/${PACKAGE_NAME}_uninstall.log"
+
+# Logging function
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== SyrvisCore Post-Uninstallation ====="
+
+# Get installation directory from preuninst
+INSTALL_DIR=""
+if [ -f /tmp/syrviscore_install_dir ]; then
+    INSTALL_DIR=$(cat /tmp/syrviscore_install_dir)
+    rm -f /tmp/syrviscore_install_dir
+fi
+
+# Step 1: Remove startup script
+log "Step 1: Removing startup script"
+STARTUP_SCRIPT="/usr/local/etc/rc.d/S99syrviscore-docker.sh"
+if [ -f "$STARTUP_SCRIPT" ]; then
+    rm -f "$STARTUP_SCRIPT"
+    log "Removed startup script: $STARTUP_SCRIPT"
+else
+    log "Startup script not found (already removed)"
+fi
+
+# Step 2: Remove CLI symlink
+log "Step 2: Removing CLI symlink"
+if [ -L /usr/local/bin/syrvis ]; then
+    rm -f /usr/local/bin/syrvis
+    log "Removed CLI symlink: /usr/local/bin/syrvis"
+else
+    log "CLI symlink not found (already removed)"
+fi
+
+# Step 3: Reset Docker socket permissions to default
+log "Step 3: Resetting Docker socket permissions"
+if [ -S /var/run/docker.sock ]; then
+    chown root:root /var/run/docker.sock
+    chmod 666 /var/run/docker.sock
+    log "Docker socket permissions reset to root:root 666"
+else
+    log "Docker socket not found"
+fi
+
+# Step 4: Handle data directory based on wizard choice
+# Note: For MVP, we keep the data by default. Add wizard option in future.
+KEEP_DATA="${pkgwizard_keep_data:-yes}"
+
+if [ "$KEEP_DATA" = "yes" ] || [ -z "$KEEP_DATA" ]; then
+    log "Step 4: Preserving data directory (user choice or default)"
+    if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
+        # Only remove CLI virtual environment and non-data files
+        log "Removing CLI virtual environment"
+        rm -rf "$INSTALL_DIR/cli" 2>/dev/null || true
+        
+        log "Data and configuration preserved at: $INSTALL_DIR"
+        log "To completely remove, manually delete: $INSTALL_DIR"
+        
+        # Create uninstall notice file
+        cat > "$INSTALL_DIR/UNINSTALLED.txt" << NOTICE_EOF
+SyrvisCore was uninstalled on $(date)
+
+Your data and configuration have been preserved at this location.
+
+Data Directory Structure:
+- data/traefik/     - Traefik data including SSL certificates
+- data/portainer/   - Portainer data
+- data/cloudflared/ - Cloudflare tunnel data (if used)
+- .env              - Your configuration file
+
+To reinstall SyrvisCore:
+1. Install the package via Package Center
+2. Your data and configuration will be detected automatically
+
+To completely remove all data:
+rm -rf $INSTALL_DIR
+
+For support: https://github.com/kevinteg/SyrvisCore/issues
+NOTICE_EOF
+        log "Created uninstall notice: $INSTALL_DIR/UNINSTALLED.txt"
+    fi
+else
+    log "Step 4: Removing all data (user chose to delete)"
+    if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
+        log "Removing installation directory: $INSTALL_DIR"
+        rm -rf "$INSTALL_DIR"
+        log "All data removed"
+    else
+        log "No installation directory found to remove"
+    fi
+fi
+
+# Step 5: Optional - Remove syrvis-bot from docker and administrators groups
+# (Keep user account for potential reinstall)
+log "Step 5: Cleaning up user groups"
+if id syrvis-bot > /dev/null 2>&1; then
+    # Remove from docker group (but keep the user)
+    synogroup --member docker syrvis-bot 2>/dev/null || true
+    synogroup --member administrators syrvis-bot 2>/dev/null || true
+    log "Removed syrvis-bot from docker and administrators groups"
+    log "Note: syrvis-bot user account preserved for potential reinstall"
+else
+    log "syrvis-bot user not found (already removed)"
+fi
+
+# Step 6: Clean up temporary files
+log "Step 6: Cleaning up temporary files"
+rm -f /tmp/syrviscore_previous_version 2>/dev/null || true
+rm -f /tmp/syrviscore_install.log 2>/dev/null || true
+
+# Keep the uninstall log for reference
+log "===== SyrvisCore Uninstallation Complete ====="
+if [ "$KEEP_DATA" = "yes" ] || [ -z "$KEEP_DATA" ]; then
+    log "Data preserved at: $INSTALL_DIR"
+    log "To completely remove: rm -rf $INSTALL_DIR"
+else
+    log "All data removed"
+fi
+log "Uninstall log saved at: $LOG_FILE"
+
+exit 0

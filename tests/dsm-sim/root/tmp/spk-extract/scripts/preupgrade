@@ -1,0 +1,89 @@
+#!/bin/sh
+# preupgrade - Pre-upgrade script for SyrvisCore
+# Prepares for upgrade by backing up configuration and stopping services
+
+set -e
+
+# Enhanced logging
+SCRIPT_NAME=$(basename "$0")
+LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+set -x
+exec 2>>"$LOG_FILE"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+log "===== $SCRIPT_NAME START ====="
+log "User: $(whoami)"
+log "PATH: $PATH"
+
+PACKAGE_NAME="syrviscore"
+
+# Find installation directory
+INSTALL_DIR=""
+for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+    if [ -f "$VOLUME/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="$VOLUME/docker/${PACKAGE_NAME}"
+        break
+    fi
+done
+
+if [ -z "$INSTALL_DIR" ]; then
+    log "No previous installation found - fresh install"
+    log "Skipping upgrade tasks"
+    log "===== $SCRIPT_NAME SUCCESS (fresh install) ====="
+    exit 0
+fi
+
+log "Found existing installation: $INSTALL_DIR"
+
+# Read current version from manifest
+if [ -f "$INSTALL_DIR/.syrviscore-manifest.json" ]; then
+    CURRENT_VERSION=$(grep -o '"version": *"[^"]*"' "$INSTALL_DIR/.syrviscore-manifest.json" | head -1 | cut -d'"' -f4)
+    log "Current version: $CURRENT_VERSION"
+    echo "$CURRENT_VERSION" > /tmp/syrviscore_previous_version
+else
+    log "WARNING: No manifest found, version unknown"
+    echo "unknown" > /tmp/syrviscore_previous_version
+fi
+
+# Stop running services
+log "Stopping services before upgrade"
+if [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
+    cd "$INSTALL_DIR"
+    
+    if /usr/bin/which syrvis >/dev/null 2>&1; then
+        log "Stopping via syrvis CLI"
+        syrvis stop 2>&1 | tee -a "$LOG_FILE" || true
+    else
+        log "Stopping via docker-compose"
+        if /usr/bin/which docker-compose >/dev/null 2>&1; then
+            docker-compose down 2>&1 | tee -a "$LOG_FILE" || true
+        elif /usr/bin/which docker >/dev/null 2>&1; then
+            docker compose down 2>&1 | tee -a "$LOG_FILE" || true
+        fi
+    fi
+else
+    log "No docker-compose.yaml found, nothing to stop"
+fi
+
+# Backup configuration files (not data)
+log "Backing up configuration"
+BACKUP_DIR="$INSTALL_DIR/versions/backup-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR"
+
+# Backup critical files
+[ -f "$INSTALL_DIR/.env" ] && cp "$INSTALL_DIR/.env" "$BACKUP_DIR/" && log "Backed up .env"
+[ -f "$INSTALL_DIR/docker-compose.yaml" ] && cp "$INSTALL_DIR/docker-compose.yaml" "$BACKUP_DIR/" && log "Backed up docker-compose.yaml"
+[ -f "$INSTALL_DIR/.syrviscore-manifest.json" ] && cp "$INSTALL_DIR/.syrviscore-manifest.json" "$BACKUP_DIR/" && log "Backed up manifest"
+
+log "Configuration backed up to: $BACKUP_DIR"
+
+# Store installation directory for postupgrade
+echo "$INSTALL_DIR" > /tmp/syrviscore_install_dir
+
+log "Pre-upgrade preparation complete"
+log "===== $SCRIPT_NAME SUCCESS ====="
+exit 0
