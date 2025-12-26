@@ -449,8 +449,7 @@ def generate_docker_compose(install_dir: Path) -> bool:
         output_path = paths.get_docker_compose_path()
 
         if not config_yaml.exists():
-            click.echo(f"      Warning: {config_yaml} not found, skipping compose generation")
-            return False
+            click.echo(f"      Using default Docker image versions")
 
         generate_compose_from_config(
             config_path=str(config_yaml),

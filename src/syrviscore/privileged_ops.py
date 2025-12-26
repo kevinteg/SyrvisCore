@@ -694,3 +694,89 @@ def verify_docker_accessible(username: Optional[str] = None) -> Tuple[bool, str]
 def ensure_macvlan_shim(interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
     """Create macvlan shim for host-to-container communication."""
     return get_system_operations().ensure_macvlan_shim(interface, traefik_ip, shim_ip)
+
+
+# =============================================================================
+# Read-only diagnostic functions (don't need SystemOperations)
+# =============================================================================
+
+def get_docker_group_info() -> Tuple[bool, Optional[int]]:
+    """Check if docker group exists and get its GID.
+
+    Returns:
+        Tuple of (exists, gid) - gid is None if group doesn't exist
+    """
+    import grp
+    try:
+        group_info = grp.getgrnam('docker')
+        return True, group_info.gr_gid
+    except KeyError:
+        return False, None
+
+
+def is_user_in_group(username: str, group: str) -> bool:
+    """Check if a user is a member of a group.
+
+    Args:
+        username: The username to check
+        group: The group name to check membership in
+
+    Returns:
+        True if user is in the group, False otherwise
+    """
+    import grp
+    import pwd
+    try:
+        group_info = grp.getgrnam(group)
+        # Check if user is in the group's member list
+        if username in group_info.gr_mem:
+            return True
+        # Also check if this is the user's primary group
+        try:
+            user_info = pwd.getpwnam(username)
+            if user_info.pw_gid == group_info.gr_gid:
+                return True
+        except KeyError:
+            pass
+        return False
+    except KeyError:
+        return False
+
+
+def get_docker_socket_permissions() -> Tuple[str, str, str]:
+    """Get Docker socket ownership and permissions.
+
+    Returns:
+        Tuple of (owner, group, permissions) as strings
+        e.g., ("root", "docker", "660")
+    """
+    import os
+    import stat
+    import pwd
+    import grp
+
+    socket_path = "/var/run/docker.sock"
+
+    try:
+        st = os.stat(socket_path)
+
+        # Get owner name
+        try:
+            owner = pwd.getpwuid(st.st_uid).pw_name
+        except KeyError:
+            owner = str(st.st_uid)
+
+        # Get group name
+        try:
+            group = grp.getgrgid(st.st_gid).gr_name
+        except KeyError:
+            group = str(st.st_gid)
+
+        # Get permissions as octal string (e.g., "660")
+        perms = oct(stat.S_IMODE(st.st_mode))[2:]
+
+        return owner, group, perms
+    except FileNotFoundError:
+        return "unknown", "unknown", "000"
+    except Exception:
+        return "unknown", "unknown", "000"
