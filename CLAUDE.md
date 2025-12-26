@@ -222,6 +222,12 @@ syrvis compose generate       # Generate docker-compose.yaml
 - Must be executable (`chmod +x`)
 - Only handles manager installation
 
+### Synology Environment Notes
+
+- **Synology DSM uses full GNU coreutils**, NOT BusyBox (at least on x86_64 models)
+- Standard GNU tools available: `sed`, `awk`, `grep`, etc.
+- Do NOT assume limited/BusyBox implementations
+
 ### SPK Installation Flow
 
 1. **postinst** - Creates manager venv, installs manager wheel, creates profile snippet

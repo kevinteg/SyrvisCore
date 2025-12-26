@@ -211,17 +211,12 @@ log_info "  Command location: ${SYRVISCTL_CMD}"
 
 # Create a shell profile snippet for easy PATH setup
 PROFILE_SNIPPET="${SYNOPKG_PKGDEST}/syrviscore.profile"
-cat > "$PROFILE_SNIPPET" << 'PROFILE_EOF'
+cat > "$PROFILE_SNIPPET" << EOF
 # SyrvisCore PATH configuration
 # Source this file to add syrvisctl to your PATH:
-#   source /var/packages/syrviscore/target/syrviscore.profile
-export PATH="${PATH}:SYRVISCTL_BIN_DIR"
-PROFILE_EOF
-
-# Replace placeholder with actual path
-sed -i "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" 2>/dev/null || \
-    sed "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" > "${PROFILE_SNIPPET}.tmp" && \
-    mv "${PROFILE_SNIPPET}.tmp" "$PROFILE_SNIPPET"
+#   source ${SYNOPKG_PKGDEST}/syrviscore.profile
+export PATH="\${PATH}:${MANAGER_VENV}/bin"
+EOF
 
 log_info "  Profile snippet: ${PROFILE_SNIPPET}"
 
