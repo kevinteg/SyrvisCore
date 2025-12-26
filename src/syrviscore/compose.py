@@ -18,21 +18,21 @@ import yaml
 DEFAULT_DOCKER_IMAGES = {
     "traefik": {
         "image": "traefik",
-        "tag": "v3.2.3",
-        "full_image": "traefik:v3.2.3",
-        "description": "Cloud native application proxy and load balancer",
+        "tag": "v3.6.5",
+        "full_image": "traefik:v3.6.5",
+        "description": "",
     },
     "portainer": {
         "image": "portainer/portainer-ce",
-        "tag": "2.21.4",
-        "full_image": "portainer/portainer-ce:2.21.4",
-        "description": "Container management UI",
+        "tag": "2.33.6-alpine",
+        "full_image": "portainer/portainer-ce:2.33.6-alpine",
+        "description": "",
     },
     "cloudflared": {
         "image": "cloudflare/cloudflared",
-        "tag": "2024.11.1",
-        "full_image": "cloudflare/cloudflared:2024.11.1",
-        "description": "Cloudflare Tunnel client (optional)",
+        "tag": "2025.11.1",
+        "full_image": "cloudflare/cloudflared:2025.11.1",
+        "description": "",
     },
 }
 

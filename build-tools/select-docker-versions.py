@@ -50,15 +50,24 @@ class DockerHubClient:
         """
         Filter tags to only stable versions (exclude 'latest', 'dev', etc.).
 
+        Prefers semantic version tags (e.g., v1.2.3, 2024.11.1) over build hashes.
+
         Args:
             tags: List of tag dictionaries
 
         Returns:
-            Filtered list of stable version tags
+            Filtered list of stable version tags, sorted with semver-like first
         """
-        excluded_keywords = ["latest", "dev", "nightly", "alpha", "beta", "rc", "experimental"]
+        import re
+
+        excluded_keywords = ["latest", "dev", "nightly", "alpha", "beta", "rc", "experimental", "arm64", "amd64"]
+
+        # Patterns for semantic versioning
+        semver_pattern = re.compile(r'^v?\d+\.\d+(\.\d+)?(-\w+)?$')  # v1.2.3 or 2024.11.1
 
         stable_tags = []
+        semver_tags = []
+
         for tag in tags:
             name = tag["name"].lower()
 
@@ -70,9 +79,14 @@ class DockerHubClient:
             if not (name[0].isdigit() or name.startswith("v")):
                 continue
 
-            stable_tags.append(tag)
+            # Prioritize semver-like tags
+            if semver_pattern.match(name):
+                semver_tags.append(tag)
+            else:
+                stable_tags.append(tag)
 
-        return stable_tags
+        # Return semver tags first, then other stable tags
+        return semver_tags + stable_tags
 
 
 class VersionSelector:
@@ -245,6 +259,79 @@ class VersionSelector:
             print(f"\n❌ Error saving configuration: {e}")
             sys.exit(1)
 
+    def update_compose_py(self, config: Dict):
+        """Update DEFAULT_DOCKER_IMAGES in compose.py with selected versions."""
+        import os
+        import re
+
+        # Find compose.py relative to this script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        compose_path = os.path.join(script_dir, "..", "src", "syrviscore", "compose.py")
+        compose_path = os.path.normpath(compose_path)
+
+        if not os.path.exists(compose_path):
+            print(f"\n⚠️  Could not find compose.py at {compose_path}")
+            return
+
+        try:
+            with open(compose_path, "r") as f:
+                content = f.read()
+
+            # Build the new DEFAULT_DOCKER_IMAGES dict
+            images = config.get("docker_images", {})
+            new_dict_lines = ["DEFAULT_DOCKER_IMAGES = {"]
+
+            for name, info in images.items():
+                image = info.get("image", "")
+                tag = info.get("tag", "")
+                full_image = info.get("full_image", f"{image}:{tag}")
+                desc = info.get("description", "")
+
+                # Use library/ prefix for official images in compose, but not in the dict
+                display_image = image.replace("library/", "")
+
+                new_dict_lines.append(f'    "{name}": {{')
+                new_dict_lines.append(f'        "image": "{display_image}",')
+                new_dict_lines.append(f'        "tag": "{tag}",')
+                new_dict_lines.append(f'        "full_image": "{display_image}:{tag}",')
+                new_dict_lines.append(f'        "description": "{desc}",')
+                new_dict_lines.append("    },")
+
+            new_dict_lines.append("}")
+            new_dict = "\n".join(new_dict_lines)
+
+            # Replace the existing DEFAULT_DOCKER_IMAGES block
+            # Match from "DEFAULT_DOCKER_IMAGES = {" to the closing "}" at the same indent level
+            # This handles nested braces by counting brace depth
+            start_marker = "DEFAULT_DOCKER_IMAGES = {"
+            start_idx = content.find(start_marker)
+
+            if start_idx != -1:
+                # Find the matching closing brace
+                brace_count = 0
+                end_idx = start_idx
+                for i, char in enumerate(content[start_idx:]):
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            end_idx = start_idx + i + 1
+                            break
+
+                # Replace the block
+                content = content[:start_idx] + new_dict + content[end_idx:]
+
+                with open(compose_path, "w") as f:
+                    f.write(content)
+
+                print(f"✅ Updated DEFAULT_DOCKER_IMAGES in compose.py")
+            else:
+                print(f"⚠️  Could not find DEFAULT_DOCKER_IMAGES in {compose_path}")
+
+        except Exception as e:
+            print(f"\n⚠️  Error updating compose.py: {e}")
+
     def display_summary(self, config: Dict):
         """Display summary of selected versions."""
         print("\n" + "=" * 70)
@@ -308,10 +395,14 @@ def main():
     # Save to file
     selector.save_config(config, args.output)
 
+    # Update compose.py with the selected versions
+    selector.update_compose_py(config)
+
     print("\n✨ Done! You can now use this configuration to build an SPK.")
     print("\nNext steps:")
     print(f"  1. Review: {args.output}")
-    print("  2. Run: ./build-tools/build-spk")
+    print("  2. Run: ./build-tools/build-python-package.sh")
+    print("  3. Run: ./build-tools/build-spk.sh")
 
 
 if __name__ == "__main__":
