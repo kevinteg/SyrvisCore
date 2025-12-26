@@ -190,6 +190,19 @@ syrvis doctor --fix
 
 ## Troubleshooting
 
+For detailed troubleshooting, see [SPK Troubleshooting Guide](spk-troubleshooting.md).
+
+### Log Files
+
+Installation creates detailed logs:
+```bash
+# View main installation log
+cat /tmp/syrviscore-install.log
+
+# View pip installation log
+cat /tmp/syrviscore-pip.log
+```
+
 ### SPK Installation Issues
 
 **"Docker is not installed or not running"**

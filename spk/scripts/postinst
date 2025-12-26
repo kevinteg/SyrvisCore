@@ -6,11 +6,24 @@
 # The service package is installed separately via 'syrvisctl install'.
 #
 # All dependencies are bundled in the SPK - NO NETWORK ACCESS REQUIRED.
+#
+# DEBUGGING:
+#   - All output is logged to: /tmp/syrviscore-install.log
+#   - View logs: cat /tmp/syrviscore-install.log
+#   - Tail logs: tail -f /tmp/syrviscore-install.log
 
 set -e
 
 SCRIPT_NAME="postinst"
 LOG_FILE="/tmp/syrviscore-install.log"
+PIP_LOG_FILE="/tmp/syrviscore-pip.log"
+
+# Initialize log file with header
+echo "" >> "$LOG_FILE" 2>/dev/null || true
+echo "========================================" >> "$LOG_FILE" 2>/dev/null || true
+echo "SyrvisCore Installation Log" >> "$LOG_FILE" 2>/dev/null || true
+echo "Started: $(date '+%Y-%m-%d %H:%M:%S')" >> "$LOG_FILE" 2>/dev/null || true
+echo "========================================" >> "$LOG_FILE" 2>/dev/null || true
 
 log_msg() {
     LEVEL="$1"
@@ -35,13 +48,54 @@ log_error() {
     log_msg "ERROR" "$1"
 }
 
+# Function to show debug instructions on failure
+show_debug_help() {
+    echo "" >&2
+    echo "==================================================================" >&2
+    echo "INSTALLATION FAILED - DEBUG INFORMATION" >&2
+    echo "==================================================================" >&2
+    echo "" >&2
+    echo "To diagnose the issue, check the log files:" >&2
+    echo "" >&2
+    echo "  1. Main installation log:" >&2
+    echo "     cat /tmp/syrviscore-install.log" >&2
+    echo "" >&2
+    echo "  2. Pip installation log (if pip failed):" >&2
+    echo "     cat /tmp/syrviscore-pip.log" >&2
+    echo "" >&2
+    echo "  3. View last 50 lines of main log:" >&2
+    echo "     tail -50 /tmp/syrviscore-install.log" >&2
+    echo "" >&2
+    echo "Common issues:" >&2
+    echo "  - Missing Python 3: Ensure DSM has Python 3 installed" >&2
+    echo "  - Disk space: Check available space on /volume1" >&2
+    echo "  - Permissions: SPK may need to run with elevated privileges" >&2
+    echo "" >&2
+    echo "Report issues: https://github.com/kevinteg/SyrvisCore/issues" >&2
+    echo "==================================================================" >&2
+}
+
 PACKAGE_NAME="syrviscore"
 SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
+
+# Trap errors to show debug help
+trap 'show_debug_help' ERR
 
 log_info "==================================================================="
 log_info "Installing SyrvisCore Manager"
 log_info "==================================================================="
 log_info "Target directory: ${SYNOPKG_PKGDEST}"
+log_info "Log file: ${LOG_FILE}"
+log_info "Pip log: ${PIP_LOG_FILE}"
+log_info ""
+
+# Log system information for debugging
+log_info "System Information:"
+log_info "  Hostname: $(hostname 2>/dev/null || echo 'unknown')"
+log_info "  User: $(whoami)"
+log_info "  UID: $(id -u)"
+log_info "  Python: $(python3 --version 2>&1 || echo 'not found')"
+log_info "  Pip: $(python3 -m pip --version 2>&1 || echo 'not found')"
 log_info ""
 
 # === Create manager virtual environment ===
@@ -82,31 +136,71 @@ log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
 # Install manager and dependencies from bundled wheels
 # In production (Synology): --no-index ensures offline installation
 # In simulation (macOS): Allow network for platform-specific wheels
+log_info "  Installing pip packages (output logged to $PIP_LOG_FILE)..."
+
+# Clear pip log for this installation
+echo "=== Pip Installation Log ===" > "$PIP_LOG_FILE" 2>/dev/null || true
+echo "Started: $(date '+%Y-%m-%d %H:%M:%S')" >> "$PIP_LOG_FILE" 2>/dev/null || true
+echo "Wheel: $MANAGER_WHEEL" >> "$PIP_LOG_FILE" 2>/dev/null || true
+echo "Wheels dir: $WHEELS_DIR" >> "$PIP_LOG_FILE" 2>/dev/null || true
+echo "============================" >> "$PIP_LOG_FILE" 2>/dev/null || true
+
 if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
     # Simulation mode: use bundled wheels but allow network for platform-specific deps
     log_info "  (Simulation mode: allowing network for platform-specific wheels)"
-    "${MANAGER_VENV}/bin/pip" install \
+    if ! "${MANAGER_VENV}/bin/pip" install \
         --no-cache-dir \
         --find-links "$WHEELS_DIR" \
-        "$MANAGER_WHEEL" > /dev/null 2>&1
+        "$MANAGER_WHEEL" >> "$PIP_LOG_FILE" 2>&1; then
+        log_error "Pip install failed! Check $PIP_LOG_FILE for details"
+        log_error "Last 20 lines of pip log:"
+        tail -20 "$PIP_LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
+        tail -20 "$PIP_LOG_FILE" >&2
+        exit 1
+    fi
 else
     # Production mode: fully offline installation
-    "${MANAGER_VENV}/bin/pip" install \
+    if ! "${MANAGER_VENV}/bin/pip" install \
         --no-cache-dir \
         --no-index \
         --find-links "$WHEELS_DIR" \
-        "$MANAGER_WHEEL" > /dev/null 2>&1
+        "$MANAGER_WHEEL" >> "$PIP_LOG_FILE" 2>&1; then
+        log_error "Pip install failed! Check $PIP_LOG_FILE for details"
+        log_error "Last 20 lines of pip log:"
+        tail -20 "$PIP_LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
+        tail -20 "$PIP_LOG_FILE" >&2
+        exit 1
+    fi
 fi
 
-log_info "  Manager package and dependencies installed (offline)"
+log_info "  Manager package and dependencies installed successfully"
+
+# Log installed packages for debugging
+log_info "  Installed packages:"
+"${MANAGER_VENV}/bin/pip" list 2>/dev/null | while read -r line; do
+    log_info "    $line"
+done
 
 # Verify installation
 if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
     log_error "syrvisctl command not found after install"
+    log_error "Expected location: ${MANAGER_VENV}/bin/syrvisctl"
+    log_error "Contents of ${MANAGER_VENV}/bin/:"
+    ls -la "${MANAGER_VENV}/bin/" >> "$LOG_FILE" 2>&1
+    ls -la "${MANAGER_VENV}/bin/" >&2
     exit 1
 fi
 
-log_info "  Verified: syrvisctl command available"
+# Test that syrvisctl actually works
+if ! "${MANAGER_VENV}/bin/syrvisctl" --version >> "$LOG_FILE" 2>&1; then
+    log_error "syrvisctl command found but failed to execute"
+    log_error "Attempting to run syrvisctl --version:"
+    "${MANAGER_VENV}/bin/syrvisctl" --version >&2 || true
+    exit 1
+fi
+
+SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
+log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"
 
 # === Create global symlink ===
 log_info "[3/3] Creating global symlink..."
