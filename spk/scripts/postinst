@@ -202,50 +202,28 @@ fi
 SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
 log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"
 
-# === Create global symlink (optional - may require elevated privileges) ===
-log_info "[3/3] Creating global symlink..."
+# === Export PATH configuration ===
+log_info "[3/3] Configuring command access..."
 
-# Use simulation root if in simulation mode
-if [ "${DSM_SIM_ACTIVE:-0}" = "1" ] && [ -n "$DSM_SIM_ROOT" ]; then
-    SYRVISCTL_LINK="${DSM_SIM_ROOT}/usr/local/bin/syrvisctl"
-    mkdir -p "${DSM_SIM_ROOT}/usr/local/bin"
-    SYMLINK_CREATED=false
+# The syrvisctl command is available at a deterministic path
+SYRVISCTL_CMD="${MANAGER_VENV}/bin/syrvisctl"
+log_info "  Command location: ${SYRVISCTL_CMD}"
 
-    # Remove old symlink if exists
-    if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
-        rm -f "$SYRVISCTL_LINK" 2>/dev/null || true
-    fi
+# Create a shell profile snippet for easy PATH setup
+PROFILE_SNIPPET="${SYNOPKG_PKGDEST}/syrviscore.profile"
+cat > "$PROFILE_SNIPPET" << 'PROFILE_EOF'
+# SyrvisCore PATH configuration
+# Source this file to add syrvisctl to your PATH:
+#   source /var/packages/syrviscore/target/syrviscore.profile
+export PATH="${PATH}:SYRVISCTL_BIN_DIR"
+PROFILE_EOF
 
-    if ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK" 2>/dev/null; then
-        log_info "  Created symlink: ${SYRVISCTL_LINK}"
-        SYMLINK_CREATED=true
-    fi
-else
-    SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
-    SYMLINK_CREATED=false
+# Replace placeholder with actual path
+sed -i "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" 2>/dev/null || \
+    sed "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" > "${PROFILE_SNIPPET}.tmp" && \
+    mv "${PROFILE_SNIPPET}.tmp" "$PROFILE_SNIPPET"
 
-    # Try to create the symlink (may fail if running as unprivileged user)
-    if mkdir -p /usr/local/bin 2>/dev/null; then
-        # Remove old symlink if exists
-        if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
-            rm -f "$SYRVISCTL_LINK" 2>/dev/null || true
-        fi
-
-        if ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK" 2>/dev/null; then
-            log_info "  Created symlink: ${SYRVISCTL_LINK}"
-            SYMLINK_CREATED=true
-        fi
-    fi
-
-    if [ "$SYMLINK_CREATED" = "false" ]; then
-        log_info "  Note: Could not create global symlink (requires elevated privileges)"
-        log_info "  The 'syrvisctl' command is available at:"
-        log_info "    ${MANAGER_VENV}/bin/syrvisctl"
-        log_info ""
-        log_info "  To create the symlink manually, run as root:"
-        log_info "    sudo ln -sf ${MANAGER_VENV}/bin/syrvisctl /usr/local/bin/syrvisctl"
-    fi
-fi
+log_info "  Profile snippet: ${PROFILE_SNIPPET}"
 
 log_info ""
 log_info "==================================================================="
@@ -254,37 +232,28 @@ log_info "==================================================================="
 log_info ""
 log_info "NEXT STEPS:"
 log_info ""
-
-if [ "$SYMLINK_CREATED" = "true" ]; then
-    log_info "  1. Install the service package:"
-    log_info "     syrvisctl install"
-    log_info ""
-    log_info "  2. Run setup to configure:"
-    log_info "     syrvis setup"
-    log_info ""
-    log_info "  3. Start services:"
-    log_info "     syrvis start"
-    log_info ""
-    log_info "For help:"
-    log_info "  syrvisctl --help"
-else
-    SYRVISCTL_CMD="${MANAGER_VENV}/bin/syrvisctl"
-    log_info "  0. (Optional) Create global symlink for easier access:"
-    log_info "     sudo ln -sf ${SYRVISCTL_CMD} /usr/local/bin/syrvisctl"
-    log_info ""
-    log_info "  1. Install the service package:"
-    log_info "     ${SYRVISCTL_CMD} install"
-    log_info ""
-    log_info "  2. Run setup to configure:"
-    log_info "     syrvis setup"
-    log_info ""
-    log_info "  3. Start services:"
-    log_info "     syrvis start"
-    log_info ""
-    log_info "For help:"
-    log_info "  ${SYRVISCTL_CMD} --help"
-fi
-
+log_info "  1. Add syrvisctl to your PATH (choose one):"
+log_info ""
+log_info "     Option A - Source the profile (current session):"
+log_info "       source ${PROFILE_SNIPPET}"
+log_info ""
+log_info "     Option B - Add to your shell profile (permanent):"
+log_info "       echo 'source ${PROFILE_SNIPPET}' >> ~/.profile"
+log_info ""
+log_info "     Option C - Use full path directly:"
+log_info "       ${SYRVISCTL_CMD}"
+log_info ""
+log_info "  2. Install the service package:"
+log_info "     syrvisctl install"
+log_info ""
+log_info "  3. Run setup to configure:"
+log_info "     syrvis setup"
+log_info ""
+log_info "  4. Start services:"
+log_info "     syrvis start"
+log_info ""
+log_info "For help:"
+log_info "  syrvisctl --help"
 log_info ""
 log_info "Documentation: https://github.com/kevinteg/SyrvisCore"
 log_info "==================================================================="

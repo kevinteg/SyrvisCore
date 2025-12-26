@@ -224,10 +224,11 @@ syrvis compose generate       # Generate docker-compose.yaml
 
 ### SPK Installation Flow
 
-1. **postinst** - Creates manager venv, installs manager wheel, creates symlink
-2. User runs `syrvisctl install` - Downloads and installs service
-3. User runs `syrvis setup` - Configures services
-4. **postupgrade** - Updates manager venv
+1. **postinst** - Creates manager venv, installs manager wheel, creates profile snippet
+2. User sources profile: `source /var/packages/syrviscore/target/syrviscore.profile`
+3. User runs `syrvisctl install` - Downloads and installs service
+4. User runs `syrvis setup` - Configures services
+5. **postupgrade** - Updates manager venv, updates profile snippet
 
 ## Security
 
@@ -258,6 +259,66 @@ All Docker images use specific version tags (no `:latest`).
 - **Single-node** - Docker Compose orchestration
 - **Simple over complex** - Minimal viable solution first
 - **Self-elevating** - CLI prompts for sudo when needed
+
+## Systems Engineering Best Practices
+
+### Reproducibility
+
+All operations must be reproducible and automated. **Never require manual out-of-band privileged operations.**
+
+**Bad:**
+```bash
+# Don't do this - requires manual sudo
+sudo ln -sf /path/to/cmd /usr/local/bin/cmd
+sudo chown root:root /some/file
+```
+
+**Good:**
+```bash
+# Use PATH or environment variables
+source /var/packages/syrviscore/target/syrviscore.profile
+# Or use the full path
+/var/packages/syrviscore/target/venv/bin/syrvisctl
+```
+
+### Command Access
+
+SPK scripts run as an unprivileged package user. To make commands accessible:
+
+1. **Create a profile snippet** in the package directory that users can source
+2. **Document the full path** to the command
+3. **Never attempt to write to system directories** like `/usr/local/bin`
+
+The package creates `/var/packages/syrviscore/target/syrviscore.profile` which users can source to add `syrvisctl` to their PATH.
+
+### Privilege Separation
+
+| Operation | Runs As | Can Write To |
+|-----------|---------|--------------|
+| SPK install scripts | Package user (`syrviscore`) | `$SYNOPKG_PKGDEST` only |
+| CLI commands | User who invokes | Depends on user |
+| Docker operations | User in `docker` group | Docker socket |
+
+### Environment Variables
+
+Use environment variables for configuration, not hardcoded paths:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `SYNOPKG_PKGDEST` | SPK installation directory | `/var/packages/syrviscore/target` |
+| `SYRVIS_HOME` | Service data directory | `/volumeX/docker/syrviscore` |
+| `DSM_SIM_ACTIVE` | Simulation mode flag | `0` |
+| `DSM_SIM_ROOT` | Simulation root path | (unset) |
+
+### Logging
+
+All operations must log to deterministic locations:
+
+| Log File | Purpose |
+|----------|---------|
+| `/tmp/syrviscore-install.log` | SPK installation log |
+| `/tmp/syrviscore-pip.log` | Pip installation output |
+| `$SYRVIS_HOME/logs/` | Runtime service logs |
 
 ## Resources
 

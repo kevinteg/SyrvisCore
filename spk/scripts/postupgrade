@@ -192,51 +192,43 @@ fi
 SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
 log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"
 
-# === Update global symlink (optional - may require elevated privileges) ===
-log_info "[3/3] Updating global symlink..."
+# === Update PATH configuration ===
+log_info "[3/3] Updating command access configuration..."
 
-SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
-SYMLINK_CREATED=false
+# The syrvisctl command is available at a deterministic path
+SYRVISCTL_CMD="${MANAGER_VENV}/bin/syrvisctl"
+log_info "  Command location: ${SYRVISCTL_CMD}"
 
-# Try to create the symlink (may fail if running as unprivileged user)
-if mkdir -p /usr/local/bin 2>/dev/null; then
-    # Remove old symlink if exists
-    if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
-        rm -f "$SYRVISCTL_LINK" 2>/dev/null || true
-    fi
+# Update the shell profile snippet
+PROFILE_SNIPPET="${SYNOPKG_PKGDEST}/syrviscore.profile"
+cat > "$PROFILE_SNIPPET" << 'PROFILE_EOF'
+# SyrvisCore PATH configuration
+# Source this file to add syrvisctl to your PATH:
+#   source /var/packages/syrviscore/target/syrviscore.profile
+export PATH="${PATH}:SYRVISCTL_BIN_DIR"
+PROFILE_EOF
 
-    if ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK" 2>/dev/null; then
-        log_info "  Updated symlink: ${SYRVISCTL_LINK}"
-        SYMLINK_CREATED=true
-    fi
-fi
+# Replace placeholder with actual path
+sed -i "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" 2>/dev/null || \
+    sed "s|SYRVISCTL_BIN_DIR|${MANAGER_VENV}/bin|g" "$PROFILE_SNIPPET" > "${PROFILE_SNIPPET}.tmp" && \
+    mv "${PROFILE_SNIPPET}.tmp" "$PROFILE_SNIPPET"
 
-if [ "$SYMLINK_CREATED" = "false" ]; then
-    log_info "  Note: Could not update global symlink (requires elevated privileges)"
-    log_info "  The 'syrvisctl' command is available at:"
-    log_info "    ${MANAGER_VENV}/bin/syrvisctl"
-    log_info ""
-    log_info "  To create the symlink manually, run as root:"
-    log_info "    sudo ln -sf ${MANAGER_VENV}/bin/syrvisctl /usr/local/bin/syrvisctl"
-fi
+log_info "  Profile snippet: ${PROFILE_SNIPPET}"
 
 log_info ""
 log_info "==================================================================="
 log_info "SyrvisCore Manager Upgrade Complete"
 log_info "==================================================================="
 log_info ""
-log_info "The manager has been upgraded."
+log_info "The manager has been upgraded to version ${SYRVISCTL_VERSION}."
 log_info ""
 log_info "Service versions are not affected by this upgrade."
-
-if [ "$SYMLINK_CREATED" = "true" ]; then
-    log_info "To update the service package, run:"
-    log_info "  syrvisctl install"
-else
-    log_info "To update the service package, run:"
-    log_info "  ${MANAGER_VENV}/bin/syrvisctl install"
-fi
-
+log_info ""
+log_info "If syrvisctl is not in your PATH, source the profile:"
+log_info "  source ${PROFILE_SNIPPET}"
+log_info ""
+log_info "To update the service package, run:"
+log_info "  syrvisctl install"
 log_info ""
 log_info "==================================================================="
 log_info "Detailed logs: $LOG_FILE"
