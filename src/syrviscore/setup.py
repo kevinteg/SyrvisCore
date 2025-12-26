@@ -129,8 +129,60 @@ def get_timezone() -> str:
         return 'UTC'
 
 
+def load_existing_config() -> dict:
+    """Load existing configuration from .env file if it exists.
+
+    Returns dict with existing config values, or empty dict if no .env exists.
+    """
+    existing = {}
+    try:
+        env_path = paths.get_env_path()
+        if not env_path.exists():
+            return existing
+
+        env_content = env_path.read_text()
+        for line in env_content.split('\n'):
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+
+                # Map .env keys to config keys
+                key_map = {
+                    'DOMAIN': 'domain',
+                    'ACME_EMAIL': 'email',
+                    'NETWORK_INTERFACE': 'interface',
+                    'NETWORK_SUBNET': 'subnet',
+                    'NETWORK_GATEWAY': 'gateway',
+                    'TRAEFIK_IP': 'traefik_ip',
+                    'SHIM_IP': 'shim_ip',
+                    'NAS_IP': 'nas_ip',
+                    'CLOUDFLARE_TUNNEL_TOKEN': 'cloudflare_token',
+                    'SYNOLOGY_DSM_ENABLED': 'synology_dsm',
+                    'SYNOLOGY_DSFILE_ENABLED': 'synology_dsfile',
+                    'SYNOLOGY_PHOTOS_ENABLED': 'synology_photos',
+                }
+
+                if key in key_map and value:
+                    config_key = key_map[key]
+                    # Convert boolean strings
+                    if key.startswith('SYNOLOGY_'):
+                        existing[config_key] = value.lower() in ('true', '1', 'yes')
+                    else:
+                        existing[config_key] = value
+    except Exception:
+        pass
+
+    return existing
+
+
 def prompt_configuration(defaults: dict) -> dict:
-    """Prompt user for configuration values."""
+    """Prompt user for configuration values.
+
+    Args:
+        defaults: Dictionary with default values (from existing .env or auto-discovery)
+    """
     click.echo()
     click.echo("Configuration")
     click.echo("-" * 60)
@@ -141,11 +193,13 @@ def prompt_configuration(defaults: dict) -> dict:
     # Domain and email
     config["domain"] = click.prompt(
         "  Domain name",
-        default="example.com"
+        default=defaults.get("domain", "example.com")
     )
+    # For email, prefer existing value, else derive from domain
+    default_email = defaults.get("email") or f"admin@{config['domain']}"
     config["email"] = click.prompt(
         "  Email for Let's Encrypt",
-        default=f"admin@{config['domain']}"
+        default=default_email
     )
 
     click.echo()
@@ -153,26 +207,31 @@ def prompt_configuration(defaults: dict) -> dict:
 
     config["interface"] = click.prompt(
         "    Network interface",
-        default=defaults["interface"]
+        default=defaults.get("interface", "eth0")
     )
     config["subnet"] = click.prompt(
         "    Network subnet (CIDR)",
-        default=defaults["subnet"]
+        default=defaults.get("subnet", "192.168.1.0/24")
     )
     config["gateway"] = click.prompt(
         "    Gateway IP",
-        default=defaults["gateway"]
+        default=defaults.get("gateway", "192.168.1.1")
     )
     config["traefik_ip"] = click.prompt(
         "    Traefik IP (dedicated macvlan IP)",
-        default=defaults["traefik_ip"]
+        default=defaults.get("traefik_ip", "192.168.1.100")
     )
-    # Calculate default shim IP from traefik IP (traefik + 1)
-    try:
-        parts = config["traefik_ip"].split('.')
-        default_shim = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
-    except (IndexError, ValueError):
-        default_shim = defaults.get("shim_ip", "")
+
+    # For shim IP: prefer existing value, else calculate from traefik_ip + 1
+    if defaults.get("shim_ip"):
+        default_shim = defaults["shim_ip"]
+    else:
+        try:
+            parts = config["traefik_ip"].split('.')
+            default_shim = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
+        except (IndexError, ValueError):
+            default_shim = ""
+
     config["shim_ip"] = click.prompt(
         "    Shim IP (for host-to-container comm)",
         default=default_shim
@@ -182,31 +241,33 @@ def prompt_configuration(defaults: dict) -> dict:
         default=defaults.get("nas_ip", "")
     )
 
-    # Synology Services
+    # Synology Services - use existing values as defaults
     click.echo()
     click.echo("  Synology Services (proxy through Traefik with Let's Encrypt):")
     config["synology_dsm"] = click.confirm(
         "    Enable DSM Portal (dsm.{domain})?".format(domain=config["domain"]),
-        default=True
+        default=defaults.get("synology_dsm", True)
     )
     config["synology_dsfile"] = click.confirm(
         "    Enable DS File (files.{domain})?".format(domain=config["domain"]),
-        default=False
+        default=defaults.get("synology_dsfile", False)
     )
     config["synology_photos"] = click.confirm(
         "    Enable Synology Photos (photos.{domain})?".format(domain=config["domain"]),
-        default=False
+        default=defaults.get("synology_photos", False)
     )
 
     click.echo()
+    # For Cloudflare: default to enabled if token already configured
+    has_existing_token = bool(defaults.get("cloudflare_token"))
     enable_cloudflare = click.confirm(
         "  Enable Cloudflare Tunnel?",
-        default=False
+        default=has_existing_token
     )
     if enable_cloudflare:
         config["cloudflare_token"] = click.prompt(
             "    Cloudflare Tunnel token",
-            default="",
+            default=defaults.get("cloudflare_token", ""),
             hide_input=True
         )
     else:
@@ -596,27 +657,37 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo()
     click.echo("[4/7] Configuration...")
 
+    # Load existing config from .env (if exists)
+    existing_config = load_existing_config()
+
+    # Get auto-discovered network settings
     network_defaults = get_default_network_settings()
 
+    # Merge: existing config takes priority over auto-discovered
+    defaults = {**network_defaults, **existing_config}
+
+    if existing_config:
+        click.echo("      Found existing configuration - using as defaults")
+
     if non_interactive:
-        # Use provided options or defaults
+        # Use provided options or existing/discovered defaults
         config = {
-            "domain": domain or "example.com",
-            "email": email or f"admin@{domain or 'example.com'}",
-            "interface": network_defaults["interface"],
-            "subnet": network_defaults["subnet"],
-            "gateway": network_defaults["gateway"],
-            "traefik_ip": traefik_ip or network_defaults["traefik_ip"],
-            "shim_ip": network_defaults.get("shim_ip", ""),
-            "nas_ip": network_defaults.get("nas_ip", ""),
-            "synology_dsm": True,  # DSM portal enabled by default
-            "synology_dsfile": False,
-            "synology_photos": False,
-            "cloudflare_token": "",
+            "domain": domain or defaults.get("domain", "example.com"),
+            "email": email or defaults.get("email", f"admin@{domain or defaults.get('domain', 'example.com')}"),
+            "interface": defaults.get("interface", "eth0"),
+            "subnet": defaults.get("subnet", "192.168.1.0/24"),
+            "gateway": defaults.get("gateway", "192.168.1.1"),
+            "traefik_ip": traefik_ip or defaults.get("traefik_ip", "192.168.1.100"),
+            "shim_ip": defaults.get("shim_ip", ""),
+            "nas_ip": defaults.get("nas_ip", ""),
+            "synology_dsm": defaults.get("synology_dsm", True),
+            "synology_dsfile": defaults.get("synology_dsfile", False),
+            "synology_photos": defaults.get("synology_photos", False),
+            "cloudflare_token": defaults.get("cloudflare_token", ""),
         }
         display_configuration(config)
     else:
-        config = prompt_configuration(network_defaults)
+        config = prompt_configuration(defaults)
         display_configuration(config)
 
         if not click.confirm("      Proceed with this configuration?", default=True):
