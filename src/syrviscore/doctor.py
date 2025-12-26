@@ -302,8 +302,7 @@ def get_configured_endpoints() -> List[Dict]:
         # Synology services: (name, subdomain, port, expected_status_codes)
         synology_services = {
             "SYNOLOGY_DSM_ENABLED": ("DSM Portal", "dsm", 5001, [200, 302]),
-            "SYNOLOGY_PHOTOS_ENABLED": ("Synology Photos", "photos", 5001, [200, 302]),
-            "SYNOLOGY_PHOTOSTATION_ENABLED": ("Photo Station", "photostation", 5001, [200, 302]),
+            "SYNOLOGY_PHOTOS_ENABLED": ("Photos", "photos", 5001, [200, 302]),
             "SYNOLOGY_DRIVE_ENABLED": ("Synology Drive", "drive", 6690, [200, 302, 400]),
             "SYNOLOGY_AUDIO_ENABLED": ("Audio Station", "audio", 5001, [200, 302]),
             "SYNOLOGY_VIDEO_ENABLED": ("Video Station", "video", 5001, [200, 302]),

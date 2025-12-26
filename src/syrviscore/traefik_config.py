@@ -26,15 +26,8 @@ SYNOLOGY_SERVICES = {
         "subdomain": "photos",
         "port": 5001,
         "protocol": "https",
-        "description": "Synology Photos",
+        "description": "Photos (Synology Photos / Photo Station)",
         "env_enabled": "SYNOLOGY_PHOTOS_ENABLED",
-    },
-    "photostation": {
-        "subdomain": "photostation",
-        "port": 5001,
-        "protocol": "https",
-        "description": "Photo Station",
-        "env_enabled": "SYNOLOGY_PHOTOSTATION_ENABLED",
     },
     "dsm": {
         "subdomain": "dsm",

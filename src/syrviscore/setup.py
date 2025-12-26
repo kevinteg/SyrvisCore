@@ -161,7 +161,6 @@ def load_existing_config() -> dict:
                     'CLOUDFLARE_TUNNEL_TOKEN': 'cloudflare_token',
                     'SYNOLOGY_DSM_ENABLED': 'synology_dsm',
                     'SYNOLOGY_PHOTOS_ENABLED': 'synology_photos',
-                    'SYNOLOGY_PHOTOSTATION_ENABLED': 'synology_photostation',
                 }
 
                 if key in key_map and value:
@@ -249,12 +248,8 @@ def prompt_configuration(defaults: dict) -> dict:
         default=defaults.get("synology_dsm", True)
     )
     config["synology_photos"] = click.confirm(
-        "    Enable Synology Photos (photos.{domain})?".format(domain=config["domain"]),
+        "    Enable Photos (photos.{domain})?".format(domain=config["domain"]),
         default=defaults.get("synology_photos", False)
-    )
-    config["synology_photostation"] = click.confirm(
-        "    Enable Photo Station (photostation.{domain})?".format(domain=config["domain"]),
-        default=defaults.get("synology_photostation", False)
     )
 
     click.echo()
@@ -297,8 +292,6 @@ def display_configuration(config: dict) -> None:
         synology_services.append(f"dsm.{config['domain']}")
     if config.get('synology_photos'):
         synology_services.append(f"photos.{config['domain']}")
-    if config.get('synology_photostation'):
-        synology_services.append(f"photostation.{config['domain']}")
     if synology_services:
         click.echo(f"  Synology:     {', '.join(synology_services)}")
     else:
@@ -401,7 +394,6 @@ NAS_IP={config.get('nas_ip', '')}
 # Synology Services (proxy through Traefik)
 SYNOLOGY_DSM_ENABLED={str(config.get('synology_dsm', False)).lower()}
 SYNOLOGY_PHOTOS_ENABLED={str(config.get('synology_photos', False)).lower()}
-SYNOLOGY_PHOTOSTATION_ENABLED={str(config.get('synology_photostation', False)).lower()}
 
 # Domain & SSL
 DOMAIN={config['domain']}
@@ -681,7 +673,6 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             "nas_ip": defaults.get("nas_ip", ""),
             "synology_dsm": defaults.get("synology_dsm", True),
             "synology_photos": defaults.get("synology_photos", False),
-            "synology_photostation": defaults.get("synology_photostation", False),
             "cloudflare_token": defaults.get("cloudflare_token", ""),
         }
         display_configuration(config)
@@ -769,13 +760,11 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo()
     click.echo("Access your services:")
     if config.get('synology_dsm'):
-        click.echo(f"  DSM:          https://dsm.{config['domain']}")
-    click.echo(f"  Traefik:      https://traefik.{config['domain']}")
-    click.echo(f"  Portainer:    https://portainer.{config['domain']}")
+        click.echo(f"  DSM:       https://dsm.{config['domain']}")
+    click.echo(f"  Traefik:   https://traefik.{config['domain']}")
+    click.echo(f"  Portainer: https://portainer.{config['domain']}")
     if config.get('synology_photos'):
-        click.echo(f"  Photos:       https://photos.{config['domain']}")
-    if config.get('synology_photostation'):
-        click.echo(f"  PhotoStation: https://photostation.{config['domain']}")
+        click.echo(f"  Photos:    https://photos.{config['domain']}")
     click.echo()
     if config.get('synology_dsm'):
         click.echo("DSM access note:")
