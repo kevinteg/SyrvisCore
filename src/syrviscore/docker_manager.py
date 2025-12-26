@@ -10,9 +10,11 @@ from typing import Dict, List, Optional
 
 import docker
 from docker.errors import DockerException
+from dotenv import load_dotenv
 
 from syrviscore.paths import (
     get_docker_compose_path,
+    get_env_path,
     get_syrvis_home,
     validate_docker_compose_exists,
 )
@@ -126,6 +128,9 @@ class DockerManager:
 
         This method is idempotent and safe to call multiple times.
         """
+        # Load .env to get DOMAIN, ACME_EMAIL etc for traefik config
+        load_dotenv(get_env_path(), override=True)
+
         syrvis_home = get_syrvis_home()
         traefik_data = syrvis_home / "data" / "traefik"
 
