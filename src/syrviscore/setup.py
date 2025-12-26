@@ -172,7 +172,11 @@ def prompt_configuration(defaults: dict) -> dict:
 
     # Synology Services
     click.echo()
-    click.echo("  Synology Services (proxy through Traefik):")
+    click.echo("  Synology Services (proxy through Traefik with Let's Encrypt):")
+    config["synology_dsm"] = click.confirm(
+        "    Enable DSM Portal (dsm.{domain})?".format(domain=config["domain"]),
+        default=True
+    )
     config["synology_dsfile"] = click.confirm(
         "    Enable DS File (files.{domain})?".format(domain=config["domain"]),
         default=False
@@ -215,6 +219,8 @@ def display_configuration(config: dict) -> None:
 
     # Synology services
     synology_services = []
+    if config.get('synology_dsm'):
+        synology_services.append(f"dsm.{config['domain']}")
     if config.get('synology_dsfile'):
         synology_services.append(f"files.{config['domain']}")
     if config.get('synology_photos'):
@@ -318,6 +324,7 @@ TRAEFIK_IP={config['traefik_ip']}
 NAS_IP={config.get('nas_ip', '')}
 
 # Synology Services (proxy through Traefik)
+SYNOLOGY_DSM_ENABLED={str(config.get('synology_dsm', False)).lower()}
 SYNOLOGY_DSFILE_ENABLED={str(config.get('synology_dsfile', False)).lower()}
 SYNOLOGY_PHOTOS_ENABLED={str(config.get('synology_photos', False)).lower()}
 
@@ -573,6 +580,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             "gateway": network_defaults["gateway"],
             "traefik_ip": traefik_ip or network_defaults["traefik_ip"],
             "nas_ip": network_defaults.get("nas_ip", ""),
+            "synology_dsm": True,  # DSM portal enabled by default
             "synology_dsfile": False,
             "synology_photos": False,
             "cloudflare_token": "",
@@ -661,6 +669,8 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo("=" * 60)
     click.echo()
     click.echo("Access your services:")
+    if config.get('synology_dsm'):
+        click.echo(f"  DSM:       https://dsm.{config['domain']}")
     click.echo(f"  Traefik:   https://traefik.{config['domain']}")
     click.echo(f"  Portainer: https://portainer.{config['domain']}")
     if config.get('synology_dsfile'):
@@ -668,6 +678,11 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     if config.get('synology_photos'):
         click.echo(f"  Photos:    https://photos.{config['domain']}")
     click.echo()
+    if config.get('synology_dsm'):
+        click.echo("DSM access note:")
+        click.echo(f"  Primary:   https://dsm.{config['domain']} (via Traefik)")
+        click.echo(f"  Backup:    https://{config.get('nas_ip', 'NAS_IP')}:5001 (direct)")
+        click.echo()
     click.echo("Useful commands:")
     click.echo("  syrvis status      - Check service status")
     click.echo("  syrvis logs        - View service logs")
