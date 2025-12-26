@@ -41,17 +41,19 @@ def self_elevate() -> None:
 
 
 def get_default_network_settings() -> dict:
-    """Attempt to detect network settings."""
+    """Attempt to detect network settings including NAS IP."""
     import subprocess
+    import socket
 
     defaults = {
         "interface": "eth0",
         "subnet": "192.168.1.0/24",
         "gateway": "192.168.1.1",
         "traefik_ip": "192.168.1.100",
+        "nas_ip": "",
     }
 
-    # Try to detect interface
+    # Try to detect interface and NAS IP
     try:
         # On Synology, ovs_eth0 is common for Open vSwitch
         if Path("/sys/class/net/ovs_eth0").exists():
@@ -59,7 +61,7 @@ def get_default_network_settings() -> dict:
         elif Path("/sys/class/net/eth0").exists():
             defaults["interface"] = "eth0"
 
-        # Try to get gateway from route
+        # Try to get gateway and interface from default route
         result = subprocess.run(
             ["ip", "route", "show", "default"],
             capture_output=True, text=True, timeout=5
@@ -76,6 +78,41 @@ def get_default_network_settings() -> dict:
                     defaults["subnet"] = f"{prefix}.0/24"
                     # Suggest traefik IP in same subnet
                     defaults["traefik_ip"] = f"{prefix}.100"
+
+            # Get the interface from the default route
+            if "dev" in parts:
+                idx = parts.index("dev")
+                if idx + 1 < len(parts):
+                    route_iface = parts[idx + 1]
+                    # Prefer ovs_eth0 for macvlan, but use route interface for IP detection
+                    defaults["interface"] = "ovs_eth0" if Path("/sys/class/net/ovs_eth0").exists() else route_iface
+
+        # Try to detect NAS IP from the interface
+        result = subprocess.run(
+            ["ip", "-4", "addr", "show", defaults["interface"]],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.split('\n'):
+                if 'inet ' in line:
+                    # Extract IP from "inet 192.168.8.3/24 ..."
+                    parts = line.strip().split()
+                    if len(parts) >= 2:
+                        ip_cidr = parts[1]
+                        nas_ip = ip_cidr.split('/')[0]
+                        defaults["nas_ip"] = nas_ip
+                        break
+
+        # Fallback: try to get IP by connecting to gateway
+        if not defaults["nas_ip"] and defaults["gateway"]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((defaults["gateway"], 80))
+                defaults["nas_ip"] = s.getsockname()[0]
+                s.close()
+            except Exception:
+                pass
+
     except Exception:
         pass
 
@@ -128,6 +165,22 @@ def prompt_configuration(defaults: dict) -> dict:
         "    Traefik IP (dedicated macvlan IP)",
         default=defaults["traefik_ip"]
     )
+    config["nas_ip"] = click.prompt(
+        "    NAS IP (for Synology services)",
+        default=defaults.get("nas_ip", "")
+    )
+
+    # Synology Services
+    click.echo()
+    click.echo("  Synology Services (proxy through Traefik):")
+    config["synology_dsfile"] = click.confirm(
+        "    Enable DS File (files.{domain})?".format(domain=config["domain"]),
+        default=False
+    )
+    config["synology_photos"] = click.confirm(
+        "    Enable Synology Photos (photos.{domain})?".format(domain=config["domain"]),
+        default=False
+    )
 
     click.echo()
     enable_cloudflare = click.confirm(
@@ -157,7 +210,19 @@ def display_configuration(config: dict) -> None:
     click.echo(f"  Subnet:       {config['subnet']}")
     click.echo(f"  Gateway:      {config['gateway']}")
     click.echo(f"  Traefik IP:   {config['traefik_ip']}")
+    click.echo(f"  NAS IP:       {config.get('nas_ip', 'not set')}")
     click.echo(f"  Cloudflare:   {'configured' if config.get('cloudflare_token') else 'not configured'}")
+
+    # Synology services
+    synology_services = []
+    if config.get('synology_dsfile'):
+        synology_services.append(f"files.{config['domain']}")
+    if config.get('synology_photos'):
+        synology_services.append(f"photos.{config['domain']}")
+    if synology_services:
+        click.echo(f"  Synology:     {', '.join(synology_services)}")
+    else:
+        click.echo(f"  Synology:     none enabled")
     click.echo()
 
 
@@ -248,6 +313,13 @@ NETWORK_INTERFACE={config['interface']}
 NETWORK_SUBNET={config['subnet']}
 NETWORK_GATEWAY={config['gateway']}
 TRAEFIK_IP={config['traefik_ip']}
+
+# Synology NAS
+NAS_IP={config.get('nas_ip', '')}
+
+# Synology Services (proxy through Traefik)
+SYNOLOGY_DSFILE_ENABLED={str(config.get('synology_dsfile', False)).lower()}
+SYNOLOGY_PHOTOS_ENABLED={str(config.get('synology_photos', False)).lower()}
 
 # Domain & SSL
 DOMAIN={config['domain']}
@@ -500,6 +572,9 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             "subnet": network_defaults["subnet"],
             "gateway": network_defaults["gateway"],
             "traefik_ip": traefik_ip or network_defaults["traefik_ip"],
+            "nas_ip": network_defaults.get("nas_ip", ""),
+            "synology_dsfile": False,
+            "synology_photos": False,
             "cloudflare_token": "",
         }
         display_configuration(config)
@@ -588,6 +663,10 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo("Access your services:")
     click.echo(f"  Traefik:   https://traefik.{config['domain']}")
     click.echo(f"  Portainer: https://portainer.{config['domain']}")
+    if config.get('synology_dsfile'):
+        click.echo(f"  DS File:   https://files.{config['domain']}")
+    if config.get('synology_photos'):
+        click.echo(f"  Photos:    https://photos.{config['domain']}")
     click.echo()
     click.echo("Useful commands:")
     click.echo("  syrvis status      - Check service status")
