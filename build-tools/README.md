@@ -1,326 +1,300 @@
 # SyrvisCore Build Tools
 
-This directory contains utilities for building SyrvisCore SPK packages.
+Build utilities for SyrvisCore's split-package architecture.
 
 ## Quick Start
-
-**For most users, use the Makefile instead of calling these tools directly:**
 
 ```bash
 # See all available commands
 make help
 
-# Development workflow
-make dev-install      # Install dependencies
-make test             # Run tests
-make lint             # Check code quality
-make build-spk        # Build complete SPK package
+# Build complete SPK (recommended)
+make build-spk
 
-# Full build pipeline
-make all              # lint + test + build-spk
+# Or run scripts directly
+./build-tools/build-manager.sh
+./build-tools/build-spk.sh
 ```
 
-**Continue reading if you need to call build tools directly.**
+## Architecture
 
-## Tools
+SyrvisCore uses a split-package architecture:
 
-### `select-docker-versions`
+| Package | Build Script | Output |
+|---------|--------------|--------|
+| Manager (`syrviscore-manager`) | `build-manager.sh` | Wheel + dependencies |
+| Service (`syrviscore`) | `build-service.sh` | Wheel (downloaded at runtime) |
+| SPK | `build-spk.sh` | Complete installable package |
 
-Interactive tool for discovering and selecting Docker image versions.
+## Build Scripts
 
-**Purpose:** Create a versioned build configuration (`build/config.yaml`) with pinned Docker image tags for reproducible builds.
+### build-manager.sh
 
-**Usage:**
+Builds the manager package wheel and downloads all dependencies for offline installation.
 
 ```bash
-# Interactive mode (recommended)
+./build-tools/build-manager.sh
+```
+
+**What it does:**
+1. Builds wheel from `packages/syrviscore-manager/`
+2. Downloads all dependencies as wheels for target platform
+3. Outputs to `dist/`:
+   - `syrviscore_manager-{version}-py3-none-any.whl`
+   - `dist/manager-deps/` (dependency wheels)
+
+**Dependency bundling:**
+```bash
+pip download \
+    --dest dist/manager-deps/ \
+    --only-binary=:all: \
+    --python-version 3.8 \
+    --platform manylinux2014_x86_64 \
+    --platform linux_x86_64 \
+    --platform any \
+    syrviscore_manager-*.whl
+```
+
+This ensures the SPK can install without network access on Synology.
+
+---
+
+### build-service.sh
+
+Builds the service package wheel for GitHub release.
+
+```bash
+./build-tools/build-service.sh
+```
+
+**What it does:**
+1. Builds wheel from `packages/syrviscore/`
+2. Outputs to `dist/syrviscore-{version}-py3-none-any.whl`
+
+**Note:** Service wheel is NOT bundled in SPK. It's downloaded at runtime by `syrvisctl install`.
+
+---
+
+### build-spk.sh
+
+Builds the complete SPK package.
+
+```bash
+./build-tools/build-spk.sh
+```
+
+**What it does:**
+1. Builds manager wheel (calls `build-manager.sh`)
+2. Creates SPK directory structure
+3. Bundles manager wheel + all dependencies
+4. Packages scripts, INFO, icons
+5. Creates SPK archive
+
+**Output:**
+- `dist/syrviscore-{version}-noarch.spk`
+
+**SPK Contents:**
+```
+syrviscore-{version}-noarch.spk
+├── INFO                    # Package metadata
+├── package.tgz             # Compressed package contents
+│   ├── wheels/             # Manager + all dependencies
+│   │   ├── syrviscore_manager-*.whl
+│   │   ├── click-*.whl
+│   │   ├── requests-*.whl
+│   │   └── ...
+│   └── bin/                # Helper scripts
+├── scripts/                # Lifecycle scripts
+│   ├── preinst
+│   ├── postinst
+│   ├── preuninst
+│   ├── postuninst
+│   ├── preupgrade
+│   ├── postupgrade
+│   └── start-stop-status
+├── conf/
+│   ├── privilege
+│   └── resource
+├── WIZARD_UIFILES/         # Installation wizard
+└── PACKAGE_ICON*.PNG       # Package icons
+```
+
+---
+
+### select-docker-versions
+
+Interactive tool for selecting Docker image versions.
+
+```bash
 ./build-tools/select-docker-versions
-
-# Non-interactive mode (use latest stable versions)
-./build-tools/select-docker-versions --non-interactive
-
-# Custom output path
-./build-tools/select-docker-versions --output my-build-config.yaml
 ```
 
 **Features:**
-- Fetches latest stable versions from Docker Hub
-- Filters out development/beta tags
-- Shows version metadata (update date, size)
-- Allows manual tag entry for specific versions
-- Optional components can be skipped
-- Generates YAML build configuration
+- Queries Docker Hub for available versions
+- Shows release dates
+- Updates `build/config.yaml`
 
-**Requirements:**
-
-Dependencies are automatically installed when you set up the development environment:
-
-```bash
-pip install -e ".[dev]"
-```
-
-This installs all required packages including `requests`, `pyyaml`, `click`, and `docker`.
-
-**Output Example:**
-
-Creates `build/config.yaml` with Docker image versions only:
-
+**Output (`build/config.yaml`):**
 ```yaml
 metadata:
-  syrviscore_version: 0.0.1
-  created_at: '2024-11-29T12:00:00Z'
-  created_by: select-docker-versions
+  syrviscore_version: 0.1.0
+  created_at: '2024-12-25T12:00:00Z'
 
 docker_images:
   traefik:
     image: traefik
-    tag: v3.0.0
-    full_image: traefik:v3.0.0
+    tag: v3.2.0
+    full_image: traefik:v3.2.0
   portainer:
     image: portainer/portainer-ce
-    tag: 2.19.4
-    full_image: portainer/portainer-ce:2.19.4
+    tag: 2.21.4
+    full_image: portainer/portainer-ce:2.21.4
   cloudflared:
     image: cloudflare/cloudflared
-    tag: 2024.10.0
-    full_image: cloudflare/cloudflared:2024.10.0
+    tag: 2024.11.0
+    full_image: cloudflare/cloudflared:2024.11.0
 ```
-
-**Note:** Python dependencies are managed in `pyproject.toml`, not in `build/config.yaml`. The build config only contains Docker image versions for reproducible builds.
 
 ---
 
-### `build-python-package.sh`
+### validate-spk.sh
 
-Builds standard Python wheel package using Python's official packaging tools.
-
-**Usage:**
+Validates SPK package structure for DSM 7.x compatibility.
 
 ```bash
-./build-tools/build-python-package.sh
-```
-
-**Or via Makefile:**
-
-```bash
-make build-wheel
-```
-
-**Output:** Creates wheel file in `dist/syrviscore-{version}-py3-none-any.whl`
-
----
-
-### `build-spk.sh`
-
-Tool to build complete SyrvisCore SPK package from wheel and configuration.
-
-**Usage:**
-
-```bash
-# Build wheel first
-./build-tools/build-python-package.sh
-
-# Then build SPK
-./build-tools/build-spk.sh
-```
-
-**Or via Makefile (recommended):**
-
-```bash
-make build-spk  # Automatically builds wheel first
-```
-
-**Output:** Creates SPK file in `dist/syrviscore-{version}-noarch.spk`
-
----
-
-### `validate-spk.sh`
-
-Comprehensive SPK validation tool for DSM 7.1+ compatibility.
-
-**Usage:**
-
-```bash
-./build-tools/validate-spk.sh dist/syrviscore-0.0.1-noarch.spk
-```
-
-**Or via Makefile:**
-
-```bash
-make validate
+./build-tools/validate-spk.sh dist/syrviscore-*.spk
 ```
 
 **Checks:**
-- File format (must be uncompressed tar)
-- Required files (INFO, package.tgz, scripts/, conf/)
-- Script permissions (must be executable)
-- INFO file fields (DSM 7 compatibility)
-- conf/privilege JSON validation
-- Ownership and permissions
+- File format (uncompressed tar)
+- Required files present
+- Script permissions
+- INFO file fields
+- privilege JSON validity
 
-
----
-
-## Workflow
-
-### Option 1: Using Makefile (Recommended)
+## Makefile Integration
 
 ```bash
-# Complete workflow
-make all              # Runs lint + test + build-spk
+# Development
+make dev-install      # Install packages in dev mode
+make lint             # Run ruff linter
+make format           # Format with black
+make test             # Run tests
 
-# Validate package
+# Building
+make build-spk        # Build complete SPK (recommended)
+
+# The build-spk target:
+# 1. Calls build-manager.sh (builds wheel + downloads deps)
+# 2. Calls build-spk.sh (creates SPK with bundled deps)
+
+# Validation
+make validate         # Validate SPK structure
+```
+
+## Dependency Bundling
+
+The SPK bundles all Python dependencies for offline installation:
+
+**Manager dependencies (bundled in SPK):**
+- click
+- requests
+- urllib3
+- certifi
+- charset-normalizer
+- idna
+
+**How it works:**
+
+1. `build-manager.sh` downloads wheels:
+   ```bash
+   pip download --only-binary=:all: \
+       --python-version 3.8 \
+       --platform manylinux2014_x86_64 \
+       ...
+   ```
+
+2. `build-spk.sh` bundles wheels into `package/wheels/`
+
+3. `postinst` installs from bundled wheels:
+   ```sh
+   pip install --no-index --find-links "$WHEELS_DIR" "$WHEEL"
+   ```
+
+**Result:** No network access required during SPK installation.
+
+## Development Workflow
+
+### Full Build
+
+```bash
+# Clean + build everything
+make clean
+make build-spk
 make validate
-
-# Install to Synology (requires SSH)
-make install SSH_HOST=192.168.0.100
 ```
 
-### Option 2: Manual Steps
+### Testing Changes
 
-#### 1. Select Docker Versions
 ```bash
-./build-tools/select-docker-versions
-# Or: make select-docker-versions
-```
+# Rebuild just manager
+./build-tools/build-manager.sh
 
-This creates `build/config.yaml` with pinned versions.
-
-#### 2. Review Configuration
-```bash
-cat build/config.yaml
-```
-
-Verify the selected versions are correct.
-
-#### 3. Build Python Wheel
-```bash
-./build-tools/build-python-package.sh
-# Or: make build-wheel
-```
-
-#### 4. Build SPK Package
-```bash
+# Rebuild SPK
 ./build-tools/build-spk.sh
-# Or: make build-spk
+
+# Test with simulation
+source tests/dsm-sim/activate.sh
+# ... test postinst, syrvisctl, etc.
 ```
 
-This generates the installable `.spk` file in `dist/`.
+### Release Process
 
-#### 5. Validate SPK
-```bash
-./build-tools/validate-spk.sh dist/syrviscore-{version}-noarch.spk
-# Or: make validate
-```
-
-#### 6. Install to Synology
-```bash
-# Via Makefile (requires SSH access)
-make install SSH_HOST=192.168.0.100
-
-# Or manually upload to Package Center
-# Or via SSH manually:
-scp dist/syrviscore-*.spk admin@192.168.0.100:/tmp/
-ssh admin@192.168.0.100 "sudo synopkg install /tmp/syrviscore-*.spk"
-```
-
----
-
-## Build Configuration Schema
-
-The `build/config.yaml` file contains **Docker image versions only**:
-
-```yaml
-metadata:
-  syrviscore_version: string      # SyrvisCore version (e.g., "1.0.0")
-  created_at: datetime            # ISO 8601 timestamp
-  created_by: string              # Tool or user that created config
-
-docker_images:
-  <component_name>:               # e.g., traefik, portainer, cloudflared
-    image: string                 # Docker Hub repository
-    tag: string                   # Specific version tag
-    full_image: string            # Combined image:tag
-```
-
-**Important:** Python dependencies are managed in `pyproject.toml`, not in this file.
-
----
-
-## Development
-
-### Adding a New Component
-
-To add a new Docker component to the selector:
-
-1. Edit `select-docker-versions`
-2. Add to `self.components` dict:
-
-```python
-"mycomponent": {
-    "repository": "dockerhub/repo-name",
-    "description": "My Component Description",
-    "required": False,  # or True
-}
-```
-
-3. Add to interactive loop if needed
-
-### Testing
-
-```bash
-# Test version fetching
-python3 -c "
-from select-docker-versions import DockerHubClient
-client = DockerHubClient()
-tags = client.get_tags('traefik', limit=5)
-print([t['name'] for t in tags])
-"
-
-# Test config generation
-./build-tools/select-docker-versions --non-interactive --output /tmp/test.yaml
-cat /tmp/test.yaml
-```
-
----
+1. Update versions in `pyproject.toml` files
+2. Update `build/config.yaml` with Docker versions
+3. Build and test:
+   ```bash
+   make build-spk
+   make test-sim
+   ```
+4. Create GitHub release with:
+   - `syrviscore-{version}-noarch.spk` (manager)
+   - `syrviscore-{version}-py3-none-any.whl` (service)
 
 ## Troubleshooting
 
-### Error: "ModuleNotFoundError" or import errors
-
-Ensure you've installed the package in development mode:
+### "Wheel not found"
 
 ```bash
-# From the project root
-pip install -e ".[dev]"
+# Rebuild wheel first
+./build-tools/build-manager.sh
+
+# Then SPK
+./build-tools/build-spk.sh
 ```
 
-This installs all required dependencies including `requests`, `pyyaml`, `click`, and development tools.
+### "Dependency download failed"
 
-### Error: "No versions found"
+```bash
+# Check network
+pip download --help
 
-- Check internet connection
-- Docker Hub may be rate-limiting (wait a few minutes)
-- Repository name might be incorrect
+# Try with different platform
+pip download --platform any ...
+```
 
-### Build config not created
+### "SPK validation failed"
 
-- Ensure `build/` directory exists: `mkdir -p build`
-- Check write permissions
-- Verify output path is valid
+```bash
+# Check SPK contents
+tar -tvf dist/syrviscore-*.spk
 
----
+# Check scripts are executable
+tar -xf dist/syrviscore-*.spk scripts/
+ls -la scripts/
+```
 
-## Future Enhancements
+## See Also
 
-- [ ] Version comparison (highlight major/minor/patch updates)
-- [ ] Changelog integration (show what changed between versions)
-- [ ] Vulnerability scanning integration
-- [ ] Multi-architecture support detection
-- [ ] Automated update checking (CI/CD integration)
-
----
-
-## License
-
-Part of SyrvisCore - MIT License
+- [Development Guide](../docs/dev-guide.md) - Full development setup
+- [Design Document](../docs/design-doc.md) - Architecture overview

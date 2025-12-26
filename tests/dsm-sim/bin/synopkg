@@ -1,0 +1,137 @@
+#!/bin/bash
+# synopkg - Mock Synology package manager for DSM simulation
+#
+# This mock simulates the Synology synopkg command for testing.
+# State is stored in $DSM_SIM_STATE/docker-status.txt and installed-packages.json
+
+# Get state directory
+if [ -z "$DSM_SIM_STATE" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    STATE_DIR="$(dirname "$SCRIPT_DIR")/state"
+else
+    STATE_DIR="$DSM_SIM_STATE"
+fi
+
+DOCKER_STATUS_FILE="$STATE_DIR/docker-status.txt"
+PACKAGES_FILE="$STATE_DIR/installed-packages.json"
+
+# Ensure state files exist
+if [ ! -f "$DOCKER_STATUS_FILE" ]; then
+    echo "running" > "$DOCKER_STATUS_FILE"
+fi
+
+if [ ! -f "$PACKAGES_FILE" ]; then
+    echo "[]" > "$PACKAGES_FILE"
+fi
+
+case "$1" in
+    status)
+        PACKAGE="$2"
+        if [ -z "$PACKAGE" ]; then
+            echo "Usage: synopkg status <package>" >&2
+            exit 1
+        fi
+
+        if [ "$PACKAGE" = "Docker" ]; then
+            STATUS=$(cat "$DOCKER_STATUS_FILE" 2>/dev/null || echo "stopped")
+            if [ "$STATUS" = "running" ]; then
+                echo "package Docker is started"
+                exit 0
+            else
+                echo "package Docker is stopped"
+                exit 1
+            fi
+        fi
+
+        # Check if package is in installed list
+        if grep -q "\"$PACKAGE\"" "$PACKAGES_FILE" 2>/dev/null; then
+            echo "package $PACKAGE is started"
+            exit 0
+        else
+            echo "package $PACKAGE is not installed"
+            exit 255
+        fi
+        ;;
+
+    is_onoff)
+        PACKAGE="$2"
+        if [ -z "$PACKAGE" ]; then
+            echo "Usage: synopkg is_onoff <package>" >&2
+            exit 1
+        fi
+
+        if [ "$PACKAGE" = "Docker" ]; then
+            STATUS=$(cat "$DOCKER_STATUS_FILE" 2>/dev/null || echo "stopped")
+            if [ "$STATUS" = "running" ]; then
+                echo "package Docker is turned on"
+                exit 0
+            else
+                echo "package Docker is turned off"
+                exit 1
+            fi
+        fi
+
+        # Default: package is on
+        echo "package $PACKAGE is turned on"
+        exit 0
+        ;;
+
+    start)
+        PACKAGE="$2"
+        if [ "$PACKAGE" = "Docker" ]; then
+            echo "running" > "$DOCKER_STATUS_FILE"
+            echo "package Docker started"
+            exit 0
+        fi
+        echo "package $PACKAGE started"
+        exit 0
+        ;;
+
+    stop)
+        PACKAGE="$2"
+        if [ "$PACKAGE" = "Docker" ]; then
+            echo "stopped" > "$DOCKER_STATUS_FILE"
+            echo "package Docker stopped"
+            exit 0
+        fi
+        echo "package $PACKAGE stopped"
+        exit 0
+        ;;
+
+    install)
+        PACKAGE="$2"
+        echo "[Mock] Installing $PACKAGE..."
+        echo "[Mock] Package $PACKAGE installed successfully"
+        exit 0
+        ;;
+
+    uninstall)
+        PACKAGE="$2"
+        echo "[Mock] Uninstalling $PACKAGE..."
+        echo "[Mock] Package $PACKAGE uninstalled successfully"
+        exit 0
+        ;;
+
+    list)
+        echo "[Mock] Installed packages:"
+        cat "$PACKAGES_FILE"
+        exit 0
+        ;;
+
+    version)
+        PACKAGE="$2"
+        if [ -z "$PACKAGE" ]; then
+            # Return DSM version
+            echo "7.0-41890"
+        else
+            echo "1.0.0"
+        fi
+        exit 0
+        ;;
+
+    *)
+        echo "Mock synopkg: command '$1' not implemented" >&2
+        echo "Supported commands: status, is_onoff, start, stop, install, uninstall, list, version" >&2
+        exit 1
+        ;;
+esac

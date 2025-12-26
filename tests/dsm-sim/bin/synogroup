@@ -1,0 +1,134 @@
+#!/bin/bash
+# synogroup - Mock Synology group manager for DSM simulation
+#
+# This mock simulates the Synology synogroup command for testing.
+# State is stored in $DSM_SIM_STATE/docker-group-members.txt
+
+# Get state directory
+if [ -z "$DSM_SIM_STATE" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    STATE_DIR="$(dirname "$SCRIPT_DIR")/state"
+else
+    STATE_DIR="$DSM_SIM_STATE"
+fi
+
+MEMBERS_FILE="$STATE_DIR/docker-group-members.txt"
+
+# Ensure state file exists
+if [ ! -f "$MEMBERS_FILE" ]; then
+    touch "$MEMBERS_FILE"
+fi
+
+case "$1" in
+    --add)
+        GROUP="$2"
+        if [ -z "$GROUP" ]; then
+            echo "Usage: synogroup --add <group>" >&2
+            exit 1
+        fi
+        echo "[Mock] Group '$GROUP' created successfully"
+        exit 0
+        ;;
+
+    --del)
+        GROUP="$2"
+        if [ -z "$GROUP" ]; then
+            echo "Usage: synogroup --del <group>" >&2
+            exit 1
+        fi
+        if [ "$GROUP" = "docker" ]; then
+            > "$MEMBERS_FILE"
+        fi
+        echo "[Mock] Group '$GROUP' deleted successfully"
+        exit 0
+        ;;
+
+    --get)
+        GROUP="$2"
+        if [ -z "$GROUP" ]; then
+            echo "Usage: synogroup --get <group>" >&2
+            exit 1
+        fi
+
+        echo "Group Name: [$GROUP]"
+        echo "Group Type: [0]"
+
+        if [ "$GROUP" = "docker" ]; then
+            echo "Group ID:   [999]"
+            echo "Group Members:"
+            while IFS= read -r member || [ -n "$member" ]; do
+                if [ -n "$member" ]; then
+                    echo "  [$member]"
+                fi
+            done < "$MEMBERS_FILE"
+        else
+            echo "Group ID:   [1000]"
+            echo "Group Members:"
+        fi
+        exit 0
+        ;;
+
+    --member)
+        GROUP="$2"
+        if [ -z "$GROUP" ]; then
+            echo "Usage: synogroup --member <group> [user1] [user2] ..." >&2
+            exit 1
+        fi
+
+        shift 2
+
+        if [ "$GROUP" = "docker" ]; then
+            # Add each user if not already present
+            for USER in "$@"; do
+                if ! grep -q "^${USER}$" "$MEMBERS_FILE" 2>/dev/null; then
+                    echo "$USER" >> "$MEMBERS_FILE"
+                fi
+            done
+        fi
+
+        echo "[Mock] Members updated for group '$GROUP'"
+        exit 0
+        ;;
+
+    --memberadd)
+        GROUP="$2"
+        USER="$3"
+        if [ -z "$GROUP" ] || [ -z "$USER" ]; then
+            echo "Usage: synogroup --memberadd <group> <user>" >&2
+            exit 1
+        fi
+
+        if [ "$GROUP" = "docker" ]; then
+            if ! grep -q "^${USER}$" "$MEMBERS_FILE" 2>/dev/null; then
+                echo "$USER" >> "$MEMBERS_FILE"
+            fi
+        fi
+
+        echo "[Mock] User '$USER' added to group '$GROUP'"
+        exit 0
+        ;;
+
+    --memberdel)
+        GROUP="$2"
+        USER="$3"
+        if [ -z "$GROUP" ] || [ -z "$USER" ]; then
+            echo "Usage: synogroup --memberdel <group> <user>" >&2
+            exit 1
+        fi
+
+        if [ "$GROUP" = "docker" ]; then
+            # Remove user from file
+            grep -v "^${USER}$" "$MEMBERS_FILE" > "$MEMBERS_FILE.tmp" 2>/dev/null || true
+            mv "$MEMBERS_FILE.tmp" "$MEMBERS_FILE"
+        fi
+
+        echo "[Mock] User '$USER' removed from group '$GROUP'"
+        exit 0
+        ;;
+
+    *)
+        echo "Mock synogroup: command '$1' not implemented" >&2
+        echo "Supported commands: --add, --del, --get, --member, --memberadd, --memberdel" >&2
+        exit 1
+        ;;
+esac
