@@ -93,6 +93,24 @@ class SystemOperations(ABC):
         """Test if Docker daemon is accessible."""
         pass
 
+    @abstractmethod
+    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+        """
+        Create macvlan shim interface to allow host-to-container communication.
+
+        Macvlan containers cannot communicate with their host by default.
+        This creates a shim interface on the host to enable communication.
+
+        Args:
+            interface: Parent network interface (e.g., ovs_eth0)
+            traefik_ip: IP address of the Traefik container
+            shim_ip: IP address to assign to the shim interface
+
+        Returns:
+            Tuple of (success, message)
+        """
+        pass
+
 
 # =============================================================================
 # DSM Operations (Production)
@@ -278,6 +296,7 @@ class DsmOperations(SystemOperations):
     def ensure_startup_script(self, install_dir: Path, username: str) -> Tuple[bool, str]:
         """Create startup script for Task Scheduler."""
         startup_script_path = install_dir / 'bin' / 'syrvis-startup.sh'
+        env_path = install_dir / 'config' / '.env'
 
         script_content = f"""#!/bin/bash
 # SyrvisCore startup script
@@ -292,6 +311,30 @@ fi
 
 # Ensure user is in docker group
 /usr/syno/sbin/synogroup --member docker {username} 2>/dev/null || true
+
+# Load environment variables
+if [ -f "{env_path}" ]; then
+    export $(grep -v '^#' "{env_path}" | xargs)
+fi
+
+# Create macvlan shim for host-to-container communication
+# This is required because macvlan containers cannot talk to their host
+if [ -n "$NETWORK_INTERFACE" ] && [ -n "$TRAEFIK_IP" ]; then
+    SHIM_NAME="syrvis-shim"
+
+    # Calculate shim IP (traefik_ip + 1)
+    SHIM_IP=$(echo "$TRAEFIK_IP" | awk -F. '{{print $1"."$2"."$3"."$4+1}}')
+
+    # Check if shim already exists
+    if ! ip link show "$SHIM_NAME" >/dev/null 2>&1; then
+        # Create macvlan shim interface
+        ip link add "$SHIM_NAME" link "$NETWORK_INTERFACE" type macvlan mode bridge
+        ip addr add "$SHIM_IP/32" dev "$SHIM_NAME"
+        ip link set "$SHIM_NAME" up
+        ip route add "$TRAEFIK_IP/32" dev "$SHIM_NAME"
+        echo "Created macvlan shim: $SHIM_NAME ($SHIM_IP) -> $TRAEFIK_IP"
+    fi
+fi
 
 exit 0
 """
@@ -331,6 +374,95 @@ exit 0
             return False, "Docker daemon not accessible"
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             return False, f"Cannot test Docker access: {e}"
+
+    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+        """
+        Create macvlan shim interface to allow host-to-container communication.
+
+        This is required because macvlan containers cannot communicate with
+        their host directly. The shim interface bridges this gap.
+        """
+        shim_name = "syrvis-shim"
+
+        try:
+            # Check if shim interface already exists
+            result = subprocess.run(
+                ['ip', 'link', 'show', shim_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if result.returncode == 0:
+                # Interface exists, check if route to traefik_ip exists
+                route_result = subprocess.run(
+                    ['ip', 'route', 'show', f'{traefik_ip}/32'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if traefik_ip in route_result.stdout:
+                    return True, f"Macvlan shim already configured ({shim_name})"
+
+                # Add route if missing
+                subprocess.run(
+                    ['ip', 'route', 'add', f'{traefik_ip}/32', 'dev', shim_name],
+                    capture_output=True,
+                    timeout=5
+                )
+                return True, f"Macvlan shim route added for {traefik_ip}"
+
+            # Create the shim interface
+            # Step 1: Create macvlan interface
+            result = subprocess.run(
+                ['ip', 'link', 'add', shim_name, 'link', interface, 'type', 'macvlan', 'mode', 'bridge'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode != 0:
+                return False, f"Failed to create shim interface: {result.stderr}"
+
+            # Step 2: Assign IP address to shim
+            result = subprocess.run(
+                ['ip', 'addr', 'add', f'{shim_ip}/32', 'dev', shim_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                # Cleanup on failure
+                subprocess.run(['ip', 'link', 'del', shim_name], capture_output=True, timeout=5)
+                return False, f"Failed to assign IP to shim: {result.stderr}"
+
+            # Step 3: Bring interface up
+            result = subprocess.run(
+                ['ip', 'link', 'set', shim_name, 'up'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                subprocess.run(['ip', 'link', 'del', shim_name], capture_output=True, timeout=5)
+                return False, f"Failed to bring up shim interface: {result.stderr}"
+
+            # Step 4: Add route to Traefik IP
+            result = subprocess.run(
+                ['ip', 'route', 'add', f'{traefik_ip}/32', 'dev', shim_name],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                # Route might already exist, not a fatal error
+                pass
+
+            return True, f"Macvlan shim created: {shim_name} ({shim_ip}) -> {traefik_ip}"
+
+        except subprocess.TimeoutExpired:
+            return False, "Timeout while configuring macvlan shim"
+        except Exception as e:
+            return False, f"Error configuring macvlan shim: {e}"
 
 
 # =============================================================================
@@ -465,6 +597,10 @@ exit 0
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return True, "Docker access check skipped"
 
+    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+        """Skip macvlan shim in simulation (not needed on macOS/Linux desktop)."""
+        return True, "Macvlan shim skipped (simulation mode)"
+
 
 # =============================================================================
 # Provider Factory
@@ -553,3 +689,8 @@ def ensure_startup_script(install_dir: Path, username: str) -> Tuple[bool, str]:
 def verify_docker_accessible(username: Optional[str] = None) -> Tuple[bool, str]:
     """Verify Docker is accessible."""
     return get_system_operations().verify_docker_accessible(username)
+
+
+def ensure_macvlan_shim(interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+    """Create macvlan shim for host-to-container communication."""
+    return get_system_operations().ensure_macvlan_shim(interface, traefik_ip, shim_ip)

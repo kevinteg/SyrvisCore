@@ -157,11 +157,44 @@ class DockerManager:
             acme_file.touch()
             acme_file.chmod(0o600)
 
+    def _ensure_macvlan_shim(self) -> None:
+        """
+        Ensure macvlan shim interface exists for host-to-container communication.
+
+        This is required because macvlan containers cannot communicate with
+        their host directly. The shim allows Traefik to reach NAS services.
+        """
+        import os
+        from . import privileged_ops
+
+        # Get network settings from environment
+        interface = os.getenv("NETWORK_INTERFACE", "")
+        traefik_ip = os.getenv("TRAEFIK_IP", "")
+
+        if not interface or not traefik_ip:
+            return  # Skip if not configured
+
+        # Calculate shim IP: use traefik_ip + 1
+        # e.g., if traefik_ip is 192.168.8.4, shim_ip is 192.168.8.5
+        try:
+            parts = traefik_ip.split('.')
+            last_octet = int(parts[3])
+            shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
+        except (IndexError, ValueError):
+            return  # Skip if IP format is unexpected
+
+        # Create shim (requires root, but we're already elevated for Docker)
+        ok, msg = privileged_ops.ensure_macvlan_shim(interface, traefik_ip, shim_ip)
+        if not ok:
+            # Log warning but don't fail - services might still work
+            import sys
+            print(f"Warning: {msg}", file=sys.stderr)
+
     def start_core_services(self) -> None:
         """
         Start core services using docker-compose.
 
-        Creates required Traefik files before starting services.
+        Creates required Traefik files and macvlan shim before starting services.
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
@@ -169,6 +202,9 @@ class DockerManager:
         """
         # Create required Traefik files
         self._create_traefik_files()
+
+        # Ensure macvlan shim exists for host-to-container communication
+        self._ensure_macvlan_shim()
 
         # Start services
         self._run_compose_command(["up", "-d"])
