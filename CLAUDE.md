@@ -6,6 +6,8 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 
 **Current Phase:** MVP (Phase 1) - Focus on build system, basic CLI commands, SPK structure, and installation scripts.
 
+**Architecture:** v2 - Versioned directory structure with CLI-driven setup (no wizard dependency).
+
 ## Key Information
 
 | Item | Value |
@@ -87,28 +89,90 @@ make test
 make all
 ```
 
+## Architecture v2: Versioned Directory Structure
+
+```
+/volume1/docker/syrviscore/
+├── current -> versions/0.1.0/     # Symlink to active version
+├── versions/
+│   ├── 0.0.1/                     # Previous version (rollback target)
+│   │   ├── cli/venv/              # Python venv for this version
+│   │   └── build/config.yaml      # Docker versions for this version
+│   └── 0.1.0/                     # Current active version
+│       ├── cli/venv/
+│       └── build/config.yaml
+├── config/                        # Shared configuration
+│   ├── .env                       # User configuration
+│   ├── docker-compose.yaml        # Generated compose file
+│   └── traefik/                   # Traefik config
+├── data/                          # Persistent data (never deleted)
+│   ├── traefik/
+│   ├── portainer/
+│   └── cloudflared/
+└── .syrviscore-manifest.json      # Installation manifest
+```
+
+### Key Principles
+
+1. **SPK does minimum** - Only installs Python venv, no configuration
+2. **CLI does everything** - Setup, config, updates, rollback
+3. **Versioned installs** - Each version in separate directory
+4. **Instant rollback** - Just change a symlink
+5. **No wizard dependency** - DSM wizard was unreliable
+
+## CLI Commands
+
+### Core Commands
+
+```bash
+syrvis setup                   # Interactive setup with self-elevation
+syrvis status                  # Show service status
+syrvis start                   # Start all services
+syrvis stop                    # Stop all services
+syrvis restart                 # Restart all services
+syrvis logs [service] [-f]     # View logs
+syrvis doctor [--fix]          # Diagnose and fix issues
+```
+
+### Update Commands
+
+```bash
+syrvis update check            # Check for updates
+syrvis update download [ver]   # Download update (don't install)
+syrvis update install [ver]    # Install update (with backup)
+syrvis update rollback         # Rollback to previous version
+syrvis update list             # List installed versions
+syrvis update cleanup          # Remove old versions (keep 2)
+```
+
+### Configuration Commands
+
+```bash
+syrvis config show             # Show current configuration
+syrvis compose generate        # Generate docker-compose.yaml
+syrvis config generate-traefik # Generate Traefik config
+```
+
 ## Project Structure
 
 ```
 SyrvisCore/
 ├── src/syrviscore/          # Main Python package
 │   ├── cli.py               # CLI entry point (Click)
-│   ├── paths.py             # SYRVIS_HOME management
+│   ├── setup.py             # Setup command with self-elevation
+│   ├── update.py            # Update/rollback commands
+│   ├── paths.py             # Versioned path management
+│   ├── doctor.py            # Installation diagnostics
 │   ├── docker_manager.py    # Docker SDK & compose
 │   ├── compose.py           # Docker Compose generation
 │   ├── traefik_config.py    # Traefik config generation
-│   ├── setup.py             # Privileged setup operations
-│   ├── doctor.py            # Installation diagnostics
 │   └── privileged_ops.py    # Root/privilege operations
 ├── tests/                   # Pytest tests
 ├── build-tools/             # SPK build utilities
 ├── spk/                     # Synology package structure
 │   ├── INFO                 # SPK metadata
 │   ├── scripts/             # Lifecycle scripts (sh)
-│   ├── conf/                # DSM configuration
-│   └── WIZARD_UIFILES/      # Installation wizard UI
-├── build/                   # Generated configs
-│   └── config.yaml          # Docker image versions ONLY
+│   └── conf/                # DSM configuration
 ├── docs/                    # Documentation
 ├── pyproject.toml           # Package config & dependencies
 ├── Makefile                 # Build automation
@@ -164,81 +228,26 @@ make validate       # Validate SPK structure
 make all            # lint + test + build-spk
 ```
 
-### Testing
-
-- Framework: pytest
-- Location: `tests/` directory
-- Multi-version: tox (Python 3.8-3.11)
-- Mirror source structure in tests
-
-```bash
-pytest              # Run all tests
-pytest -v           # Verbose
-pytest --cov        # With coverage
-tox                 # All Python versions
-```
-
 ## SPK Scripts
 
 ### Requirements
 
 - Written in **POSIX shell (sh)**, NOT bash
 - Must be executable (`chmod +x`)
-- Use structured logging (see below)
-- Scripts: `preinst`, `postinst`, `preuninst`, `postuninst`, `preupgrade`, `postupgrade`, `start-stop-status`
+- Use structured logging
+- Scripts: `preinst`, `postinst`, `preuninst`, `postuninst`, `preupgrade`, `postupgrade`
+
+### SPK Installation Flow
+
+1. **postinst** - Creates versioned directory, installs venv, creates symlink
+2. User runs `syrvis setup` - Prompts for config, sets up Docker permissions
+3. **postupgrade** - Installs new version, preserves old for rollback
 
 ### Logging Standard
 
 ```sh
-SCRIPT_NAME="preinst"
-LOG_FILE="/tmp/syrviscore-install.log"
-
-log_msg() {
-    LEVEL="$1"
-    MSG="$2"
-    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
-
-    if [ "$LEVEL" = "ERROR" ]; then
-        echo "$LOG_LINE" >&2
-    else
-        echo "$LOG_LINE"
-    fi
-
-    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
-}
-
 log_info() { log_msg "INFO" "$1"; }
-log_warn() { log_msg "WARN" "$1"; }
 log_error() { log_msg "ERROR" "$1"; }
-```
-
-### Logging Rules
-
-- Start with context (script name, working directory, key env vars)
-- Use step numbering: `[X/Y] Step description...`
-- Log all operations with results
-- End with summary and log file location
-- **Never log passwords/tokens in full** - use `${token:+<set>}`
-
-## CLI Development
-
-### Adding a Command
-
-1. Add function to `src/syrviscore/cli.py` with `@cli.command()` decorator
-2. Use Click decorators for options/arguments
-3. Add docstring for help text
-4. Test with `syrvis <command>`
-
-### Command Structure
-
-```
-syrvis
-├── setup              # Privileged setup wizard
-├── doctor             # Diagnostics and self-healing
-├── compose generate   # Generate docker-compose.yaml
-├── core start|stop|restart|status|logs
-└── config generate-traefik
 ```
 
 ## Security
@@ -262,6 +271,7 @@ syrvis
 - Using `:latest` Docker tags
 - Committing sensitive data
 - Mixing tabs and spaces (use spaces)
+- Relying on DSM wizard (it's unreliable)
 
 ## External Dependencies
 
@@ -279,10 +289,12 @@ All Docker images use specific version tags (no `:latest`).
 - **Single-node** - Docker Compose orchestration, not Kubernetes
 - **Simple over complex** - Minimal viable solution first
 - **Community-friendly** - No hardcoded personal info, configuration-driven
+- **Self-elevating** - CLI prompts for sudo when needed
 
 ## Resources
 
 - Design Doc: `docs/design-doc.md`
+- Architecture Proposal: `docs/architecture-proposal-v2.md`
 - SPK Guide: `docs/spk-installation-guide.md`
 - Build Tools: `build-tools/README.md`
 - Click docs: https://click.palletsprojects.com/

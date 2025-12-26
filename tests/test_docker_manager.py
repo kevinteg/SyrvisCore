@@ -14,11 +14,32 @@ from syrviscore.paths import set_syrvis_home
 
 @pytest.fixture
 def temp_syrvis_home_with_compose(tmp_path):
-    """Create temp SYRVIS_HOME with docker-compose.yaml."""
+    """Create temp SYRVIS_HOME with docker-compose.yaml in versioned structure."""
     syrvis_dir = tmp_path / "syrviscore"
     syrvis_dir.mkdir()
-    compose_file = syrvis_dir / "docker-compose.yaml"
+
+    # Create versioned structure
+    (syrvis_dir / "versions" / "0.0.1" / "cli").mkdir(parents=True)
+    (syrvis_dir / "versions" / "0.0.1" / "build").mkdir(parents=True)
+    (syrvis_dir / "current").symlink_to("versions/0.0.1")
+    (syrvis_dir / "data" / "traefik" / "config").mkdir(parents=True)
+
+    # docker-compose.yaml now in config/ directory
+    config_dir = syrvis_dir / "config"
+    config_dir.mkdir()
+    compose_file = config_dir / "docker-compose.yaml"
     compose_file.write_text("version: '3.8'\nservices:\n  traefik: {}")
+
+    # Create manifest
+    import json
+    manifest = {
+        "schema_version": 2,
+        "active_version": "0.0.1",
+        "install_path": str(syrvis_dir),
+        "setup_complete": False,
+    }
+    (syrvis_dir / ".syrviscore-manifest.json").write_text(json.dumps(manifest))
+
     set_syrvis_home(str(syrvis_dir))
     return syrvis_dir
 

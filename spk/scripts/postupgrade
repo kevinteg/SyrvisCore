@@ -1,13 +1,51 @@
 #!/bin/sh
-# postupgrade - Phase 1 unprivileged upgrade
+# postupgrade - Upgrade to new version (versioned directory structure)
 # POSIX shell compatible
+#
+# This script:
+# - Installs new version to versions/{new_version}/
+# - Preserves old version for rollback
+# - Updates 'current' symlink
+# - Preserves config/ and data/ directories
 
 set -e
 
-PACKAGE_NAME="syrviscore"
-SYNOPKG_PKGDEST="/var/packages/${PACKAGE_NAME}/target"
+SCRIPT_NAME="postupgrade"
+LOG_FILE="/tmp/syrviscore-install.log"
 
-# Detect installation directory
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
+
+# Get new version from INFO file
+PKG_VERSION=$(grep '^version=' "${SYNOPKG_PKGDEST}/../INFO" 2>/dev/null | cut -d'"' -f2)
+if [ -z "$PKG_VERSION" ]; then
+    PKG_VERSION="0.0.1"
+fi
+
+# Detect existing installation
 INSTALL_DIR=""
 for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
     if [ -f "${VOLUME}/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
@@ -17,142 +55,172 @@ for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
 done
 
 if [ -z "$INSTALL_DIR" ]; then
-    echo "ERROR: Could not find existing installation"
+    log_error "Could not find existing installation"
     exit 1
 fi
 
-echo "Upgrading SyrvisCore at: ${INSTALL_DIR}"
+VERSION_DIR="${INSTALL_DIR}/versions/${PKG_VERSION}"
 
-# Get versions
-OLD_VERSION=$(grep '"version"' "${INSTALL_DIR}/.syrviscore-manifest.json" | head -1 | cut -d'"' -f4)
-PKG_VERSION=$(grep '^version=' "${SYNOPKG_PKGDEST}/../INFO" | cut -d'"' -f2)
-
-echo "Upgrading from ${OLD_VERSION} to ${PKG_VERSION}"
-
-# === SECTION 1: Create version backup directory ===
-BACKUP_DIR="${INSTALL_DIR}/versions/backup-${OLD_VERSION}-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "${BACKUP_DIR}"
-
-# Backup manifest and .env
+# Get old version from manifest
+OLD_VERSION=""
 if [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
-    cp "${INSTALL_DIR}/.syrviscore-manifest.json" "${BACKUP_DIR}/"
-fi
-if [ -f "${INSTALL_DIR}/.env" ]; then
-    cp "${INSTALL_DIR}/.env" "${BACKUP_DIR}/"
+    OLD_VERSION=$(grep '"active_version"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
 fi
 
-# === SECTION 2: Upgrade Python CLI ===
-cd "${INSTALL_DIR}/cli"
+log_info "==================================================================="
+log_info "Starting SyrvisCore upgrade"
+log_info "==================================================================="
+log_info "From version: ${OLD_VERSION:-unknown}"
+log_info "To version:   ${PKG_VERSION}"
+log_info "Install directory: ${INSTALL_DIR}"
+log_info ""
 
-# Remove old venv
-rm -rf venv
+# === Create new version directory ===
+log_info "[1/5] Creating new version directory..."
 
-# Create new venv
+mkdir -p "${VERSION_DIR}/cli"
+mkdir -p "${VERSION_DIR}/build"
+log_info "  Created: ${VERSION_DIR}"
+
+# === Install Python CLI ===
+log_info "[2/5] Installing Python CLI..."
+
+# Search for wheel file
+WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore-*.whl 2>/dev/null | head -1)
+
+if [ -z "$WHEEL_FILE" ]; then
+    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore-*.whl 2>/dev/null | head -1)
+fi
+
+if [ -z "$WHEEL_FILE" ]; then
+    log_error "  Wheel file not found"
+    exit 1
+fi
+
+log_info "  Found wheel: $(basename "$WHEEL_FILE")"
+
+# Create venv in new version directory
+cd "${VERSION_DIR}/cli"
 python3 -m venv venv
 . venv/bin/activate
 pip install --upgrade pip > /dev/null 2>&1
-pip install --no-cache-dir "${SYNOPKG_PKGDEST}/package"/syrviscore-*.whl > /dev/null 2>&1
+pip install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
+log_info "  Python CLI installed"
+
+# Copy wheel for reference
+cp "$WHEEL_FILE" "${VERSION_DIR}/cli/"
+
 deactivate
 
-# === SECTION 3: Update build configuration ===
-cp -r "${SYNOPKG_PKGDEST}/package/build" "${INSTALL_DIR}/"
-cp "${SYNOPKG_PKGDEST}/package/.env.template" "${INSTALL_DIR}/"
+# === Copy build config ===
+log_info "[3/5] Copying build configuration..."
 
-# === SECTION 4: Preserve .env (DO NOT regenerate) ===
-echo "Preserving existing .env configuration"
-# .env is preserved - user's configuration stays intact
+BUILD_CONFIG="${SYNOPKG_PKGDEST}/build/config.yaml"
+if [ -f "$BUILD_CONFIG" ]; then
+    cp "$BUILD_CONFIG" "${VERSION_DIR}/build/config.yaml"
+    log_info "  Copied build/config.yaml"
+else
+    BUILD_CONFIG="${SYNOPKG_PKGDEST}/package/build/config.yaml"
+    if [ -f "$BUILD_CONFIG" ]; then
+        cp "$BUILD_CONFIG" "${VERSION_DIR}/build/config.yaml"
+        log_info "  Copied build/config.yaml"
+    else
+        log_info "  No build config found (will use defaults)"
+    fi
+fi
 
-# === SECTION 5: Update CLI wrapper (if needed) ===
+# === Update current symlink ===
+log_info "[4/5] Activating new version..."
+
+CURRENT_LINK="${INSTALL_DIR}/current"
+if [ -L "$CURRENT_LINK" ] || [ -e "$CURRENT_LINK" ]; then
+    rm -f "$CURRENT_LINK"
+fi
+ln -s "versions/${PKG_VERSION}" "$CURRENT_LINK"
+log_info "  Updated symlink: current -> versions/${PKG_VERSION}"
+
+# === Update CLI wrapper ===
 cat > "${INSTALL_DIR}/bin/syrvis" << 'CLI_WRAPPER_EOF'
 #!/bin/sh
 # SyrvisCore CLI Wrapper
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="$(dirname "${SCRIPT_DIR}")"
 export SYRVIS_HOME="${INSTALL_DIR}"
-exec "${INSTALL_DIR}/cli/venv/bin/syrvis" "$@"
+exec "${INSTALL_DIR}/current/cli/venv/bin/syrvis" "$@"
 CLI_WRAPPER_EOF
 chmod +x "${INSTALL_DIR}/bin/syrvis"
+log_info "  Updated CLI wrapper"
 
-# === SECTION 6: Update manifest ===
-INSTALL_DATE=$(grep '"install_date"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-INSTALL_VOLUME=$(grep '"install_volume"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-NETWORK_INTERFACE=$(grep '"interface"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-NETWORK_SUBNET=$(grep '"subnet"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-NETWORK_GATEWAY=$(grep '"gateway"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-TRAEFIK_IP=$(grep -A 1 '"network"' "${INSTALL_DIR}/.syrviscore-manifest.json" | grep -v '"network"' | grep 'traefik_ip' | cut -d'"' -f4 || echo "")
-DOMAIN=$(grep '"domain"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-SETUP_COMPLETE=$(grep '"setup_complete"' "${INSTALL_DIR}/.syrviscore-manifest.json" | grep -q 'true' && echo "true" || echo "false")
+# === Update manifest ===
+log_info "[5/5] Updating manifest..."
 
-cat > "${INSTALL_DIR}/.syrviscore-manifest.json" << MANIFEST_EOF
+MANIFEST_FILE="${INSTALL_DIR}/.syrviscore-manifest.json"
+UPGRADE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Read existing manifest values we want to preserve
+SETUP_COMPLETE="false"
+if grep -q '"setup_complete": true' "$MANIFEST_FILE" 2>/dev/null; then
+    SETUP_COMPLETE="true"
+fi
+
+CREATED_AT=$(grep '"created_at"' "$MANIFEST_FILE" 2>/dev/null | cut -d'"' -f4)
+if [ -z "$CREATED_AT" ]; then
+    CREATED_AT="$UPGRADE_DATE"
+fi
+
+# Create updated manifest
+# Note: This is a simplified update - the CLI handles more complex merging
+cat > "$MANIFEST_FILE" << MANIFEST_EOF
 {
-    "version": "${PKG_VERSION}",
-    "previous_version": "${OLD_VERSION}",
-    "install_date": "${INSTALL_DATE}",
-    "upgrade_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-    "install_dir": "${INSTALL_DIR}",
-    "install_volume": "${INSTALL_VOLUME}",
-    "setup_complete": ${SETUP_COMPLETE},
-    "network": {
-        "interface": "${NETWORK_INTERFACE}",
-        "subnet": "${NETWORK_SUBNET}",
-        "gateway": "${NETWORK_GATEWAY}",
-        "traefik_ip": "${TRAEFIK_IP}"
+  "schema_version": 2,
+  "active_version": "${PKG_VERSION}",
+  "install_path": "${INSTALL_DIR}",
+  "setup_complete": ${SETUP_COMPLETE},
+  "created_at": "${CREATED_AT}",
+  "versions": {
+    "${OLD_VERSION}": {
+      "installed_at": "${CREATED_AT}",
+      "status": "available"
     },
-    "domain": "${DOMAIN}",
-    "python_version": "$(python3 --version 2>&1 | awk '{print $2}')"
-}
-MANIFEST_EOF
-
-# === SECTION 7: Update setup-privileges.py ===
-cp "${SYNOPKG_PKGDEST}/package/bin/setup-privileges.py" "${INSTALL_DIR}/bin/"
-chmod +x "${INSTALL_DIR}/bin/setup-privileges.py"
-
-# === SECTION 8: Update Task Scheduler template ===
-cat > "${INSTALL_DIR}/bin/syrviscore-task-template.json" << 'TASK_TEMPLATE_EOF'
-{
-  "name": "SyrvisCore - Docker Permissions Setup",
-  "owner": {
-    "0": {
-      "group": "root",
-      "user": "root"
+    "${PKG_VERSION}": {
+      "installed_at": "${UPGRADE_DATE}",
+      "activated_at": "${UPGRADE_DATE}",
+      "status": "active"
     }
   },
-  "enable": true,
-  "schedule": {
-    "date_type": 0,
-    "repeat_date": "0",
-    "repeat_hour": "0",
-    "repeat_min": "0"
-  },
-  "script": "python3 ${INSTALL_DIR}/bin/setup-privileges.py",
-  "extra": {
-    "notify_enable": false,
-    "notify_mail": "",
-    "notify_if_error": false
-  },
-  "type": "boot"
+  "update_history": [
+    {
+      "from": "${OLD_VERSION}",
+      "to": "${PKG_VERSION}",
+      "timestamp": "${UPGRADE_DATE}",
+      "type": "upgrade"
+    }
+  ],
+  "privileged_setup": {}
 }
-TASK_TEMPLATE_EOF
-sed -i "s|\${INSTALL_DIR}|${INSTALL_DIR}|g" "${INSTALL_DIR}/bin/syrviscore-task-template.json"
+MANIFEST_EOF
+chmod 644 "$MANIFEST_FILE"
+log_info "  Updated manifest"
 
-echo ""
-echo "===================================================================="
-echo "  SyrvisCore Upgrade Complete: ${OLD_VERSION} → ${PKG_VERSION}"
-echo "===================================================================="
-echo ""
-echo "Configuration backup saved to:"
-echo "  ${BACKUP_DIR}"
-echo ""
-echo "Your existing .env configuration has been preserved."
-echo ""
-echo "Next steps:"
-echo "  1. Review release notes for any breaking changes"
-echo "  2. If docker-compose.yaml needs updates, regenerate it:"
-echo "     ${INSTALL_DIR}/bin/syrvis compose generate"
-echo "  3. Restart services:"
-echo "     ${INSTALL_DIR}/bin/syrvis restart"
-echo ""
-echo "===================================================================="
-echo ""
+log_info ""
+log_info "==================================================================="
+log_info "SyrvisCore Upgrade Complete"
+log_info "==================================================================="
+log_info ""
+log_info "Upgraded: ${OLD_VERSION:-unknown} -> ${PKG_VERSION}"
+log_info ""
+log_info "Previous version preserved at:"
+log_info "  ${INSTALL_DIR}/versions/${OLD_VERSION}"
+log_info ""
+log_info "To rollback if needed:"
+log_info "  syrvis update rollback"
+log_info ""
+log_info "Your configuration in config/ has been preserved."
+log_info ""
+log_info "Restart services to use new version:"
+log_info "  syrvis restart"
+log_info ""
+log_info "==================================================================="
+log_info "Detailed logs: $LOG_FILE"
 
 exit 0
