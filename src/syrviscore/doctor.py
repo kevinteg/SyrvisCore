@@ -392,6 +392,10 @@ def doctor(fix, verbose, network):
         except FileNotFoundError:
             click.echo(f"  ✗ Manifest missing")
             issues.append("Manifest file not found")
+        except PermissionError:
+            click.echo(f"  ⚠ Manifest not readable (permission denied)")
+            click.echo(f"     Fix with: sudo chmod 644 {install_dir}/.syrviscore-manifest.json")
+            # Don't add to issues - it's a minor problem
         except Exception as e:
             click.echo(f"  ✗ Manifest error: {e}")
             issues.append(f"Manifest error: {e}")
@@ -755,6 +759,46 @@ def doctor(fix, verbose, network):
                     error = backend_result.get("error", "unreachable")
                     click.echo(f"  ✗ {name}: {host}:{port} - {error}")
                     issues.append(f"Backend: {name} ({host}:{port}) - {error}")
+
+            click.echo()
+
+        # File Sharing Services (SMB/AFP/NFS - direct to NAS, not through Traefik)
+        # Get NAS IP from env
+        nas_ip_for_shares = None
+        try:
+            env_path = paths.get_env_path()
+            if env_path.exists():
+                for line in env_path.read_text().split('\n'):
+                    if line.startswith('NAS_IP='):
+                        nas_ip_for_shares = line.split('=', 1)[1].strip()
+                        break
+        except Exception:
+            pass
+
+        if nas_ip_for_shares:
+            click.echo("File Sharing (direct to NAS)")
+            click.echo("-" * 70)
+            click.echo("  Note: SMB/AFP/NFS connect directly to NAS, not through Traefik")
+            click.echo()
+
+            # File sharing protocols and their ports
+            file_share_services = [
+                ("SMB (Windows/Mac)", 445, "smb://"),
+                ("NetBIOS (legacy SMB)", 139, None),
+                ("AFP (Mac)", 548, "afp://"),
+                ("NFS (Linux)", 2049, "nfs://"),
+            ]
+
+            for name, port, url_scheme in file_share_services:
+                result = check_backend_service(nas_ip_for_shares, port)
+                if result["reachable"]:
+                    if url_scheme:
+                        click.echo(f"  ✓ {name}: {nas_ip_for_shares}:{port}")
+                        click.echo(f"     Connect: {url_scheme}{nas_ip_for_shares}")
+                    else:
+                        click.echo(f"  ✓ {name}: {nas_ip_for_shares}:{port}")
+                else:
+                    click.echo(f"  - {name}: {nas_ip_for_shares}:{port} (not enabled)")
 
             click.echo()
 

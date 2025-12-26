@@ -348,6 +348,11 @@ def update_manifest(updates: Dict[str, Any]) -> None:
 
     deep_merge(manifest, updates)
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Make manifest world-readable so doctor can read it without sudo
+    try:
+        manifest_path.chmod(0o644)
+    except OSError:
+        pass  # May fail if not owner, but that's OK
 
 
 def save_manifest(manifest: Dict[str, Any]) -> None:
@@ -359,6 +364,11 @@ def save_manifest(manifest: Dict[str, Any]) -> None:
     """
     manifest_path = get_manifest_path()
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Make manifest world-readable so doctor can read it without sudo
+    try:
+        manifest_path.chmod(0o644)
+    except OSError:
+        pass  # May fail if not owner, but that's OK
 
 
 def verify_setup_complete() -> bool:
