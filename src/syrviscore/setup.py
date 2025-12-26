@@ -288,8 +288,8 @@ def generate_docker_compose(install_dir: Path) -> bool:
         from dotenv import load_dotenv
         from .compose import generate_compose_from_config
 
-        # Load the .env file we just created
-        load_dotenv(paths.get_env_path())
+        # Load the .env file we just created (override=True to ensure values are used)
+        load_dotenv(paths.get_env_path(), override=True)
 
         config_yaml = paths.get_version_config_yaml()
         output_path = paths.get_docker_compose_path()
@@ -333,7 +333,7 @@ def generate_traefik_config() -> bool:
         from dotenv import load_dotenv
         from .traefik_config import generate_traefik_static_config, generate_traefik_dynamic_config
 
-        load_dotenv(paths.get_env_path())
+        load_dotenv(paths.get_env_path(), override=True)
 
         # Static config goes in data directory (mounted by container)
         traefik_data = paths.get_traefik_data_dir()
