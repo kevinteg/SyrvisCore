@@ -24,6 +24,9 @@ from .__version__ import __version__
 
 def needs_privilege_elevation() -> bool:
     """Check if we need to elevate to root."""
+    # In simulation mode, skip elevation
+    if paths.is_simulation_mode():
+        return False
     return os.getuid() != 0
 
 

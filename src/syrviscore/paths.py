@@ -33,6 +33,24 @@ class SyrvisHomeError(Exception):
 MANIFEST_SCHEMA_VERSION = 2
 
 
+# =============================================================================
+# Simulation Mode Support
+# =============================================================================
+
+def is_simulation_mode() -> bool:
+    """Check if running in DSM simulation mode."""
+    return os.environ.get("DSM_SIM_ACTIVE") == "1"
+
+
+def get_sim_root() -> Optional[Path]:
+    """Get simulation root path if in simulation mode."""
+    if is_simulation_mode():
+        sim_root = os.environ.get("DSM_SIM_ROOT")
+        if sim_root:
+            return Path(sim_root)
+    return None
+
+
 def get_syrvis_home() -> Path:
     """
     Get the SYRVIS_HOME directory with auto-detection fallback.

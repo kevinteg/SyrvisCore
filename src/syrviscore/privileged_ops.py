@@ -7,14 +7,28 @@ import pwd
 from pathlib import Path
 from typing import Tuple, Optional
 
+from . import paths
+
 
 class PrivilegedOpsError(Exception):
     """Error during privileged operation."""
     pass
 
 
+def is_simulation_mode() -> bool:
+    """Check if running in DSM simulation mode."""
+    return paths.is_simulation_mode()
+
+
+def get_sim_root() -> Optional[Path]:
+    """Get simulation root path if in simulation mode."""
+    return paths.get_sim_root()
+
+
 def verify_root() -> None:
-    """Ensure running as root."""
+    """Ensure running as root (skipped in simulation mode)."""
+    if is_simulation_mode():
+        return  # Skip root check in simulation
     if os.getuid() != 0:
         raise PrivilegedOpsError(
             "This operation requires root privileges.\n"
@@ -24,6 +38,10 @@ def verify_root() -> None:
 
 def get_target_user() -> str:
     """Get the user who invoked sudo."""
+    if is_simulation_mode():
+        # In simulation, use current user
+        return os.environ.get('USER', 'simuser')
+
     user = os.environ.get('SUDO_USER') or os.environ.get('USER')
     if user == 'root' or not user:
         raise PrivilegedOpsError(
@@ -36,6 +54,21 @@ def get_target_user() -> str:
 
 def verify_docker_installed() -> Tuple[bool, str]:
     """Check if Docker package is installed on Synology."""
+    if is_simulation_mode():
+        # In simulation, check if docker command exists
+        try:
+            result = subprocess.run(
+                ['docker', '--version'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                return True, "Docker is available (simulation mode)"
+            return False, "Docker not found"
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return True, "Docker check skipped (simulation mode)"
+
     try:
         result = subprocess.run(
             ['synopkg', 'status', 'Docker'],
@@ -55,10 +88,20 @@ def verify_docker_installed() -> Tuple[bool, str]:
 
 def verify_docker_socket_exists() -> Tuple[bool, str]:
     """Check if Docker socket exists."""
-    socket_path = Path('/var/run/docker.sock')
+    sim_root = get_sim_root()
+    if sim_root:
+        socket_path = sim_root / "var" / "run" / "docker.sock"
+    else:
+        socket_path = Path('/var/run/docker.sock')
+
     if socket_path.exists():
         return True, f"Docker socket exists: {socket_path}"
-    return False, "Docker socket not found at /var/run/docker.sock"
+
+    # In simulation, also check real socket
+    if is_simulation_mode() and Path('/var/run/docker.sock').exists():
+        return True, "Docker socket exists (host)"
+
+    return False, f"Docker socket not found at {socket_path}"
 
 
 def get_docker_group_info() -> Tuple[bool, Optional[int]]:
@@ -72,10 +115,17 @@ def get_docker_group_info() -> Tuple[bool, Optional[int]]:
 
 def ensure_docker_group() -> Tuple[bool, str]:
     """Create docker group if it doesn't exist."""
+    if is_simulation_mode():
+        # In simulation, just check if docker group exists on host
+        exists, gid = get_docker_group_info()
+        if exists:
+            return True, f"Docker group exists (GID: {gid}) (simulation mode)"
+        return True, "Docker group check skipped (simulation mode)"
+
     exists, gid = get_docker_group_info()
     if exists:
         return True, f"Docker group already exists (GID: {gid})"
-    
+
     try:
         result = subprocess.run(
             ['synogroup', '--add', 'docker'],
@@ -107,9 +157,15 @@ def is_user_in_group(username: str, groupname: str) -> bool:
 
 def ensure_user_in_docker_group(username: str) -> Tuple[bool, str]:
     """Add user to docker group."""
+    if is_simulation_mode():
+        # In simulation, just check membership
+        if is_user_in_group(username, 'docker'):
+            return True, f"User '{username}' in docker group (simulation mode)"
+        return True, f"User '{username}' docker group check skipped (simulation mode)"
+
     if is_user_in_group(username, 'docker'):
         return True, f"User '{username}' already in docker group"
-    
+
     try:
         result = subprocess.run(
             ['synogroup', '--member', 'docker', username],
@@ -140,28 +196,32 @@ def get_docker_socket_permissions() -> Tuple[str, str, str]:
 
 def ensure_docker_socket_permissions() -> Tuple[bool, str]:
     """Set Docker socket to root:docker 660."""
+    if is_simulation_mode():
+        # In simulation, skip socket permission changes
+        return True, "Docker socket permissions check skipped (simulation mode)"
+
     socket_path = Path('/var/run/docker.sock')
     if not socket_path.exists():
         return False, "Docker socket not found"
-    
+
     owner, group, perms = get_docker_socket_permissions()
-    
+
     # Check if already correct
     if group == 'docker' and perms == '660':
         return True, f"Docker socket permissions already correct ({owner}:{group} {perms})"
-    
+
     try:
         # Get docker group GID
         _, gid = get_docker_group_info()
         if gid is None:
             return False, "Docker group not found"
-        
+
         # Change group ownership
         os.chown(str(socket_path), -1, gid)
-        
+
         # Set permissions
         os.chmod(str(socket_path), 0o660)
-        
+
         owner, group, perms = get_docker_socket_permissions()
         return True, f"Docker socket permissions updated ({owner}:{group} {perms})"
     except (OSError, PermissionError) as e:
@@ -170,13 +230,18 @@ def ensure_docker_socket_permissions() -> Tuple[bool, str]:
 
 def ensure_global_symlink(install_dir: Path) -> Tuple[bool, str]:
     """Create /usr/local/bin/syrvis symlink."""
-    symlink_path = Path('/usr/local/bin/syrvis')
+    sim_root = get_sim_root()
+    if sim_root:
+        symlink_path = sim_root / "usr" / "local" / "bin" / "syrvis"
+    else:
+        symlink_path = Path('/usr/local/bin/syrvis')
+
     # Use absolute path for target
     target = (install_dir / 'bin' / 'syrvis').resolve()
-    
+
     if not target.exists():
         return False, f"Target script not found: {target}"
-    
+
     # Check if symlink exists and is correct
     if symlink_path.exists():
         if symlink_path.is_symlink():
@@ -189,11 +254,11 @@ def ensure_global_symlink(install_dir: Path) -> Tuple[bool, str]:
                 symlink_path.unlink()
         else:
             return False, f"File exists but is not a symlink: {symlink_path}"
-    
+
     try:
         # Create parent directory if needed
         symlink_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Create symlink
         symlink_path.symlink_to(target)
         return True, f"Global symlink created: {symlink_path} → {target}"
