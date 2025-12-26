@@ -81,19 +81,29 @@ def generate_traefik_dynamic_config() -> str:
 
 http:
   routers:
-    # Traefik Dashboard (HTTP)
+    # Traefik Dashboard (HTTP -> HTTPS redirect)
     dashboard:
       rule: "Host(`traefik.{domain}`)"
       service: api@internal
       entryPoints:
         - web
+      middlewares:
+        - https-redirect
 
-    # Traefik Dashboard (HTTPS)
+    # Traefik Dashboard (HTTPS with Let's Encrypt)
     dashboard-secure:
       rule: "Host(`traefik.{domain}`)"
       service: api@internal
       entryPoints:
         - websecure
-      tls: {{}}
+      tls:
+        certResolver: letsencrypt
+
+  middlewares:
+    # Redirect HTTP to HTTPS
+    https-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
 """
     return config

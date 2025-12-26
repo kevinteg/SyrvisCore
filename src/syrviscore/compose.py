@@ -182,9 +182,16 @@ class ComposeGenerator:
             ],
             "labels": [
                 "traefik.enable=true",
+                # HTTP router (redirect to HTTPS)
+                "traefik.http.routers.portainer-http.entrypoints=web",
+                "traefik.http.routers.portainer-http.rule=Host(`portainer.${DOMAIN}`)",
+                "traefik.http.routers.portainer-http.middlewares=https-redirect@file",
+                # HTTPS router (with Let's Encrypt)
                 "traefik.http.routers.portainer.entrypoints=websecure",
                 "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)",
                 "traefik.http.routers.portainer.tls=true",
+                "traefik.http.routers.portainer.tls.certresolver=letsencrypt",
+                # Service
                 "traefik.http.services.portainer.loadbalancer.server.port=9000",
             ],
         }
