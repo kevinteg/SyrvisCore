@@ -37,17 +37,34 @@ def get_package_volume() -> Optional[str]:
     """
     Detect the volume where the SPK package is installed.
 
-    Uses SYNOPKG_PKGDEST environment variable which is set by DSM during
-    SPK installation (e.g., /volume4/@appstore/syrviscore).
+    Tries multiple strategies:
+    1. SYNOPKG_PKGDEST environment variable (set during SPK installation)
+    2. Location of the syrvisctl executable itself
 
     Returns:
         Volume path (e.g., "/volume4") or None if not detectable
     """
-    # Check SYNOPKG_PKGDEST first (set during SPK installation)
+    import sys
+
+    # Strategy 1: SYNOPKG_PKGDEST (set during SPK installation)
     pkg_dest = os.environ.get("SYNOPKG_PKGDEST", "")
     if pkg_dest:
-        # Extract volume from path like /volume4/@appstore/syrviscore
         parts = pkg_dest.split("/")
+        if len(parts) >= 2 and parts[1].startswith("volume"):
+            return f"/{parts[1]}"
+
+    # Strategy 2: Detect from syrvisctl executable location
+    # e.g., /volume4/@appstore/syrviscore/venv/bin/python -> /volume4
+    exe_path = sys.executable
+    if exe_path:
+        parts = exe_path.split("/")
+        if len(parts) >= 2 and parts[1].startswith("volume"):
+            return f"/{parts[1]}"
+
+    # Strategy 3: Detect from this module's location
+    module_path = str(Path(__file__).resolve())
+    if module_path:
+        parts = module_path.split("/")
         if len(parts) >= 2 and parts[1].startswith("volume"):
             return f"/{parts[1]}"
 

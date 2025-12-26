@@ -33,6 +33,42 @@ def cli():
     pass
 
 
+def check_sudo_needed(path: Path) -> bool:
+    """Check if we need sudo to write to the given path."""
+    import os
+
+    # Check if path exists and is writable
+    if path.exists():
+        return not os.access(path, os.W_OK)
+
+    # Check parent directory
+    parent = path.parent
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+
+    if parent.exists():
+        return not os.access(parent, os.W_OK)
+
+    return True  # Assume we need sudo if we can't determine
+
+
+def reexec_with_sudo():
+    """Re-execute the current command with sudo."""
+    import os
+    import shutil
+
+    sudo_path = shutil.which("sudo")
+    if not sudo_path:
+        click.echo("Error: sudo not found", err=True)
+        sys.exit(1)
+
+    # Re-execute with sudo, preserving arguments
+    args = [sudo_path, sys.executable] + sys.argv
+    click.echo("  Elevated privileges required. Re-running with sudo...")
+    click.echo()
+    os.execv(sudo_path, args)
+
+
 @cli.command()
 @click.argument('version', required=False)
 @click.option('--force', is_flag=True, help='Force reinstall even if version exists')
@@ -53,7 +89,7 @@ def install(version, force, path, yes):
     try:
         existing_home = paths.get_syrvis_home()
         install_path = existing_home
-        click.echo(f"  Existing installation: {install_path}")
+        click.echo(f"  Using existing installation: {install_path}")
     except paths.SyrvisHomeError:
         # New installation - prompt for path
         default_path = paths.get_default_install_path()
@@ -63,17 +99,23 @@ def install(version, force, path, yes):
         elif yes:
             install_path = default_path
         else:
-            click.echo(f"  Default installation path: {default_path}")
+            # Prompt with bracket format: Installation path [/volume4/syrviscore]:
             user_path = click.prompt(
-                "  Install path",
+                f"  Installation path [{default_path}]",
                 default=str(default_path),
                 show_default=False
             )
             install_path = Path(user_path)
 
-        # Set SYRVIS_HOME for this session
-        os.environ["SYRVIS_HOME"] = str(install_path)
-        click.echo(f"  Installation path: {install_path}")
+        click.echo(f"  Installing to: {install_path}")
+
+    # Check if we need elevated privileges
+    if check_sudo_needed(install_path):
+        if os.geteuid() != 0:
+            reexec_with_sudo()
+
+    # Set SYRVIS_HOME for this session
+    os.environ["SYRVIS_HOME"] = str(install_path)
 
     click.echo()
 
