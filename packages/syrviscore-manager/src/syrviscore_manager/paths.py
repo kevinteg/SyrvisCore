@@ -33,8 +33,25 @@ PACKAGE_NAME = "syrviscore"
 SPK_TARGET_DIR = f"/var/packages/{PACKAGE_NAME}/target"
 
 
+def is_simulation_mode() -> bool:
+    """Check if running in DSM simulation mode."""
+    return os.environ.get("DSM_SIM_ACTIVE") == "1"
+
+
+def get_sim_root() -> Optional[Path]:
+    """Get simulation root path if in simulation mode."""
+    if is_simulation_mode():
+        sim_root = os.environ.get("DSM_SIM_ROOT")
+        if sim_root:
+            return Path(sim_root)
+    return None
+
+
 def get_spk_target_dir() -> Path:
     """Get the SPK installation target directory."""
+    sim_root = get_sim_root()
+    if sim_root:
+        return sim_root / "var" / "packages" / PACKAGE_NAME / "target"
     return Path(SPK_TARGET_DIR)
 
 
@@ -49,7 +66,7 @@ def get_syrvis_home() -> Path:
 
     Tries multiple strategies:
     1. SYRVIS_HOME environment variable
-    2. Default location /volume1/docker/syrviscore
+    2. Default location /volume1/docker/syrviscore (or simulation equivalent)
     3. Search other volumes (volume2-volume9)
 
     Returns:
@@ -58,6 +75,8 @@ def get_syrvis_home() -> Path:
     Raises:
         SyrvisHomeError: If SYRVIS_HOME cannot be determined
     """
+    sim_root = get_sim_root()
+
     # Strategy 1: Environment variable
     syrvis_home = os.environ.get("SYRVIS_HOME")
     if syrvis_home:
@@ -65,14 +84,21 @@ def get_syrvis_home() -> Path:
         if syrvis_path.exists() and syrvis_path.is_dir():
             return syrvis_path
 
-    # Strategy 2: Default location
-    default = Path("/volume1/docker/syrviscore")
+    # Strategy 2: Default location (with simulation support)
+    if sim_root:
+        default = sim_root / "volume1" / "docker" / PACKAGE_NAME
+    else:
+        default = Path("/volume1/docker/syrviscore")
+
     if default.exists() and (default / ".syrviscore-manifest.json").exists():
         return default
 
     # Strategy 3: Search other volumes
     for vol_num in range(2, 10):
-        candidate = Path(f"/volume{vol_num}/docker/syrviscore")
+        if sim_root:
+            candidate = sim_root / f"volume{vol_num}" / "docker" / PACKAGE_NAME
+        else:
+            candidate = Path(f"/volume{vol_num}/docker/syrviscore")
         if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
             return candidate
 
@@ -92,21 +118,37 @@ def get_syrvis_home_or_create(volume: Optional[str] = None) -> Path:
     Returns:
         Path to SYRVIS_HOME directory
     """
+    # First check if SYRVIS_HOME env var is set - use it even if doesn't exist yet
+    syrvis_home_env = os.environ.get("SYRVIS_HOME")
+    if syrvis_home_env:
+        syrvis_home = Path(syrvis_home_env)
+        syrvis_home.mkdir(parents=True, exist_ok=True)
+        return syrvis_home
+
     try:
         return get_syrvis_home()
     except SyrvisHomeError:
         # Create new installation directory
+        sim_root = get_sim_root()
+
         if volume:
             base = Path(volume)
         else:
-            # Use first available volume
+            # Use first available volume (with simulation support)
             for vol_num in range(1, 10):
-                candidate = Path(f"/volume{vol_num}")
+                if sim_root:
+                    candidate = sim_root / f"volume{vol_num}"
+                else:
+                    candidate = Path(f"/volume{vol_num}")
                 if candidate.exists():
                     base = candidate
                     break
             else:
-                base = Path("/volume1")
+                # Default fallback
+                if sim_root:
+                    base = sim_root / "volume1"
+                else:
+                    base = Path("/volume1")
 
         syrvis_home = base / "docker" / PACKAGE_NAME
         syrvis_home.mkdir(parents=True, exist_ok=True)
