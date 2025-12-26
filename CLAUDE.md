@@ -2,23 +2,91 @@
 
 ## Project Overview
 
-SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packages Traefik (reverse proxy), Portainer (container management), and Cloudflared (tunnel) into a single SPK package. The project uses modern Python packaging with a CLI built on Click.
+SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packages Traefik (reverse proxy), Portainer (container management), and Cloudflared (tunnel). The project uses a split-package architecture with separate manager and service components.
 
 **Current Phase:** MVP (Phase 1) - Focus on build system, basic CLI commands, SPK structure, and installation scripts.
 
-**Architecture:** v2 - Versioned directory structure with CLI-driven setup (no wizard dependency).
+**Architecture:** v3 - Split packages with `syrvisctl` (manager) and `syrvis` (service).
 
 ## Key Information
 
 | Item | Value |
 |------|-------|
-| Python Package | `syrviscore` |
-| CLI Command | `syrvis` |
-| Version File | `src/syrviscore/__version__.py` |
+| Manager Package | `syrviscore-manager` |
+| Service Package | `syrviscore` |
+| Manager CLI | `syrvisctl` |
+| Service CLI | `syrvis` |
 | Target Platform | Synology DSM 7.0+ |
 | Installation Path | `/volume1/docker/syrviscore/` |
-| Service Account | `syrvis-bot` |
 | Python Version | 3.8.12 (matches Synology DSM) |
+
+## Architecture: Split Packages
+
+### Two Packages
+
+| Package | CLI | Location | Update Method | Purpose |
+|---------|-----|----------|---------------|---------|
+| `syrviscore-manager` | `syrvisctl` | SPK install dir | SPK reinstall (rare) | Version management |
+| `syrviscore` | `syrvis` | Per-version venv | `syrvisctl install` (frequent) | Docker services |
+
+### Directory Structure
+
+```
+/var/packages/syrviscore/target/      # SPK install (IMMUTABLE)
+├── venv/bin/syrvisctl                 # Manager CLI
+└── syrviscore_manager-*.whl
+
+/volumeX/docker/syrviscore/            # SYRVIS_HOME (managed by syrvisctl)
+├── current -> versions/0.2.0          # Symlink to active version
+├── versions/
+│   ├── 0.1.0/cli/venv/bin/syrvis      # Previous version
+│   └── 0.2.0/cli/venv/bin/syrvis      # Active version
+├── config/                            # Shared configuration
+│   ├── .env
+│   └── docker-compose.yaml
+├── data/                              # Persistent data
+├── bin/syrvis                         # Wrapper script
+└── .syrviscore-manifest.json
+```
+
+### Key Principles
+
+1. **SPK installs manager only** - Lightweight, immutable
+2. **Manager installs service** - Downloads from GitHub releases
+3. **One venv per version** - Clean isolation
+4. **Instant rollback** - Symlink switch
+5. **Manager rarely updates** - Only new features require SPK reinstall
+
+## Monorepo Structure
+
+```
+SyrvisCore/
+├── packages/
+│   ├── syrviscore-manager/           # Manager package (SPK)
+│   │   ├── pyproject.toml
+│   │   └── src/syrviscore_manager/
+│   │       ├── cli.py                # syrvisctl entry point
+│   │       ├── version_manager.py    # Install/activate/rollback
+│   │       ├── downloader.py         # GitHub release downloads
+│   │       └── manifest.py           # Manifest management
+│   │
+│   └── syrviscore/                   # Service package
+│       ├── pyproject.toml
+│       └── src/syrviscore/
+│           ├── cli.py                # syrvis entry point
+│           ├── setup.py              # Interactive setup
+│           ├── docker_manager.py     # Container management
+│           └── ...
+│
+├── spk/                              # SPK (manager only)
+├── build-tools/
+│   ├── build-manager.sh              # Build manager wheel
+│   ├── build-service.sh              # Build service wheel
+│   ├── build-spk.sh                  # Build SPK (manager only)
+│   └── release-service.sh            # GitHub release for service
+├── tests/                            # Pytest tests
+└── build/config.yaml                 # Docker image versions
+```
 
 ## Getting Started
 
@@ -39,16 +107,16 @@ pyenv virtualenv 3.8.12 syrviscore
 # Activate the virtual environment
 pyenv activate syrviscore
 
-# Install the package in editable mode with dev dependencies
-pip install -e ".[dev]"
+# Install both packages in editable mode
+pip install -e "packages/syrviscore-manager[dev]"
+pip install -e "packages/syrviscore[dev]"
 
 # Verify installation
+syrvisctl --version
 syrvis --version
 ```
 
 ### Running Tests
-
-**Always run tests before committing changes:**
 
 ```bash
 # Activate virtualenv first
@@ -60,124 +128,62 @@ make test
 # Run tests with verbose output
 pytest -v
 
-# Run tests with coverage report
-make test-cov
-
 # Run a specific test file
 pytest tests/test_cli.py -v
-
-# Run tests across all supported Python versions
-tox
 ```
 
-### Development Workflow
+### Building Packages
 
 ```bash
-# 1. Activate environment
-pyenv activate syrviscore
+# Build manager wheel
+./build-tools/build-manager.sh
 
-# 2. Make changes to code
+# Build service wheel
+./build-tools/build-service.sh
 
-# 3. Format and lint
-make format
-make lint
+# Build SPK (includes manager only)
+./build-tools/build-spk.sh
 
-# 4. Run tests
-make test
-
-# 5. Full validation (lint + test + build)
-make all
+# Create GitHub release for service
+./build-tools/release-service.sh
 ```
-
-## Architecture v2: Versioned Directory Structure
-
-```
-/volume1/docker/syrviscore/
-├── current -> versions/0.1.0/     # Symlink to active version
-├── versions/
-│   ├── 0.0.1/                     # Previous version (rollback target)
-│   │   ├── cli/venv/              # Python venv for this version
-│   │   └── build/config.yaml      # Docker versions for this version
-│   └── 0.1.0/                     # Current active version
-│       ├── cli/venv/
-│       └── build/config.yaml
-├── config/                        # Shared configuration
-│   ├── .env                       # User configuration
-│   ├── docker-compose.yaml        # Generated compose file
-│   └── traefik/                   # Traefik config
-├── data/                          # Persistent data (never deleted)
-│   ├── traefik/
-│   ├── portainer/
-│   └── cloudflared/
-└── .syrviscore-manifest.json      # Installation manifest
-```
-
-### Key Principles
-
-1. **SPK does minimum** - Only installs Python venv, no configuration
-2. **CLI does everything** - Setup, config, updates, rollback
-3. **Versioned installs** - Each version in separate directory
-4. **Instant rollback** - Just change a symlink
-5. **No wizard dependency** - DSM wizard was unreliable
 
 ## CLI Commands
 
-### Core Commands
+### syrvisctl (Manager)
 
 ```bash
-syrvis setup                   # Interactive setup with self-elevation
-syrvis status                  # Show service status
-syrvis start                   # Start all services
-syrvis stop                    # Stop all services
-syrvis restart                 # Restart all services
-syrvis logs [service] [-f]     # View logs
-syrvis doctor [--fix]          # Diagnose and fix issues
+syrvisctl install [version]   # Download and install service from GitHub
+syrvisctl uninstall <version> # Remove a service version
+syrvisctl list                # List installed versions
+syrvisctl activate <version>  # Switch active version
+syrvisctl rollback            # Rollback to previous version
+syrvisctl check               # Check for updates
+syrvisctl info                # Show installation info
+syrvisctl cleanup [--keep N]  # Remove old versions
+syrvisctl migrate             # Migrate from legacy installation
 ```
 
-### Update Commands
+### syrvis (Service)
 
 ```bash
-syrvis update check            # Check for updates
-syrvis update download [ver]   # Download update (don't install)
-syrvis update install [ver]    # Install update (with backup)
-syrvis update rollback         # Rollback to previous version
-syrvis update list             # List installed versions
-syrvis update cleanup          # Remove old versions (keep 2)
+syrvis setup                  # Interactive setup with self-elevation
+syrvis status                 # Show service status
+syrvis start                  # Start all services
+syrvis stop                   # Stop all services
+syrvis restart                # Restart all services
+syrvis logs [service] [-f]    # View logs
+syrvis doctor [--fix]         # Diagnose and fix issues
+syrvis config show            # Show current configuration
+syrvis compose generate       # Generate docker-compose.yaml
 ```
 
-### Configuration Commands
+## Installation Flow
 
-```bash
-syrvis config show             # Show current configuration
-syrvis compose generate        # Generate docker-compose.yaml
-syrvis config generate-traefik # Generate Traefik config
-```
-
-## Project Structure
-
-```
-SyrvisCore/
-├── src/syrviscore/          # Main Python package
-│   ├── cli.py               # CLI entry point (Click)
-│   ├── setup.py             # Setup command with self-elevation
-│   ├── update.py            # Update/rollback commands
-│   ├── paths.py             # Versioned path management
-│   ├── doctor.py            # Installation diagnostics
-│   ├── docker_manager.py    # Docker SDK & compose
-│   ├── compose.py           # Docker Compose generation
-│   ├── traefik_config.py    # Traefik config generation
-│   └── privileged_ops.py    # Root/privilege operations
-├── tests/                   # Pytest tests
-├── build-tools/             # SPK build utilities
-├── spk/                     # Synology package structure
-│   ├── INFO                 # SPK metadata
-│   ├── scripts/             # Lifecycle scripts (sh)
-│   └── conf/                # DSM configuration
-├── docs/                    # Documentation
-├── pyproject.toml           # Package config & dependencies
-├── Makefile                 # Build automation
-└── tox.ini                  # Multi-env testing
-```
+1. **Install SPK** - Installs manager (`syrvisctl`) to `/var/packages/syrviscore/target/`
+2. **Run `syrvisctl install`** - Downloads and installs service from GitHub
+3. **Run `syrvis setup`** - Interactive configuration, Docker permissions
+4. **Run `syrvis start`** - Start Docker services
 
 ## Development Rules
 
@@ -186,7 +192,6 @@ SyrvisCore/
 - **Use `pyproject.toml` exclusively** - No `requirements.txt` or `setup.py`
 - Dependencies: `[project.dependencies]`
 - Dev dependencies: `[project.optional-dependencies.dev]`
-- Install: `pip install -e .` or `pip install -e ".[dev]"`
 - Never use `sudo pip install` - use venv
 
 ### Code Style
@@ -195,38 +200,19 @@ SyrvisCore/
 - **Linter:** Ruff
 - **Type hints:** Encouraged but not required for MVP
 - **Docstrings:** Google style for public functions
-- **Naming:** `snake_case` for Python files and functions
-
-### File Extensions
-
-- YAML files: `.yaml` (not `.yml`)
-- GitHub Actions: `.yml` (follows GitHub convention)
 
 ### Version Management
 
-- Single source of truth: `src/syrviscore/__version__.py`
+- Manager version: `packages/syrviscore-manager/src/syrviscore_manager/__version__.py`
+- Service version: `packages/syrviscore/src/syrviscore/__version__.py`
 - Follow semantic versioning (MAJOR.MINOR.PATCH)
-- Never hardcode version strings elsewhere
+- Manager and service can have different versions
 
 ### Build System
 
-- `build/config.yaml` contains ONLY Docker image versions
-- Python dependencies managed via `pyproject.toml`, NOT `build/config.yaml`
-- Generated artifacts go in `dist/` (SPK) or `build/` (intermediate)
-- Use Makefile targets for common operations
-
-### Key Makefile Targets
-
-```bash
-make dev-install    # Install with dev dependencies
-make test           # Run pytest
-make test-cov       # Run with coverage
-make lint           # Run ruff
-make format         # Format with black
-make build-spk      # Build complete SPK
-make validate       # Validate SPK structure
-make all            # lint + test + build-spk
-```
+- `build/config.yaml` contains Docker image versions (bundled with service)
+- Manager SPK is minimal (~20KB wheel)
+- Service wheel includes all dependencies
 
 ## SPK Scripts
 
@@ -234,44 +220,26 @@ make all            # lint + test + build-spk
 
 - Written in **POSIX shell (sh)**, NOT bash
 - Must be executable (`chmod +x`)
-- Use structured logging
-- Scripts: `preinst`, `postinst`, `preuninst`, `postuninst`, `preupgrade`, `postupgrade`
+- Only handles manager installation
 
 ### SPK Installation Flow
 
-1. **postinst** - Creates versioned directory, installs venv, creates symlink
-2. User runs `syrvis setup` - Prompts for config, sets up Docker permissions
-3. **postupgrade** - Installs new version, preserves old for rollback
-
-### Logging Standard
-
-```sh
-log_info() { log_msg "INFO" "$1"; }
-log_error() { log_msg "ERROR" "$1"; }
-```
+1. **postinst** - Creates manager venv, installs manager wheel, creates symlink
+2. User runs `syrvisctl install` - Downloads and installs service
+3. User runs `syrvis setup` - Configures services
+4. **postupgrade** - Updates manager venv
 
 ## Security
 
 - Secrets go in `/volume1/secrets/` on Synology
 - Use `.env` files locally (never commit)
-- Provide `.env.template` as reference
 - File permissions: ACME certs `0600`, configs `0644`, scripts `0755`
 
 ## Git Practices
 
 - Atomic, well-described commits
-- **DO commit:** `build/config.yaml` (versioned Docker tags)
+- **DO commit:** `build/config.yaml` (versioned Docker tags), `packages/`
 - **DON'T commit:** `.env`, `venv/`, `__pycache__/`, `*.spk`, `dist/`
-
-## What to Avoid
-
-- Using `requirements.txt` or `setup.py`
-- Putting Python packages in `build/config.yaml`
-- Hardcoding version strings
-- Using `:latest` Docker tags
-- Committing sensitive data
-- Mixing tabs and spaces (use spaces)
-- Relying on DSM wizard (it's unreliable)
 
 ## External Dependencies
 
@@ -285,10 +253,10 @@ All Docker images use specific version tags (no `:latest`).
 
 ## Design Principles
 
-- **CLI-first** - No web service (Flask/FastAPI/Django)
-- **Single-node** - Docker Compose orchestration, not Kubernetes
+- **CLI-first** - No web service
+- **Split packages** - Manager (immutable) vs Service (updatable)
+- **Single-node** - Docker Compose orchestration
 - **Simple over complex** - Minimal viable solution first
-- **Community-friendly** - No hardcoded personal info, configuration-driven
 - **Self-elevating** - CLI prompts for sudo when needed
 
 ## Resources
@@ -297,5 +265,3 @@ All Docker images use specific version tags (no `:latest`).
 - Architecture Proposal: `docs/architecture-proposal-v2.md`
 - SPK Guide: `docs/spk-installation-guide.md`
 - Build Tools: `build-tools/README.md`
-- Click docs: https://click.palletsprojects.com/
-- Python packaging: https://packaging.python.org/

@@ -1,12 +1,9 @@
 #!/bin/sh
-# postinst - Phase 1: Basic Installation (versioned directory structure)
+# postinst - Install SyrvisCore Manager
 # POSIX shell compatible
 #
-# This script:
-# - Installs Python venv to versions/{version}/
-# - Creates 'current' symlink
-# - Creates directory structure
-# - NO configuration (handled by 'syrvis setup')
+# This script installs the MANAGER package only.
+# The service package is installed separately via 'syrvisctl install'.
 
 set -e
 
@@ -39,183 +36,92 @@ log_error() {
 PACKAGE_NAME="syrviscore"
 SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
 
-# Get version from INFO file
-PKG_VERSION=$(grep '^version=' "${SYNOPKG_PKGDEST}/../INFO" 2>/dev/null | cut -d'"' -f2)
-if [ -z "$PKG_VERSION" ]; then
-    PKG_VERSION="0.0.1"
-fi
-
-# Detect install volume
-detect_install_volume() {
-    for vol in /volume1 /volume2 /volume3 /volume4; do
-        if [ -d "$vol" ]; then
-            echo "$vol"
-            return 0
-        fi
-    done
-    echo "/volume1"
-}
-
-INSTALL_VOLUME=$(detect_install_volume)
-INSTALL_DIR="${INSTALL_VOLUME}/docker/syrviscore"
-VERSION_DIR="${INSTALL_DIR}/versions/${PKG_VERSION}"
-
 log_info "==================================================================="
-log_info "Starting SyrvisCore installation"
+log_info "Installing SyrvisCore Manager"
 log_info "==================================================================="
-log_info "Version: ${PKG_VERSION}"
-log_info "Install directory: ${INSTALL_DIR}"
-log_info "Version directory: ${VERSION_DIR}"
+log_info "Target directory: ${SYNOPKG_PKGDEST}"
 log_info ""
 
-# === Create directory structure ===
-log_info "[1/6] Creating directory structure..."
+# === Create manager virtual environment ===
+log_info "[1/3] Creating manager virtual environment..."
 
-# Root directories (shared across versions)
-mkdir -p "${INSTALL_DIR}/versions"
-mkdir -p "${INSTALL_DIR}/config"
-mkdir -p "${INSTALL_DIR}/config/traefik"
-mkdir -p "${INSTALL_DIR}/data/traefik/config"
-mkdir -p "${INSTALL_DIR}/data/traefik/logs"
-mkdir -p "${INSTALL_DIR}/data/portainer"
-mkdir -p "${INSTALL_DIR}/data/cloudflared"
+MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
 
-# Version-specific directories
-mkdir -p "${VERSION_DIR}/cli"
-mkdir -p "${VERSION_DIR}/build"
+# Create venv
+python3 -m venv "$MANAGER_VENV"
+log_info "  Created venv at: ${MANAGER_VENV}"
 
-log_info "  Created directory structure"
+# Upgrade pip
+"${MANAGER_VENV}/bin/pip" install --upgrade pip > /dev/null 2>&1
+log_info "  Upgraded pip"
 
-# === Install Python CLI ===
-log_info "[2/6] Installing Python CLI to version ${PKG_VERSION}..."
+# === Install manager wheel ===
+log_info "[2/3] Installing manager package..."
 
-# Search for wheel file
-WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore-*.whl 2>/dev/null | head -1)
+# Find manager wheel
+WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 
 if [ -z "$WHEEL_FILE" ]; then
-    # Try package subdirectory as fallback
-    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore-*.whl 2>/dev/null | head -1)
+    # Try package subdirectory
+    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 fi
 
 if [ -z "$WHEEL_FILE" ]; then
-    log_error "  Wheel file not found"
-    log_error "  Debug: Contents of ${SYNOPKG_PKGDEST}:"
+    log_error "Manager wheel file not found"
+    log_error "Contents of ${SYNOPKG_PKGDEST}:"
     ls -la "${SYNOPKG_PKGDEST}" >> "$LOG_FILE" 2>&1
     exit 1
 fi
 
 log_info "  Found wheel: $(basename "$WHEEL_FILE")"
 
-# Create venv in version directory
-cd "${VERSION_DIR}/cli"
-python3 -m venv venv
-. venv/bin/activate
-pip install --upgrade pip > /dev/null 2>&1
+# Install wheel
+"${MANAGER_VENV}/bin/pip" install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
+log_info "  Manager package installed"
 
-log_info "  Installing Python CLI..."
-pip install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
-log_info "  Python CLI installed successfully"
-
-# Copy wheel for future reference
-cp "$WHEEL_FILE" "${VERSION_DIR}/cli/"
-
-deactivate
-
-# === Copy build config ===
-log_info "[3/6] Copying build configuration..."
-
-BUILD_CONFIG="${SYNOPKG_PKGDEST}/build/config.yaml"
-if [ -f "$BUILD_CONFIG" ]; then
-    cp "$BUILD_CONFIG" "${VERSION_DIR}/build/config.yaml"
-    log_info "  Copied build/config.yaml"
-else
-    log_info "  No build config found (will use defaults)"
+# Verify installation
+if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
+    log_error "syrvisctl command not found after install"
+    exit 1
 fi
 
-# === Create current symlink ===
-log_info "[4/6] Activating version ${PKG_VERSION}..."
+log_info "  Verified: syrvisctl command available"
 
-CURRENT_LINK="${INSTALL_DIR}/current"
-if [ -L "$CURRENT_LINK" ] || [ -e "$CURRENT_LINK" ]; then
-    rm -f "$CURRENT_LINK"
-fi
-ln -s "versions/${PKG_VERSION}" "$CURRENT_LINK"
-log_info "  Created symlink: current -> versions/${PKG_VERSION}"
+# === Create global symlink ===
+log_info "[3/3] Creating global symlink..."
 
-# === Create CLI wrapper ===
-log_info "[5/6] Creating CLI wrapper..."
+SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
 
-mkdir -p "${INSTALL_DIR}/bin"
-cat > "${INSTALL_DIR}/bin/syrvis" << 'CLI_WRAPPER_EOF'
-#!/bin/sh
-# SyrvisCore CLI Wrapper
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_DIR="$(dirname "${SCRIPT_DIR}")"
-export SYRVIS_HOME="${INSTALL_DIR}"
-exec "${INSTALL_DIR}/current/cli/venv/bin/syrvis" "$@"
-CLI_WRAPPER_EOF
+# Create /usr/local/bin if it doesn't exist
+mkdir -p /usr/local/bin
 
-chmod +x "${INSTALL_DIR}/bin/syrvis"
-log_info "  Created CLI wrapper"
-
-# === Create/update manifest ===
-log_info "[6/6] Creating installation manifest..."
-
-MANIFEST_FILE="${INSTALL_DIR}/.syrviscore-manifest.json"
-INSTALL_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-# Check if manifest exists (upgrade case)
-if [ -f "$MANIFEST_FILE" ]; then
-    log_info "  Existing manifest found (upgrade scenario)"
-    # For upgrades, we'll let the CLI handle manifest updates
-else
-    # Fresh install - create new manifest
-    cat > "$MANIFEST_FILE" << MANIFEST_EOF
-{
-  "schema_version": 2,
-  "active_version": "${PKG_VERSION}",
-  "install_path": "${INSTALL_DIR}",
-  "setup_complete": false,
-  "created_at": "${INSTALL_DATE}",
-  "versions": {
-    "${PKG_VERSION}": {
-      "installed_at": "${INSTALL_DATE}",
-      "status": "active"
-    }
-  },
-  "update_history": [],
-  "privileged_setup": {}
-}
-MANIFEST_EOF
-    chmod 644 "$MANIFEST_FILE"
-    log_info "  Created installation manifest"
+# Remove old symlink if exists
+if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
+    rm -f "$SYRVISCTL_LINK"
 fi
 
-# === Create acme.json if not exists ===
-ACME_FILE="${INSTALL_DIR}/data/traefik/acme.json"
-if [ ! -f "$ACME_FILE" ]; then
-    touch "$ACME_FILE"
-    chmod 600 "$ACME_FILE"
-    log_info "  Created acme.json with secure permissions"
-fi
+# Create new symlink
+ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK"
+log_info "  Created symlink: ${SYRVISCTL_LINK}"
 
 log_info ""
 log_info "==================================================================="
-log_info "SyrvisCore ${PKG_VERSION} Installation Complete"
+log_info "SyrvisCore Manager Installation Complete"
 log_info "==================================================================="
 log_info ""
-log_info "NEXT STEP: Run the setup command to complete configuration"
+log_info "NEXT STEPS:"
 log_info ""
-log_info "  syrvis setup"
+log_info "  1. Install the service package:"
+log_info "     syrvisctl install"
 log_info ""
-log_info "Or with the full path:"
-log_info "  ${INSTALL_DIR}/bin/syrvis setup"
+log_info "  2. Run setup to configure:"
+log_info "     syrvis setup"
 log_info ""
-log_info "The setup command will:"
-log_info "  - Prompt for configuration (domain, network, etc.)"
-log_info "  - Set up Docker permissions"
-log_info "  - Generate configuration files"
-log_info "  - Start services"
+log_info "  3. Start services:"
+log_info "     syrvis start"
+log_info ""
+log_info "For help:"
+log_info "  syrvisctl --help"
 log_info ""
 log_info "Documentation: https://github.com/kevinteg/SyrvisCore"
 log_info "==================================================================="

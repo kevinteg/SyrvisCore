@@ -1,26 +1,27 @@
 #!/bin/sh
-# start-stop-status - Minimal status check
+# start-stop-status - DSM service control for SyrvisCore
 # POSIX shell compatible
-# Services are managed by user via CLI, not DSM
+#
+# The SyrvisCore Manager is a CLI tool, not a running service.
+# Service management (start/stop) is handled by 'syrvis' command.
 
-# === Logging Functions ===
 SCRIPT_NAME="start-stop-status"
 LOG_FILE="/tmp/syrviscore-install.log"
+PACKAGE_NAME="syrviscore"
+SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
 
 log_msg() {
     LEVEL="$1"
     MSG="$2"
     TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
     LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
-    
-    # Write to stdout/stderr
+
     if [ "$LEVEL" = "ERROR" ]; then
         echo "$LOG_LINE" >&2
     else
         echo "$LOG_LINE"
     fi
-    
-    # Append to log file
+
     echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
 }
 
@@ -28,83 +29,62 @@ log_info() {
     log_msg "INFO" "$1"
 }
 
-log_warn() {
-    log_msg "WARN" "$1"
+# Detect service installation directory
+find_syrvis_home() {
+    for VOLUME in /volume1 /volume2 /volume3 /volume4; do
+        if [ -f "${VOLUME}/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+            echo "${VOLUME}/docker/${PACKAGE_NAME}"
+            return 0
+        fi
+    done
+    return 1
 }
 
-log_error() {
-    log_msg "ERROR" "$1"
-}
-
-# === Detect Installation Directory ===
-INSTALL_DIR=""
-for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
-    if [ -f "${VOLUME}/docker/syrviscore/.syrviscore-manifest.json" ]; then
-        INSTALL_DIR="${VOLUME}/docker/syrviscore"
-        break
-    fi
-done
-
-# === Handle DSM Service Commands ===
 case "$1" in
     start)
-        log_info "==================================================================="
-        log_info "START command received (services managed by user via CLI)"
-        log_info "==================================================================="
-        log_info "Command: start"
-        log_info "Installation directory: ${INSTALL_DIR:-not found}"
-        log_info "Note: SyrvisCore services are managed by user, not DSM"
-        log_info "  To start services: ${INSTALL_DIR}/bin/syrvis start"
-        log_info "Detailed logs: $LOG_FILE"
+        log_info "SyrvisCore Manager is ready."
+        log_info "Use 'syrvisctl' for version management."
+        log_info "Use 'syrvis start' to start Docker services."
         exit 0
         ;;
+
     stop)
-        log_info "==================================================================="
-        log_info "STOP command received (services managed by user via CLI)"
-        log_info "==================================================================="
-        log_info "Command: stop"
-        log_info "Installation directory: ${INSTALL_DIR:-not found}"
-        log_info "Note: SyrvisCore services are managed by user, not DSM"
-        log_info "  To stop services: ${INSTALL_DIR}/bin/syrvis stop"
-        log_info "Detailed logs: $LOG_FILE"
+        log_info "SyrvisCore Manager stopped."
+        log_info "Note: Docker services may still be running."
+        log_info "Use 'syrvis stop' to stop Docker services."
         exit 0
         ;;
+
     status)
-        log_info "==================================================================="
-        log_info "STATUS command received"
-        log_info "==================================================================="
-        log_info "Command: status"
-        log_info "Installation directory: ${INSTALL_DIR:-not found}"
-        
-        # Check if setup is complete
-        if [ -n "$INSTALL_DIR" ] && [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
-            log_info "Manifest found at: ${INSTALL_DIR}/.syrviscore-manifest.json"
-            
-            if grep -q '"setup_complete": true' "${INSTALL_DIR}/.syrviscore-manifest.json" 2>/dev/null; then
-                log_info "Status: Setup complete (running)"
-                log_info "Detailed logs: $LOG_FILE"
-                exit 0  # Running (setup complete)
+        # Check if manager is installed properly
+        if [ ! -f "${SYNOPKG_PKGDEST}/venv/bin/syrvisctl" ]; then
+            log_info "Status: Manager not installed"
+            exit 1
+        fi
+
+        # Check if any service version is installed
+        SYRVIS_HOME=$(find_syrvis_home)
+
+        if [ -n "$SYRVIS_HOME" ] && [ -L "${SYRVIS_HOME}/current" ]; then
+            # Service is installed, check if setup is complete
+            if grep -q '"setup_complete": true' "${SYRVIS_HOME}/.syrviscore-manifest.json" 2>/dev/null; then
+                log_info "Status: Running (setup complete)"
+                exit 0
             else
-                log_info "Status: Setup incomplete (not running)"
-                log_info "  Run: sudo python3 ${INSTALL_DIR}/bin/setup-privileges.py"
-                log_info "Detailed logs: $LOG_FILE"
-                exit 1  # Not running (setup incomplete)
+                log_info "Status: Installed (setup pending)"
+                log_info "Run 'syrvis setup' to complete configuration"
+                exit 0
             fi
         else
-            log_warn "Status: Installation not found (not running)"
-            log_warn "Manifest file not found"
-            log_info "Detailed logs: $LOG_FILE"
-            exit 1  # Not running (not found)
+            # Manager installed but no service version
+            log_info "Status: Manager ready, no service installed"
+            log_info "Run 'syrvisctl install' to install service"
+            exit 0
         fi
         ;;
+
     *)
-        log_error "==================================================================="
-        log_error "Unknown command: $1"
-        log_error "==================================================================="
-        log_error "Valid commands: start, stop, status"
-        log_info "Detailed logs: $LOG_FILE"
+        log_info "Usage: $0 {start|stop|status}"
         exit 1
         ;;
 esac
-
-exit 0

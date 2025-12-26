@@ -1,12 +1,9 @@
 #!/bin/sh
-# postupgrade - Upgrade to new version (versioned directory structure)
+# postupgrade - Upgrade SyrvisCore Manager
 # POSIX shell compatible
 #
-# This script:
-# - Installs new version to versions/{new_version}/
-# - Preserves old version for rollback
-# - Updates 'current' symlink
-# - Preserves config/ and data/ directories
+# This script upgrades the MANAGER package only.
+# Service versions are managed separately via 'syrvisctl'.
 
 set -e
 
@@ -39,186 +36,85 @@ log_error() {
 PACKAGE_NAME="syrviscore"
 SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
 
-# Get new version from INFO file
-PKG_VERSION=$(grep '^version=' "${SYNOPKG_PKGDEST}/../INFO" 2>/dev/null | cut -d'"' -f2)
-if [ -z "$PKG_VERSION" ]; then
-    PKG_VERSION="0.0.1"
-fi
-
-# Detect existing installation
-INSTALL_DIR=""
-for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
-    if [ -f "${VOLUME}/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
-        INSTALL_DIR="${VOLUME}/docker/${PACKAGE_NAME}"
-        break
-    fi
-done
-
-if [ -z "$INSTALL_DIR" ]; then
-    log_error "Could not find existing installation"
-    exit 1
-fi
-
-VERSION_DIR="${INSTALL_DIR}/versions/${PKG_VERSION}"
-
-# Get old version from manifest
-OLD_VERSION=""
-if [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
-    OLD_VERSION=$(grep '"active_version"' "${INSTALL_DIR}/.syrviscore-manifest.json" | cut -d'"' -f4)
-fi
-
 log_info "==================================================================="
-log_info "Starting SyrvisCore upgrade"
+log_info "Upgrading SyrvisCore Manager"
 log_info "==================================================================="
-log_info "From version: ${OLD_VERSION:-unknown}"
-log_info "To version:   ${PKG_VERSION}"
-log_info "Install directory: ${INSTALL_DIR}"
+log_info "Target directory: ${SYNOPKG_PKGDEST}"
 log_info ""
 
-# === Create new version directory ===
-log_info "[1/5] Creating new version directory..."
+# === Upgrade manager virtual environment ===
+log_info "[1/3] Upgrading manager virtual environment..."
 
-mkdir -p "${VERSION_DIR}/cli"
-mkdir -p "${VERSION_DIR}/build"
-log_info "  Created: ${VERSION_DIR}"
+MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
 
-# === Install Python CLI ===
-log_info "[2/5] Installing Python CLI..."
+# Remove old venv
+if [ -d "$MANAGER_VENV" ]; then
+    rm -rf "$MANAGER_VENV"
+    log_info "  Removed old venv"
+fi
 
-# Search for wheel file
-WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore-*.whl 2>/dev/null | head -1)
+# Create new venv
+python3 -m venv "$MANAGER_VENV"
+log_info "  Created new venv"
+
+# Upgrade pip
+"${MANAGER_VENV}/bin/pip" install --upgrade pip > /dev/null 2>&1
+log_info "  Upgraded pip"
+
+# === Install manager wheel ===
+log_info "[2/3] Installing manager package..."
+
+# Find manager wheel
+WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 
 if [ -z "$WHEEL_FILE" ]; then
-    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore-*.whl 2>/dev/null | head -1)
+    # Try package subdirectory
+    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 fi
 
 if [ -z "$WHEEL_FILE" ]; then
-    log_error "  Wheel file not found"
+    log_error "Manager wheel file not found"
     exit 1
 fi
 
 log_info "  Found wheel: $(basename "$WHEEL_FILE")"
 
-# Create venv in new version directory
-cd "${VERSION_DIR}/cli"
-python3 -m venv venv
-. venv/bin/activate
-pip install --upgrade pip > /dev/null 2>&1
-pip install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
-log_info "  Python CLI installed"
+# Install wheel
+"${MANAGER_VENV}/bin/pip" install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
+log_info "  Manager package installed"
 
-# Copy wheel for reference
-cp "$WHEEL_FILE" "${VERSION_DIR}/cli/"
-
-deactivate
-
-# === Copy build config ===
-log_info "[3/5] Copying build configuration..."
-
-BUILD_CONFIG="${SYNOPKG_PKGDEST}/build/config.yaml"
-if [ -f "$BUILD_CONFIG" ]; then
-    cp "$BUILD_CONFIG" "${VERSION_DIR}/build/config.yaml"
-    log_info "  Copied build/config.yaml"
-else
-    BUILD_CONFIG="${SYNOPKG_PKGDEST}/package/build/config.yaml"
-    if [ -f "$BUILD_CONFIG" ]; then
-        cp "$BUILD_CONFIG" "${VERSION_DIR}/build/config.yaml"
-        log_info "  Copied build/config.yaml"
-    else
-        log_info "  No build config found (will use defaults)"
-    fi
+# Verify installation
+if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
+    log_error "syrvisctl command not found after install"
+    exit 1
 fi
 
-# === Update current symlink ===
-log_info "[4/5] Activating new version..."
+log_info "  Verified: syrvisctl command available"
 
-CURRENT_LINK="${INSTALL_DIR}/current"
-if [ -L "$CURRENT_LINK" ] || [ -e "$CURRENT_LINK" ]; then
-    rm -f "$CURRENT_LINK"
-fi
-ln -s "versions/${PKG_VERSION}" "$CURRENT_LINK"
-log_info "  Updated symlink: current -> versions/${PKG_VERSION}"
+# === Update global symlink ===
+log_info "[3/3] Updating global symlink..."
 
-# === Update CLI wrapper ===
-cat > "${INSTALL_DIR}/bin/syrvis" << 'CLI_WRAPPER_EOF'
-#!/bin/sh
-# SyrvisCore CLI Wrapper
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_DIR="$(dirname "${SCRIPT_DIR}")"
-export SYRVIS_HOME="${INSTALL_DIR}"
-exec "${INSTALL_DIR}/current/cli/venv/bin/syrvis" "$@"
-CLI_WRAPPER_EOF
-chmod +x "${INSTALL_DIR}/bin/syrvis"
-log_info "  Updated CLI wrapper"
+SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
 
-# === Update manifest ===
-log_info "[5/5] Updating manifest..."
+mkdir -p /usr/local/bin
 
-MANIFEST_FILE="${INSTALL_DIR}/.syrviscore-manifest.json"
-UPGRADE_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-# Read existing manifest values we want to preserve
-SETUP_COMPLETE="false"
-if grep -q '"setup_complete": true' "$MANIFEST_FILE" 2>/dev/null; then
-    SETUP_COMPLETE="true"
+if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
+    rm -f "$SYRVISCTL_LINK"
 fi
 
-CREATED_AT=$(grep '"created_at"' "$MANIFEST_FILE" 2>/dev/null | cut -d'"' -f4)
-if [ -z "$CREATED_AT" ]; then
-    CREATED_AT="$UPGRADE_DATE"
-fi
-
-# Create updated manifest
-# Note: This is a simplified update - the CLI handles more complex merging
-cat > "$MANIFEST_FILE" << MANIFEST_EOF
-{
-  "schema_version": 2,
-  "active_version": "${PKG_VERSION}",
-  "install_path": "${INSTALL_DIR}",
-  "setup_complete": ${SETUP_COMPLETE},
-  "created_at": "${CREATED_AT}",
-  "versions": {
-    "${OLD_VERSION}": {
-      "installed_at": "${CREATED_AT}",
-      "status": "available"
-    },
-    "${PKG_VERSION}": {
-      "installed_at": "${UPGRADE_DATE}",
-      "activated_at": "${UPGRADE_DATE}",
-      "status": "active"
-    }
-  },
-  "update_history": [
-    {
-      "from": "${OLD_VERSION}",
-      "to": "${PKG_VERSION}",
-      "timestamp": "${UPGRADE_DATE}",
-      "type": "upgrade"
-    }
-  ],
-  "privileged_setup": {}
-}
-MANIFEST_EOF
-chmod 644 "$MANIFEST_FILE"
-log_info "  Updated manifest"
+ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK"
+log_info "  Updated symlink: ${SYRVISCTL_LINK}"
 
 log_info ""
 log_info "==================================================================="
-log_info "SyrvisCore Upgrade Complete"
+log_info "SyrvisCore Manager Upgrade Complete"
 log_info "==================================================================="
 log_info ""
-log_info "Upgraded: ${OLD_VERSION:-unknown} -> ${PKG_VERSION}"
+log_info "The manager has been upgraded."
 log_info ""
-log_info "Previous version preserved at:"
-log_info "  ${INSTALL_DIR}/versions/${OLD_VERSION}"
-log_info ""
-log_info "To rollback if needed:"
-log_info "  syrvis update rollback"
-log_info ""
-log_info "Your configuration in config/ has been preserved."
-log_info ""
-log_info "Restart services to use new version:"
-log_info "  syrvis restart"
+log_info "Service versions are not affected by this upgrade."
+log_info "To update the service package, run:"
+log_info "  syrvisctl install"
 log_info ""
 log_info "==================================================================="
 log_info "Detailed logs: $LOG_FILE"
