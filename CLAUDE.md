@@ -16,7 +16,7 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 | Target Platform | Synology DSM 7.0+ |
 | Installation Path | `/volume1/docker/syrviscore/` |
 | Service Account | `syrvis-bot` |
-| Python Version | 3.8+ (3.11 recommended) |
+| Python Version | 3.8.12 (matches Synology DSM) |
 
 ## Getting Started
 
@@ -28,11 +28,11 @@ SyrvisCore is a self-hosted infrastructure platform for Synology NAS that packag
 ### Environment Setup
 
 ```bash
-# Install Python 3.11 via pyenv (if not already installed)
-pyenv install 3.11
+# Install Python 3.8.12 via pyenv (matches Synology NAS)
+pyenv install 3.8.12
 
 # Create a virtual environment for this project
-pyenv virtualenv 3.11 syrviscore
+pyenv virtualenv 3.8.12 syrviscore
 
 # Activate the virtual environment
 pyenv activate syrviscore
