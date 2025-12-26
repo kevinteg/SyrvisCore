@@ -22,12 +22,10 @@ from . import paths
 from .__version__ import __version__
 
 
-def needs_privilege_elevation() -> bool:
-    """Check if we need to elevate to root."""
-    # In simulation mode, skip elevation
-    if paths.is_simulation_mode():
-        return False
-    return os.getuid() != 0
+# Get the system operations provider once at module load
+def _get_ops() -> privileged_ops.SystemOperations:
+    """Get the system operations provider."""
+    return privileged_ops.get_system_operations()
 
 
 def self_elevate() -> None:
@@ -386,11 +384,15 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     - Service startup
     """
 
+    # Get the system operations provider
+    ops = _get_ops()
+
     click.echo()
     click.echo("=" * 60)
     click.echo("SyrvisCore Setup")
     click.echo("=" * 60)
     click.echo(f"Version: {__version__}")
+    click.echo(f"Mode: {ops.mode_name}")
 
     # Step 1: Check prerequisites
     click.echo()
@@ -401,11 +403,11 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo(f"      Python {py_version}")
 
     # Check if we need to elevate
-    needs_elevation = needs_privilege_elevation()
+    needs_elevation = ops.needs_privilege_elevation()
     if needs_elevation:
         click.echo("      Privileges: user (elevation needed)")
     else:
-        click.echo("      Privileges: root")
+        click.echo("      Privileges: root" if not ops.is_simulation else "      Privileges: user (simulation)")
 
     # Step 2: Handle privilege elevation
     click.echo()
@@ -426,9 +428,9 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             click.echo("      Setup cancelled.")
             sys.exit(0)
 
-    # Running as root - get target user
+    # Get target user
     try:
-        username = privileged_ops.get_target_user()
+        username = ops.get_target_user()
         click.echo(f"      Target user: {username}")
     except privileged_ops.PrivilegedOpsError as e:
         click.echo(f"      Error: {e}", err=True)
