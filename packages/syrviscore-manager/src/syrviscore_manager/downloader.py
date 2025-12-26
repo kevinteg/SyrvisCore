@@ -17,15 +17,34 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 
 
 def get_latest_release() -> Optional[Dict[str, Any]]:
-    """Fetch latest release info from GitHub."""
+    """Fetch latest SERVICE release info from GitHub.
+
+    Filters out manager releases (manager-v*) to only return service releases (v*).
+    """
     try:
+        # List recent releases and find the latest service release
         response = requests.get(
-            f"{GITHUB_API_URL}/latest",
+            GITHUB_API_URL,
+            params={"per_page": 20},
             headers={"Accept": "application/vnd.github.v3+json"},
             timeout=10
         )
-        if response.status_code == 200:
-            return response.json()
+        if response.status_code != 200:
+            return None
+
+        releases = response.json()
+        for release in releases:
+            tag = release.get("tag_name", "")
+            # Skip manager releases (manager-v*) and prereleases
+            if tag.startswith("manager-"):
+                continue
+            if release.get("prerelease", False):
+                continue
+            if release.get("draft", False):
+                continue
+            # This is a service release
+            return release
+
         return None
     except Exception:
         return None

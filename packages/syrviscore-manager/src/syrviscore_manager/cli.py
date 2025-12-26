@@ -15,6 +15,7 @@ Commands:
 """
 
 import sys
+from pathlib import Path
 
 import click
 
@@ -35,13 +36,45 @@ def cli():
 @cli.command()
 @click.argument('version', required=False)
 @click.option('--force', is_flag=True, help='Force reinstall even if version exists')
-def install(version, force):
+@click.option('--path', type=click.Path(), help='Installation path (default: auto-detect)')
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompts')
+def install(version, force, path, yes):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
     """
+    import os
+
     click.echo()
     click.echo("Installing SyrvisCore service...")
+    click.echo()
+
+    # Determine installation path
+    try:
+        existing_home = paths.get_syrvis_home()
+        install_path = existing_home
+        click.echo(f"  Existing installation: {install_path}")
+    except paths.SyrvisHomeError:
+        # New installation - prompt for path
+        default_path = paths.get_default_install_path()
+
+        if path:
+            install_path = Path(path)
+        elif yes:
+            install_path = default_path
+        else:
+            click.echo(f"  Default installation path: {default_path}")
+            user_path = click.prompt(
+                "  Install path",
+                default=str(default_path),
+                show_default=False
+            )
+            install_path = Path(user_path)
+
+        # Set SYRVIS_HOME for this session
+        os.environ["SYRVIS_HOME"] = str(install_path)
+        click.echo(f"  Installation path: {install_path}")
+
     click.echo()
 
     if version_manager.download_and_install(version, force):
