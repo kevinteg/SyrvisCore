@@ -100,12 +100,13 @@ log_info "Updating version in INFO file"
 sed -i.bak "s/^version=.*/version=\"${VERSION}\"/" spk/INFO
 rm -f spk/INFO.bak
 
-# Find the MANAGER wheel file (not service wheel)
-log_info "Looking for manager wheel file"
+# Find the MANAGER wheel file and dependencies
+log_info "Looking for manager wheel file and dependencies"
 WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore_manager-*.whl 2>/dev/null | head -1)
+DEPS_DIR="$PROJECT_ROOT/dist/manager-deps"
 
-if [ -z "$WHEEL_FILE" ]; then
-    log_warn "Manager wheel not found, building..."
+if [ -z "$WHEEL_FILE" ] || [ ! -d "$DEPS_DIR" ]; then
+    log_warn "Manager wheel or dependencies not found, building..."
     "$SCRIPT_DIR/build-manager.sh"
     WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 fi
@@ -116,28 +117,42 @@ if [ -z "$WHEEL_FILE" ]; then
     exit 1
 fi
 
+if [ ! -d "$DEPS_DIR" ]; then
+    log_error "Dependencies directory not found: $DEPS_DIR"
+    log_error "Run ./build-tools/build-manager.sh first"
+    exit 1
+fi
+
 WHEEL_NAME=$(basename "$WHEEL_FILE")
+WHEEL_COUNT=$(ls -1 "$DEPS_DIR"/*.whl 2>/dev/null | wc -l | tr -d ' ')
 log_success "Found manager wheel: $WHEEL_NAME"
+log_success "Found $WHEEL_COUNT dependency wheel(s)"
 
-# Copy wheel and templates to build directory
+# Copy wheel and dependencies to build directory
 log_info "Preparing package contents"
-mkdir -p "$BUILD_DIR/package"
+mkdir -p "$BUILD_DIR/package/wheels"
 
-# Copy the wheel file
-log_info "Copying Python wheel"
-cp "$WHEEL_FILE" "$BUILD_DIR/package/"
+# Copy ALL wheels (manager + dependencies) from deps directory
+log_info "Copying Python wheels (manager + dependencies)"
+cp "$DEPS_DIR"/*.whl "$BUILD_DIR/package/wheels/"
 
 # Note: .env.template and build/config.yaml are bundled with the SERVICE package,
 # not the manager. The manager SPK is minimal - just the version management CLI.
 
 # Verify package contents
 log_info "Verifying package contents"
-if [ ! -f "$BUILD_DIR/package/$WHEEL_NAME" ]; then
-    log_error "Manager wheel file not found in package"
+BUNDLED_WHEELS=$(ls -1 "$BUILD_DIR/package/wheels"/*.whl | wc -l | tr -d ' ')
+if [ "$BUNDLED_WHEELS" -eq 0 ]; then
+    log_error "No wheel files found in package"
     exit 1
 fi
 
-log_success "Package contents verified (manager wheel only)"
+log_info "Bundled wheels:"
+ls -1 "$BUILD_DIR/package/wheels"/*.whl | while read f; do
+    echo "  - $(basename "$f")"
+done
+
+log_success "Package contents verified ($BUNDLED_WHEELS wheels bundled for offline install)"
 
 # Create package.tgz
 log_info "Creating package.tgz"

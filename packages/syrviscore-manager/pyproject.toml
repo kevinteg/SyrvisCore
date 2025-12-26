@@ -23,8 +23,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "click>=8.0.0",
-    "requests>=2.31.0",
+    "click==8.1.7",
+    "requests==2.31.0",
 ]
 
 [project.optional-dependencies]

@@ -23,11 +23,11 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
 ]
 dependencies = [
-    "click>=8.0.0",
-    "pyyaml>=6.0.0",
-    "requests>=2.31.0",
-    "docker>=7.0.0",
-    "python-dotenv>=1.0.0",
+    "click==8.1.7",
+    "pyyaml==6.0.2",
+    "requests==2.31.0",
+    "docker==7.1.0",
+    "python-dotenv==1.0.1",
 ]
 
 [project.optional-dependencies]

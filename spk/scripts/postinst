@@ -4,6 +4,8 @@
 #
 # This script installs the MANAGER package only.
 # The service package is installed separately via 'syrvisctl install'.
+#
+# All dependencies are bundled in the SPK - NO NETWORK ACCESS REQUIRED.
 
 set -e
 
@@ -51,33 +53,43 @@ MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
 python3 -m venv "$MANAGER_VENV"
 log_info "  Created venv at: ${MANAGER_VENV}"
 
-# Upgrade pip
-"${MANAGER_VENV}/bin/pip" install --upgrade pip > /dev/null 2>&1
-log_info "  Upgraded pip"
+# === Install manager package from bundled wheels ===
+log_info "[2/3] Installing manager package (offline from bundled wheels)..."
 
-# === Install manager wheel ===
-log_info "[2/3] Installing manager package..."
+# Find wheels directory
+WHEELS_DIR="${SYNOPKG_PKGDEST}/wheels"
 
-# Find manager wheel
-WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
-
-if [ -z "$WHEEL_FILE" ]; then
-    # Try package subdirectory
-    WHEEL_FILE=$(ls "${SYNOPKG_PKGDEST}/package"/syrviscore_manager-*.whl 2>/dev/null | head -1)
-fi
-
-if [ -z "$WHEEL_FILE" ]; then
-    log_error "Manager wheel file not found"
+if [ ! -d "$WHEELS_DIR" ]; then
+    log_error "Wheels directory not found: $WHEELS_DIR"
     log_error "Contents of ${SYNOPKG_PKGDEST}:"
     ls -la "${SYNOPKG_PKGDEST}" >> "$LOG_FILE" 2>&1
     exit 1
 fi
 
-log_info "  Found wheel: $(basename "$WHEEL_FILE")"
+WHEEL_COUNT=$(ls -1 "${WHEELS_DIR}"/*.whl 2>/dev/null | wc -l | tr -d ' ')
+log_info "  Found $WHEEL_COUNT bundled wheel(s)"
 
-# Install wheel
-"${MANAGER_VENV}/bin/pip" install --no-cache-dir "$WHEEL_FILE" > /dev/null 2>&1
-log_info "  Manager package installed"
+# Find the manager wheel specifically
+MANAGER_WHEEL=$(ls "${WHEELS_DIR}"/syrviscore_manager-*.whl 2>/dev/null | head -1)
+
+if [ -z "$MANAGER_WHEEL" ]; then
+    log_error "Manager wheel not found in wheels directory"
+    exit 1
+fi
+
+log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
+
+# Install ALL wheels from bundled directory (offline, no network)
+# --no-index: Don't use PyPI
+# --find-links: Use local wheels directory
+# This installs the manager and all its dependencies from bundled wheels
+"${MANAGER_VENV}/bin/pip" install \
+    --no-cache-dir \
+    --no-index \
+    --find-links "$WHEELS_DIR" \
+    "$MANAGER_WHEEL" > /dev/null 2>&1
+
+log_info "  Manager package and dependencies installed (offline)"
 
 # Verify installation
 if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then

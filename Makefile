@@ -211,3 +211,31 @@ ci-build: ## CI build target (lint, test, build-spk)
 ci-test-only: ## CI test-only target (just run tests)
 	@echo "$(BLUE)[INFO]$(NC) Running CI tests..."
 	$(MAKE) test
+
+##@ DSM Simulation
+
+sim-setup: ## Initialize DSM 7.0 simulation environment
+	@echo "$(BLUE)[INFO]$(NC) Setting up DSM 7.0 simulation..."
+	chmod +x $(TESTS_DIR)/dsm-sim/setup-sim.sh
+	chmod +x $(TESTS_DIR)/dsm-sim/bin/* 2>/dev/null || true
+	./$(TESTS_DIR)/dsm-sim/setup-sim.sh
+	@echo ""
+	@echo "$(GREEN)[SUCCESS]$(NC) DSM simulation ready"
+	@echo "Run: source $(TESTS_DIR)/dsm-sim/activate.sh"
+
+sim-reset: ## Reset DSM simulation to clean state
+	@echo "$(BLUE)[INFO]$(NC) Resetting DSM simulation..."
+	chmod +x $(TESTS_DIR)/dsm-sim/reset-sim.sh
+	./$(TESTS_DIR)/dsm-sim/reset-sim.sh
+
+sim-clean: ## Remove DSM simulation entirely
+	@echo "$(BLUE)[INFO]$(NC) Removing DSM simulation..."
+	rm -rf $(TESTS_DIR)/dsm-sim/root
+	rm -rf $(TESTS_DIR)/dsm-sim/state
+	rm -rf $(TESTS_DIR)/dsm-sim/logs
+	@echo "$(GREEN)[SUCCESS]$(NC) DSM simulation removed"
+
+test-sim: sim-setup ## Run full simulation workflow test
+	@echo "$(BLUE)[INFO]$(NC) Running simulation workflow test..."
+	chmod +x $(TESTS_DIR)/test_sim_workflow.sh
+	./$(TESTS_DIR)/test_sim_workflow.sh
