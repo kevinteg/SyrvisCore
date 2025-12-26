@@ -1,25 +1,109 @@
 #!/bin/sh
 # start-stop-status - Minimal status check
+# POSIX shell compatible
+# Services are managed by user via CLI, not DSM
 
-INSTALL_DIR="/volume1/docker/syrviscore"
+# === Logging Functions ===
+SCRIPT_NAME="start-stop-status"
+LOG_FILE="/tmp/syrviscore-install.log"
 
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+    
+    # Write to stdout/stderr
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+    
+    # Append to log file
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_warn() {
+    log_msg "WARN" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+# === Detect Installation Directory ===
+INSTALL_DIR=""
+for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+    if [ -f "${VOLUME}/docker/syrviscore/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="${VOLUME}/docker/syrviscore"
+        break
+    fi
+done
+
+# === Handle DSM Service Commands ===
 case "$1" in
     start)
-        # Services managed by user via CLI
+        log_info "==================================================================="
+        log_info "START command received (services managed by user via CLI)"
+        log_info "==================================================================="
+        log_info "Command: start"
+        log_info "Installation directory: ${INSTALL_DIR:-not found}"
+        log_info "Note: SyrvisCore services are managed by user, not DSM"
+        log_info "  To start services: ${INSTALL_DIR}/bin/syrvis start"
+        log_info "Detailed logs: $LOG_FILE"
         exit 0
         ;;
     stop)
-        # Services managed by user via CLI
+        log_info "==================================================================="
+        log_info "STOP command received (services managed by user via CLI)"
+        log_info "==================================================================="
+        log_info "Command: stop"
+        log_info "Installation directory: ${INSTALL_DIR:-not found}"
+        log_info "Note: SyrvisCore services are managed by user, not DSM"
+        log_info "  To stop services: ${INSTALL_DIR}/bin/syrvis stop"
+        log_info "Detailed logs: $LOG_FILE"
         exit 0
         ;;
     status)
+        log_info "==================================================================="
+        log_info "STATUS command received"
+        log_info "==================================================================="
+        log_info "Command: status"
+        log_info "Installation directory: ${INSTALL_DIR:-not found}"
+        
         # Check if setup is complete
-        if [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
+        if [ -n "$INSTALL_DIR" ] && [ -f "${INSTALL_DIR}/.syrviscore-manifest.json" ]; then
+            log_info "Manifest found at: ${INSTALL_DIR}/.syrviscore-manifest.json"
+            
             if grep -q '"setup_complete": true' "${INSTALL_DIR}/.syrviscore-manifest.json" 2>/dev/null; then
+                log_info "Status: Setup complete (running)"
+                log_info "Detailed logs: $LOG_FILE"
                 exit 0  # Running (setup complete)
+            else
+                log_info "Status: Setup incomplete (not running)"
+                log_info "  Run: sudo python3 ${INSTALL_DIR}/bin/setup-privileges.py"
+                log_info "Detailed logs: $LOG_FILE"
+                exit 1  # Not running (setup incomplete)
             fi
+        else
+            log_warn "Status: Installation not found (not running)"
+            log_warn "Manifest file not found"
+            log_info "Detailed logs: $LOG_FILE"
+            exit 1  # Not running (not found)
         fi
-        exit 1  # Not running (setup incomplete)
+        ;;
+    *)
+        log_error "==================================================================="
+        log_error "Unknown command: $1"
+        log_error "==================================================================="
+        log_error "Valid commands: start, stop, status"
+        log_info "Detailed logs: $LOG_FILE"
+        exit 1
         ;;
 esac
 

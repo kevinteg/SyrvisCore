@@ -86,6 +86,120 @@ SyrvisCore/
 - User service account: `syrvis-bot`
 - Requires Docker package on Synology
 
+### SPK Script Logging Standards
+
+All SPK scripts must implement consistent, structured logging for troubleshooting.
+
+**Scripts that require logging:**
+- `spk/scripts/preinst`
+- `spk/scripts/postinst`
+- `spk/scripts/preuninst`
+- `spk/scripts/postuninst`
+- `spk/scripts/preupgrade`
+- `spk/scripts/postupgrade`
+- `spk/scripts/start-stop-status`
+
+**Logging Function Template** (POSIX-compatible, inline in each script):
+```bash
+SCRIPT_NAME="preinst"  # Or postinst, preuninst, etc.
+LOG_FILE="/tmp/syrviscore-install.log"
+
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+    
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+    
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+log_info() {
+    log_msg "INFO" "$1"
+}
+
+log_warn() {
+    log_msg "WARN" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+```
+
+**Every script must:**
+1. **Start with context:**
+   - Log script name and purpose
+   - Log working directory
+   - Log key environment variables (SYNOPKG_PKGDEST, INSTALL_DIR, wizard vars)
+
+2. **Use step numbering:**
+   - Format: `[X/Y] Step description...`
+   - Example: `log_info "[1/9] Creating directory structure..."`
+
+3. **Log all operations:**
+   - File/directory creation: `log_info "  Created: /path/to/file"`
+   - File operations: `log_info "  Copied: source → destination"`
+   - Command execution: Log before and after with results
+   - Permissions: `log_info "  Permissions: 600"`
+
+4. **Log success/failure:**
+   - Success: `log_info "  Operation completed successfully"`
+   - Warnings: `log_warn "  Non-fatal issue occurred"`
+   - Errors: `log_error "  Operation failed: reason"`
+
+5. **End with summary:**
+   - Log completion status
+   - Show log file location: `log_info "Detailed logs: $LOG_FILE"`
+
+**Log Levels:**
+- `log_info` - Normal operations, progress updates
+- `log_warn` - Non-fatal issues, warnings, skipped operations
+- `log_error` - Failures that cause or should cause exit
+
+**Log File Location:**
+- Installation/uninstallation: `/tmp/syrviscore-install.log`
+- Persists across install/uninstall for debugging
+- Cleared on system reboot (standard /tmp behavior)
+
+**Security:**
+- ❌ Never log passwords, API keys, tokens in full
+- ✅ Log presence of credentials: `log_info "  Cloudflare token: ${token:+<set>}"`
+- ✅ Mask sensitive data: Show first/last 4 chars only
+
+**Example Usage:**
+```bash
+log_info "==================================================================="
+log_info "Starting SyrvisCore installation"
+log_info "==================================================================="
+log_info "Installation parameters:"
+log_info "  INSTALL_DIR: $INSTALL_DIR"
+log_info "[1/3] Creating directory structure..."
+if mkdir -p "$INSTALL_DIR/data"; then
+    log_info "  Created: $INSTALL_DIR/data"
+else
+    log_error "  Failed to create directory"
+    log_info "Detailed logs: $LOG_FILE"
+    exit 1
+fi
+log_info "[2/3] Installing Python CLI..."
+# ... operations ...
+log_info "==================================================================="
+log_info "Installation completed successfully"
+log_info "Detailed logs: $LOG_FILE"
+```
+
+**Benefits:**
+- Easier debugging of installation failures
+- Chronological tracking of operations
+- Persistent logs for post-mortem analysis
+- Clear identification of which script failed and where
+
 ### Security
 - Secrets go in `/volume1/secrets/` on Synology
 - Use `.env` files for local secrets (never commit)

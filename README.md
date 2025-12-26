@@ -45,12 +45,12 @@ See [Installation Guide](docs/spk-installation-guide.md) for detailed instructio
 git clone git@github.com:kevinteg/SyrvisCore.git
 cd SyrvisCore
 
-# Create virtual environment
+# Create virtual environment (recommended)
 python3 -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install in development mode with all dependencies
-pip install -e ".[dev]"
+make dev-install
 
 # Verify installation
 syrvis --version
@@ -59,74 +59,117 @@ syrvis hello
 
 ## Development Workflow
 
+### Quick Start with Makefile
+
+The project includes a comprehensive Makefile for common development tasks:
+
+```bash
+# See all available commands
+make help
+
+# Development setup
+make dev-install      # Install package with dev dependencies
+
+# Code quality
+make lint             # Run ruff linter
+make format           # Format code with black
+make format-check     # Check formatting without changes
+
+# Testing
+make test             # Run all tests
+make test-cov         # Run tests with coverage report
+
+# Building
+make clean            # Remove build artifacts
+make build-wheel      # Build Python wheel
+make build-spk        # Build complete SPK package
+make validate         # Validate SPK structure
+
+# Complete workflow
+make all              # lint + test + build-spk
+```
+
 ### Running Tests
 
 ```bash
-# Run all tests
+# Using Makefile (recommended)
+make test             # Run all tests
+make test-cov         # Run with coverage
+
+# Using pytest directly
 pytest
-
-# Run with coverage
 pytest --cov=syrviscore
-
-# Run specific test file
 pytest tests/test_cli.py -v
 
-# Use tox for multi-version testing
+# Multi-version testing
 tox
 ```
 
 ### Code Quality
 
 ```bash
-# Format code with Black
-black src/ tests/ build-tools/
+# Using Makefile (recommended)
+make lint             # Lint with ruff
+make format           # Format with black
+make format-check     # Check formatting
+make check            # Run lint + test
 
-# Check formatting
-black --check src/ tests/ build-tools/
-
-# Lint with Ruff
-ruff check src/ tests/ build-tools/
-
-# Auto-fix linting issues
-ruff check --fix src/ tests/ build-tools/
-
-# Run all quality checks
-tox -e lint
+# Using tools directly
+black src/ tests/
+ruff check src/ tests/
 ```
 
-### Build Tools
+### Building Packages
 
-**Standard Python Package Build:**
+**Using Makefile (Recommended):**
 ```bash
-# Build Python wheel and source distribution
+# Build complete SPK package (includes wheel)
+make build-spk
+
+# Build just the Python wheel
+make build-wheel
+
+# Clean + Lint + Test + Build
+make all
+
+# Validate SPK package
+make validate
+```
+
+**Using build tools directly:**
+```bash
+# Build Python wheel
 ./build-tools/build-python-package.sh
 
-# Output:
-#   dist/syrviscore-{version}-py3-none-any.whl  (wheel)
-#   dist/syrviscore-{version}.tar.gz             (source dist)
-```
-
-**SPK Package Build:**
-```bash
-# Build SPK package for Synology (requires wheel to exist)
+# Build SPK package
 ./build-tools/build-spk.sh
 
-# Output: dist/syrviscore-{version}-noarch.spk
+# Validate SPK
+./build-tools/validate-spk.sh dist/syrviscore-{version}-noarch.spk
 ```
 
-**Complete Build Process:**
-```bash
-# 1. Build Python package with standard tools
-./build-tools/build-python-package.sh
-
-# 2. Package into SPK
-./build-tools/build-spk.sh
-```
+**Build output:**
+- `dist/syrviscore-{version}-py3-none-any.whl` - Python wheel
+- `dist/syrviscore-{version}.tar.gz` - Source distribution
+- `dist/syrviscore-{version}-noarch.spk` - Synology package
 
 The build process uses:
 - **Standard Python packaging** - `python -m build` creates wheel
 - **pip installation** - SPK installer uses `pip install wheel`
 - **No custom packaging** - Follows PEP 517/518 standards
+
+### Deployment to Synology
+
+```bash
+# Install SPK via SSH (requires SSH access)
+make install SSH_HOST=192.168.0.100
+
+# With custom SSH user
+make install SSH_HOST=192.168.0.100 SSH_USER=admin
+
+# Uninstall from Synology
+make uninstall SSH_HOST=192.168.0.100
+```
 
 See [build-tools/README.md](build-tools/README.md) for detailed documentation.
 
@@ -157,9 +200,9 @@ Contributions are welcome! This project follows modern Python packaging best pra
 
 1. **Fork the repository**
 2. **Create a feature branch** (`git checkout -b feature/amazing-feature`)
-3. **Set up development environment** (`pip install -e ".[dev]"`)
+3. **Set up development environment** (`make dev-install`)
 4. **Make your changes**
-5. **Run tests and linters** (`pytest && black --check . && ruff check .`)
+5. **Run tests and linters** (`make check`)
 6. **Commit your changes** (`git commit -m 'Add amazing feature'`)
 7. **Push to the branch** (`git push origin feature/amazing-feature`)
 8. **Open a Pull Request**

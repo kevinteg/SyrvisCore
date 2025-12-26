@@ -2,6 +2,26 @@
 
 This directory contains utilities for building SyrvisCore SPK packages.
 
+## Quick Start
+
+**For most users, use the Makefile instead of calling these tools directly:**
+
+```bash
+# See all available commands
+make help
+
+# Development workflow
+make dev-install      # Install dependencies
+make test             # Run tests
+make lint             # Check code quality
+make build-spk        # Build complete SPK package
+
+# Full build pipeline
+make all              # lint + test + build-spk
+```
+
+**Continue reading if you need to call build tools directly.**
+
 ## Tools
 
 ### `select-docker-versions`
@@ -70,45 +90,138 @@ docker_images:
 
 ---
 
-### `build-spk` *(Coming Soon)*
+### `build-python-package.sh`
 
-Tool to build SyrvisCore SPK package from build configuration.
+Builds standard Python wheel package using Python's official packaging tools.
 
-**Planned Usage:**
+**Usage:**
+
 ```bash
-./build-tools/build-spk --config build/config.yaml
+./build-tools/build-python-package.sh
 ```
 
-Will generate: `dist/syrviscore-0.0.1.spk`
+**Or via Makefile:**
+
+```bash
+make build-wheel
+```
+
+**Output:** Creates wheel file in `dist/syrviscore-{version}-py3-none-any.whl`
+
+---
+
+### `build-spk.sh`
+
+Tool to build complete SyrvisCore SPK package from wheel and configuration.
+
+**Usage:**
+
+```bash
+# Build wheel first
+./build-tools/build-python-package.sh
+
+# Then build SPK
+./build-tools/build-spk.sh
+```
+
+**Or via Makefile (recommended):**
+
+```bash
+make build-spk  # Automatically builds wheel first
+```
+
+**Output:** Creates SPK file in `dist/syrviscore-{version}-noarch.spk`
+
+---
+
+### `validate-spk.sh`
+
+Comprehensive SPK validation tool for DSM 7.1+ compatibility.
+
+**Usage:**
+
+```bash
+./build-tools/validate-spk.sh dist/syrviscore-0.0.1-noarch.spk
+```
+
+**Or via Makefile:**
+
+```bash
+make validate
+```
+
+**Checks:**
+- File format (must be uncompressed tar)
+- Required files (INFO, package.tgz, scripts/, conf/)
+- Script permissions (must be executable)
+- INFO file fields (DSM 7 compatibility)
+- conf/privilege JSON validation
+- Ownership and permissions
+
 
 ---
 
 ## Workflow
 
-### 1. Select Versions
+### Option 1: Using Makefile (Recommended)
+
+```bash
+# Complete workflow
+make all              # Runs lint + test + build-spk
+
+# Validate package
+make validate
+
+# Install to Synology (requires SSH)
+make install SSH_HOST=192.168.0.100
+```
+
+### Option 2: Manual Steps
+
+#### 1. Select Docker Versions
 ```bash
 ./build-tools/select-docker-versions
+# Or: make select-docker-versions
 ```
 
 This creates `build/config.yaml` with pinned versions.
 
-### 2. Review Configuration
+#### 2. Review Configuration
 ```bash
 cat build/config.yaml
 ```
 
 Verify the selected versions are correct.
 
-### 3. Build SPK *(Coming Soon)*
+#### 3. Build Python Wheel
 ```bash
-./build-tools/build-spk
+./build-tools/build-python-package.sh
+# Or: make build-wheel
 ```
 
-This generates the installable `.spk` file.
-
-### 4. Test Installation
+#### 4. Build SPK Package
 ```bash
-# Upload to Synology Package Center or install via command line
+./build-tools/build-spk.sh
+# Or: make build-spk
+```
+
+This generates the installable `.spk` file in `dist/`.
+
+#### 5. Validate SPK
+```bash
+./build-tools/validate-spk.sh dist/syrviscore-{version}-noarch.spk
+# Or: make validate
+```
+
+#### 6. Install to Synology
+```bash
+# Via Makefile (requires SSH access)
+make install SSH_HOST=192.168.0.100
+
+# Or manually upload to Package Center
+# Or via SSH manually:
+scp dist/syrviscore-*.spk admin@192.168.0.100:/tmp/
+ssh admin@192.168.0.100 "sudo synopkg install /tmp/syrviscore-*.spk"
 ```
 
 ---

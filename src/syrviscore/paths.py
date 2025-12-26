@@ -5,7 +5,9 @@ Handles SYRVIS_HOME environment variable and provides helpers for common paths.
 """
 
 import os
+import json
 from pathlib import Path
+from typing import Optional, Dict, Any
 
 
 class SyrvisHomeError(Exception):
@@ -16,37 +18,53 @@ class SyrvisHomeError(Exception):
 
 def get_syrvis_home() -> Path:
     """
-    Get the SYRVIS_HOME directory from environment variable.
+    Get the SYRVIS_HOME directory with auto-detection fallback.
+
+    Tries multiple strategies:
+    1. SYRVIS_HOME environment variable
+    2. Default location /volume1/docker/syrviscore
+    3. Search other volumes (volume2-volume9)
+    4. Derive from script location
 
     Returns:
         Path object for SYRVIS_HOME directory
 
     Raises:
-        SyrvisHomeError: If SYRVIS_HOME not set or doesn't exist
+        SyrvisHomeError: If SYRVIS_HOME cannot be determined
     """
+    # Strategy 1: Environment variable
     syrvis_home = os.environ.get("SYRVIS_HOME")
+    if syrvis_home:
+        syrvis_path = Path(syrvis_home)
+        if syrvis_path.exists() and syrvis_path.is_dir():
+            return syrvis_path
 
-    if not syrvis_home:
-        raise SyrvisHomeError(
-            "SYRVIS_HOME environment variable not set. "
-            "Please set it to your SyrvisCore installation directory."
-        )
+    # Strategy 2: Default location
+    default = Path("/volume1/docker/syrviscore")
+    if default.exists() and (default / ".syrviscore-manifest.json").exists():
+        return default
 
-    syrvis_path = Path(syrvis_home)
+    # Strategy 3: Search other volumes
+    for vol_num in range(2, 10):
+        candidate = Path(f"/volume{vol_num}/docker/syrviscore")
+        if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
+            return candidate
 
-    if not syrvis_path.exists():
-        raise SyrvisHomeError(
-            f"SYRVIS_HOME directory does not exist: {syrvis_path}\n"
-            "Please ensure SYRVIS_HOME points to a valid directory."
-        )
+    # Strategy 4: Derive from script location (if installed)
+    try:
+        script_path = Path(__file__).resolve()
+        # Navigate up from src/syrviscore/paths.py to find manifest
+        for parent in script_path.parents:
+            manifest = parent / ".syrviscore-manifest.json"
+            if manifest.exists():
+                return parent
+    except:
+        pass
 
-    if not syrvis_path.is_dir():
-        raise SyrvisHomeError(
-            f"SYRVIS_HOME is not a directory: {syrvis_path}\n"
-            "SYRVIS_HOME must point to a directory."
-        )
-
-    return syrvis_path
+    raise SyrvisHomeError(
+        "Cannot find SyrvisCore installation.\n"
+        "Set SYRVIS_HOME environment variable or run from installation directory."
+    )
 
 
 def get_docker_compose_path() -> Path:
@@ -121,3 +139,68 @@ def unset_syrvis_home() -> None:
     """
     if "SYRVIS_HOME" in os.environ:
         del os.environ["SYRVIS_HOME"]
+
+
+def get_manifest_path() -> Path:
+    """Get path to installation manifest file."""
+    return get_syrvis_home() / ".syrviscore-manifest.json"
+
+
+def get_manifest() -> Dict[str, Any]:
+    """
+    Read installation manifest.
+
+    Returns:
+        Dictionary containing manifest data
+
+    Raises:
+        SyrvisHomeError: If SYRVIS_HOME cannot be determined
+        FileNotFoundError: If manifest file doesn't exist
+        json.JSONDecodeError: If manifest is invalid JSON
+    """
+    manifest_path = get_manifest_path()
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Manifest not found: {manifest_path}")
+    
+    return json.loads(manifest_path.read_text())
+
+
+def update_manifest(updates: Dict[str, Any]) -> None:
+    """
+    Update manifest file with new values.
+
+    Args:
+        updates: Dictionary of values to update in manifest
+
+    Raises:
+        SyrvisHomeError: If SYRVIS_HOME cannot be determined
+        FileNotFoundError: If manifest file doesn't exist
+    """
+    manifest_path = get_manifest_path()
+    manifest = get_manifest()
+    manifest.update(updates)
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+
+def verify_setup_complete() -> bool:
+    """
+    Check if privileged setup has been completed.
+
+    Returns:
+        True if setup is complete, False otherwise
+    """
+    try:
+        manifest = get_manifest()
+        return manifest.get('setup_complete', False)
+    except Exception:
+        return False
+
+
+def get_env_path() -> Path:
+    """Get path to .env configuration file."""
+    return get_syrvis_home() / ".env"
+
+
+def get_env_template_path() -> Path:
+    """Get path to .env.template file."""
+    return get_syrvis_home() / ".env.template"

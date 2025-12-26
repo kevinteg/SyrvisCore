@@ -11,6 +11,8 @@ from syrviscore.traefik_config import (
     generate_traefik_dynamic_config,
     generate_traefik_static_config,
 )
+from syrviscore.setup import setup
+from syrviscore.doctor import doctor
 
 
 @click.group()
@@ -18,6 +20,11 @@ from syrviscore.traefik_config import (
 def cli():
     """SyrvisCore - Self-hosted infrastructure platform for Synology NAS."""
     pass
+
+
+# Register setup and doctor commands
+cli.add_command(setup)
+cli.add_command(doctor)
 
 
 @cli.command()
@@ -28,7 +35,13 @@ def hello():
     click.echo("✓ CLI is working correctly")
 
 
-@cli.command()
+@cli.group()
+def compose():
+    """Manage docker-compose configuration."""
+    pass
+
+
+@compose.command()
 @click.option(
     "--config",
     "-c",
@@ -43,7 +56,7 @@ def hello():
     help="Path for output docker-compose file",
     type=click.Path(),
 )
-def generate_compose(config, output):
+def generate(config, output):
     """Generate docker-compose.yaml from build configuration."""
     try:
         # Load environment variables from .env file

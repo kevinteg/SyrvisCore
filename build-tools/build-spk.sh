@@ -65,7 +65,6 @@ log_info "Validating SPK structure"
 REQUIRED_FILES=(
     "spk/INFO"
     "spk/conf/privilege"
-    "spk/WIZARD_UIFILES/install_uifile.json"
     "spk/scripts/preinst"
     "spk/scripts/postinst"
     "spk/scripts/preuninst"
@@ -171,10 +170,6 @@ cp spk/icons/PACKAGE_ICON_256.PNG "$BUILD_DIR/"
 log_info "Copying conf directory"
 cp -r spk/conf "$BUILD_DIR/"
 
-# Copy WIZARD_UIFILES
-log_info "Copying wizard files"
-cp -r spk/WIZARD_UIFILES "$BUILD_DIR/"
-
 # CRITICAL FIX: Copy scripts as a DIRECTORY, not a tar archive
 log_info "Copying scripts directory"
 cp -r spk/scripts "$BUILD_DIR/"
@@ -222,10 +217,8 @@ chmod 644 package.tgz
 chmod 644 PACKAGE_ICON.PNG
 chmod 644 PACKAGE_ICON_256.PNG
 chmod 755 conf
-chmod 755 WIZARD_UIFILES
 chmod 755 scripts
 chmod 644 conf/privilege
-chmod 644 WIZARD_UIFILES/install_uifile.json
 
 # Verify script permissions
 log_info "Verifying script permissions:"
@@ -242,7 +235,6 @@ log_info "Creating final SPK package (uncompressed tar)"
 # - INFO (file)
 # - package.tgz (gzipped tar)
 # - scripts/ (directory with executable scripts)
-# - WIZARD_UIFILES/ (directory)
 # - conf/ (directory)
 # - PACKAGE_ICON*.PNG (files)
 
@@ -250,7 +242,6 @@ tar -cf "$DIST_DIR/$PACKAGE_NAME" \
     INFO \
     package.tgz \
     scripts \
-    WIZARD_UIFILES \
     conf \
     PACKAGE_ICON.PNG \
     PACKAGE_ICON_256.PNG
@@ -289,7 +280,7 @@ for expected in "${EXPECTED_FILES[@]}"; do
 done
 
 # Check for directories
-for dir in "scripts/" "conf/" "WIZARD_UIFILES/"; do
+for dir in "scripts/" "conf/"; do
     if ! echo "$SPK_CONTENTS" | grep -q "^${dir}"; then
         log_error "Missing expected directory in SPK: $dir"
         VERIFY_FAILED=1

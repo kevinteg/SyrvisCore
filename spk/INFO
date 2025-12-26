@@ -1,7 +1,7 @@
 package="syrviscore"
 version="0.0.1"
 displayname="SyrvisCore"
-description="Self-hosted infrastructure platform with Traefik, Portainer, and Cloudflared. Provides reverse proxy, SSL termination, and container management for Synology NAS."
+description="Self-hosted infrastructure platform with Traefik, Portainer, and Cloudflared. INSTALLATION: After installing this package, run: sudo syrvis setup --interactive"
 maintainer="Kevin Tegtmeier"
 maintainer_url="https://github.com/kevinteg/SyrvisCore"
 support_url="https://github.com/kevinteg/SyrvisCore/issues"

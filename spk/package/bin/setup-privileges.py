@@ -71,6 +71,57 @@ class PrivilegedSetup:
         except KeyError:
             raise SetupError(f"User '{self.target_user}' does not exist")
     
+    def verify_prerequisites(self) -> None:
+        """Verify Docker is installed and running (requires root)"""
+        # Check 1: Docker package installed
+        try:
+            result = subprocess.run(
+                ['synopkg', 'status', 'Docker'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode != 0:
+                raise SetupError(
+                    "Docker package not installed.\n"
+                    "Solution: Install Docker from DSM Package Center first."
+                )
+        except subprocess.TimeoutExpired:
+            raise SetupError("Timeout checking Docker status")
+        except FileNotFoundError:
+            raise SetupError("synopkg command not found (not running on Synology?)")
+        
+        # Check 2: Docker daemon running
+        try:
+            result = subprocess.run(
+                ['synopkg', 'is_onoff', 'Docker'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip() != "on":
+                raise SetupError(
+                    "Docker package is installed but not running.\n"
+                    "Solution: Start Docker from DSM Package Center."
+                )
+        except subprocess.TimeoutExpired:
+            raise SetupError("Timeout checking Docker status")
+        
+        # Check 3: Docker socket exists
+        if not self.docker_socket.exists():
+            raise SetupError(
+                f"Docker socket not found: {self.docker_socket}\n"
+                "Docker may not be fully started. Wait a moment and try again.\n"
+                "If problem persists, restart Docker from Package Center."
+            )
+        
+        # Check 4: Docker socket is actually a socket
+        if not self.docker_socket.is_socket():
+            raise SetupError(
+                f"{self.docker_socket} exists but is not a Unix socket.\n"
+                "Docker installation may be corrupted."
+            )
+    
     def ensure_docker_group(self) -> Tuple[bool, str]:
         """Create docker group if it doesn't exist"""
         try:
@@ -222,8 +273,15 @@ exit 0
         
         try:
             # Pre-flight checks
+            print("[0/6] Verifying prerequisites...")
             self.verify_root()
             self.verify_user()
+            self.verify_prerequisites()
+            print("  ✓ Root access confirmed")
+            print(f"  ✓ Target user verified: {self.target_user}")
+            print("  ✓ Docker package installed and running")
+            print("  ✓ Docker socket accessible")
+            print()
             
             # Setup steps
             steps = [

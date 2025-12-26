@@ -1,60 +1,126 @@
 #!/bin/sh
-# preinst - Pre-installation check for SyrvisCore
-# Runs as package user (syrvis-bot), not root - can only do basic checks
+# preinst - Pre-installation checks (UNPRIVILEGED)
+# POSIX shell compatible
 
-# Enhanced logging
-SCRIPT_NAME=$(basename "$0")
-LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+# === Logging Functions ===
+SCRIPT_NAME="preinst"
+LOG_FILE="/tmp/syrviscore-install.log"
 
-set -x
-exec 2>>"$LOG_FILE"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+log_msg() {
+    LEVEL="$1"
+    MSG="$2"
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    LOG_LINE="[$LEVEL] [$TIMESTAMP] [$SCRIPT_NAME] $MSG"
+    
+    # Write to stdout/stderr
+    if [ "$LEVEL" = "ERROR" ]; then
+        echo "$LOG_LINE" >&2
+    else
+        echo "$LOG_LINE"
+    fi
+    
+    # Append to log file
+    echo "$LOG_LINE" >> "$LOG_FILE" 2>/dev/null || true
 }
 
-log "===== $SCRIPT_NAME START ====="
-log "User: $(whoami)"
-log "UID: $(id -u)"
-log "PATH: $PATH"
+log_info() {
+    log_msg "INFO" "$1"
+}
 
-# Check if Docker package is installed
-log "Checking if Docker is installed..."
-if ! synopkg status Docker >/dev/null 2>&1; then
-    log "ERROR: Docker package not installed. Install Docker from Package Center first."
+log_warn() {
+    log_msg "WARN" "$1"
+}
+
+log_error() {
+    log_msg "ERROR" "$1"
+}
+
+# === Pre-Installation Checks (Unprivileged) ===
+log_info "==================================================================="
+log_info "Starting SyrvisCore pre-installation checks (Phase 1)"
+log_info "==================================================================="
+log_info "Note: Running as unprivileged user (no root access)"
+log_info "Note: Docker checks will be performed during Phase 2 setup"
+log_info ""
+
+# Log environment
+log_info "Environment:"
+log_info "  User: $(whoami)"
+log_info "  Working directory: $(pwd)"
+log_info "  PATH: $PATH"
+
+# Get installation volume from wizard
+INSTALL_VOLUME="${pkgwizard_volume:-/volume1}"
+INSTALL_DIR="${INSTALL_VOLUME}/docker"
+
+# Check 1: Python 3 available
+log_info "[1/3] Checking Python 3 availability..."
+if command -v python3 >/dev/null 2>&1; then
+    PYTHON_VERSION=$(python3 --version 2>&1 || echo "unknown")
+    PYTHON_PATH=$(command -v python3)
+    log_info "  Python 3 found: $PYTHON_VERSION"
+    log_info "  Python path: $PYTHON_PATH"
+else
+    log_error "  Python 3 not found"
+    log_error "FAILED: Python 3 is required"
+    log_error "Solution: Your DSM version may not include Python 3"
+    log_info "Detailed logs: $LOG_FILE"
     exit 1
 fi
 
-# Check if Docker is running
-log "Checking if Docker is running..."
-if ! synopkg is_onoff Docker >/dev/null 2>&1 || [ "$(synopkg is_onoff Docker)" != "on" ]; then
-    log "ERROR: Docker not running. Start Docker from Package Center first."
-    exit 1
+# Check 2: Installation directory accessible
+log_info "[2/3] Checking installation directory accessibility..."
+log_info "  Target directory: $INSTALL_DIR"
+
+if [ -d "$INSTALL_DIR" ]; then
+    log_info "  Directory exists: $INSTALL_DIR"
+    if [ -w "$INSTALL_DIR" ]; then
+        log_info "  Directory is writable"
+    else
+        log_error "  Directory is not writable"
+        log_error "FAILED: Cannot write to $INSTALL_DIR"
+        log_info "Detailed logs: $LOG_FILE"
+        exit 1
+    fi
+else
+    log_warn "  Directory does not exist: $INSTALL_DIR"
+    log_info "  Will be created during installation"
 fi
 
-# Check if docker command is available
-log "Checking if docker command is available..."
-if ! /usr/bin/which docker >/dev/null 2>&1; then
-    log "ERROR: Docker command not found. Check Docker installation."
-    exit 1
+# Check 3: Sufficient disk space (500MB minimum)
+log_info "[3/3] Checking available disk space..."
+if df "$INSTALL_VOLUME" >/dev/null 2>&1; then
+    AVAILABLE_KB=$(df "$INSTALL_VOLUME" | tail -1 | awk '{print $4}')
+    REQUIRED_KB=512000  # 500MB
+    AVAILABLE_MB=$((AVAILABLE_KB / 1024))
+    REQUIRED_MB=$((REQUIRED_KB / 1024))
+    
+    log_info "  Available space: ${AVAILABLE_MB}MB"
+    log_info "  Required space: ${REQUIRED_MB}MB"
+    
+    if [ "$AVAILABLE_KB" -lt "$REQUIRED_KB" ]; then
+        log_error "  Insufficient disk space"
+        log_error "FAILED: Need at least ${REQUIRED_MB}MB, only ${AVAILABLE_MB}MB available"
+        log_info "Detailed logs: $LOG_FILE"
+        exit 1
+    fi
+    log_info "  Sufficient disk space available"
+else
+    log_warn "  Could not check disk space for $INSTALL_VOLUME"
 fi
 
-# Check if python3 is available
-log "Checking if python3 is available..."
-if ! /usr/bin/which python3 >/dev/null 2>&1; then
-    log "ERROR: Python 3 not found. Your DSM version may not be supported."
-    exit 1
-fi
+log_info ""
+log_info "==================================================================="
+log_info "Pre-installation checks completed successfully (Phase 1)"
+log_info "==================================================================="
+log_info "✓ Python 3 available"
+log_info "✓ Installation directory accessible"
+log_info "✓ Sufficient disk space"
+log_info ""
+log_info "Next: Installation will proceed"
+log_info "After installation: Run Phase 2 setup to enable Docker access"
+log_info "  Command: sudo python3 <install-dir>/bin/setup-privileges.py"
+log_info ""
+log_info "Detailed logs: $LOG_FILE"
 
-# Check Docker daemon is accessible
-log "Checking Docker daemon access..."
-if ! docker ps >/dev/null 2>&1; then
-    log "ERROR: Cannot access Docker daemon. This may be a permissions issue."
-    exit 1
-fi
-
-log "All pre-installation checks passed"
-
-# Basic validation passed
-log "===== $SCRIPT_NAME SUCCESS ====="
 exit 0
