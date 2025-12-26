@@ -239,3 +239,8 @@ test-sim: sim-setup ## Run full simulation workflow test
 	@echo "$(BLUE)[INFO]$(NC) Running simulation workflow test..."
 	chmod +x $(TESTS_DIR)/test_sim_workflow.sh
 	./$(TESTS_DIR)/test_sim_workflow.sh
+
+test-versions: sim-setup ## Test version management (install, activate, rollback)
+	@echo "$(BLUE)[INFO]$(NC) Running version management test..."
+	chmod +x $(TESTS_DIR)/test_version_management.sh
+	./$(TESTS_DIR)/test_version_management.sh
