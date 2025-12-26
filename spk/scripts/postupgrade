@@ -83,12 +83,24 @@ fi
 
 log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
 
-# Install ALL wheels from bundled directory (offline, no network)
-"${MANAGER_VENV}/bin/pip" install \
-    --no-cache-dir \
-    --no-index \
-    --find-links "$WHEELS_DIR" \
-    "$MANAGER_WHEEL" > /dev/null 2>&1
+# Install manager and dependencies from bundled wheels
+# In production (Synology): --no-index ensures offline installation
+# In simulation (macOS): Allow network for platform-specific wheels
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
+    # Simulation mode: use bundled wheels but allow network for platform-specific deps
+    log_info "  (Simulation mode: allowing network for platform-specific wheels)"
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+else
+    # Production mode: fully offline installation
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --no-index \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+fi
 
 log_info "  Manager package and dependencies installed (offline)"
 

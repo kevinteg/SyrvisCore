@@ -79,15 +79,24 @@ fi
 
 log_info "  Manager wheel: $(basename "$MANAGER_WHEEL")"
 
-# Install ALL wheels from bundled directory (offline, no network)
-# --no-index: Don't use PyPI
-# --find-links: Use local wheels directory
-# This installs the manager and all its dependencies from bundled wheels
-"${MANAGER_VENV}/bin/pip" install \
-    --no-cache-dir \
-    --no-index \
-    --find-links "$WHEELS_DIR" \
-    "$MANAGER_WHEEL" > /dev/null 2>&1
+# Install manager and dependencies from bundled wheels
+# In production (Synology): --no-index ensures offline installation
+# In simulation (macOS): Allow network for platform-specific wheels
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
+    # Simulation mode: use bundled wheels but allow network for platform-specific deps
+    log_info "  (Simulation mode: allowing network for platform-specific wheels)"
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+else
+    # Production mode: fully offline installation
+    "${MANAGER_VENV}/bin/pip" install \
+        --no-cache-dir \
+        --no-index \
+        --find-links "$WHEELS_DIR" \
+        "$MANAGER_WHEEL" > /dev/null 2>&1
+fi
 
 log_info "  Manager package and dependencies installed (offline)"
 
@@ -102,10 +111,14 @@ log_info "  Verified: syrvisctl command available"
 # === Create global symlink ===
 log_info "[3/3] Creating global symlink..."
 
-SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
-
-# Create /usr/local/bin if it doesn't exist
-mkdir -p /usr/local/bin
+# Use simulation root if in simulation mode
+if [ "${DSM_SIM_ACTIVE:-0}" = "1" ] && [ -n "$DSM_SIM_ROOT" ]; then
+    SYRVISCTL_LINK="${DSM_SIM_ROOT}/usr/local/bin/syrvisctl"
+    mkdir -p "${DSM_SIM_ROOT}/usr/local/bin"
+else
+    SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
+    mkdir -p /usr/local/bin
+fi
 
 # Remove old symlink if exists
 if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
