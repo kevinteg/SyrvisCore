@@ -192,19 +192,33 @@ fi
 SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
 log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"
 
-# === Update global symlink ===
+# === Update global symlink (optional - may require elevated privileges) ===
 log_info "[3/3] Updating global symlink..."
 
 SYRVISCTL_LINK="/usr/local/bin/syrvisctl"
+SYMLINK_CREATED=false
 
-mkdir -p /usr/local/bin
+# Try to create the symlink (may fail if running as unprivileged user)
+if mkdir -p /usr/local/bin 2>/dev/null; then
+    # Remove old symlink if exists
+    if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
+        rm -f "$SYRVISCTL_LINK" 2>/dev/null || true
+    fi
 
-if [ -L "$SYRVISCTL_LINK" ] || [ -f "$SYRVISCTL_LINK" ]; then
-    rm -f "$SYRVISCTL_LINK"
+    if ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK" 2>/dev/null; then
+        log_info "  Updated symlink: ${SYRVISCTL_LINK}"
+        SYMLINK_CREATED=true
+    fi
 fi
 
-ln -s "${MANAGER_VENV}/bin/syrvisctl" "$SYRVISCTL_LINK"
-log_info "  Updated symlink: ${SYRVISCTL_LINK}"
+if [ "$SYMLINK_CREATED" = "false" ]; then
+    log_info "  Note: Could not update global symlink (requires elevated privileges)"
+    log_info "  The 'syrvisctl' command is available at:"
+    log_info "    ${MANAGER_VENV}/bin/syrvisctl"
+    log_info ""
+    log_info "  To create the symlink manually, run as root:"
+    log_info "    sudo ln -sf ${MANAGER_VENV}/bin/syrvisctl /usr/local/bin/syrvisctl"
+fi
 
 log_info ""
 log_info "==================================================================="
@@ -214,8 +228,15 @@ log_info ""
 log_info "The manager has been upgraded."
 log_info ""
 log_info "Service versions are not affected by this upgrade."
-log_info "To update the service package, run:"
-log_info "  syrvisctl install"
+
+if [ "$SYMLINK_CREATED" = "true" ]; then
+    log_info "To update the service package, run:"
+    log_info "  syrvisctl install"
+else
+    log_info "To update the service package, run:"
+    log_info "  ${MANAGER_VENV}/bin/syrvisctl install"
+fi
+
 log_info ""
 log_info "==================================================================="
 log_info "Detailed logs: $LOG_FILE"
