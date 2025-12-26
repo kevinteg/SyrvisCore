@@ -210,7 +210,7 @@ def generate_synology_services_config(nas_ip: str) -> str:
             f"      loadBalancer:",
             f"        servers:",
             f"          - url: \"{protocol}://{nas_ip}:{port}\"",
-            f"        serversTransport: insecure-skip-verify",
+            f"        serversTransport: insecure-skip-verify@file",
         ])
 
     # Add serversTransport for self-signed certs on Synology
