@@ -1,0 +1,34 @@
+# Home Assistant Service for SyrvisCore
+# Open source home automation platform
+
+name: homeassistant
+version: "1.0.0"
+description: "Open source home automation"
+author: "SyrvisCore"
+homepage: "https://www.home-assistant.io/"
+
+# Docker image - using stable release
+image: ghcr.io/home-assistant/home-assistant:stable
+container_name: homeassistant
+
+# Traefik routing
+traefik:
+  enabled: true
+  subdomain: ha
+  port: 8123
+
+# Restart policy
+restart: unless-stopped
+
+# Volume mounts
+volumes:
+  - "config:/config:rw"
+  - "/etc/localtime:/etc/localtime:ro"
+
+# Environment variables
+environment:
+  - "TZ=America/Chicago"
+
+# Networks
+networks:
+  - proxy

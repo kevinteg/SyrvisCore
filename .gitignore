@@ -216,3 +216,7 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 tests/spk-test-tmp/
+
+# DSM simulator runtime data (generated during testing)
+tests/dsm-sim/root/volume1/
+tests/dsm-sim/root/tmp/spk-extract/

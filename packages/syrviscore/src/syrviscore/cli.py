@@ -31,6 +31,200 @@ cli.add_command(update)
 
 
 # =============================================================================
+# Service command group (Layer 2 services)
+# =============================================================================
+
+
+@cli.group()
+def service():
+    """Manage Layer 2 services (user-installable containers)."""
+    pass
+
+
+@service.command("add")
+@click.argument("source")
+@click.option("--no-start", is_flag=True, help="Don't start the service after adding")
+def service_add(source, no_start):
+    """Add a service from a git URL.
+
+    SOURCE can be a git repository URL containing a syrvis-service.yaml file.
+
+    Examples:
+        syrvis service add https://github.com/user/syrvis-gollum.git
+    """
+    privilege.ensure_elevated("Adding services requires elevated privileges.")
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.add(source, start=not no_start)
+
+        if success:
+            click.echo(message)
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to add service: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("remove")
+@click.argument("name")
+@click.option("--purge", is_flag=True, help="Also remove service data")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def service_remove(name, purge, yes):
+    """Remove an installed service.
+
+    NAME is the name of the service to remove.
+    """
+    privilege.ensure_elevated("Removing services requires elevated privileges.")
+
+    if not yes:
+        msg = f"This will stop and remove the service '{name}'."
+        if purge:
+            msg += " All service data will also be deleted."
+        click.echo(msg)
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.remove(name, purge=purge)
+
+        if success:
+            click.echo(message)
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to remove service: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("list")
+def service_list():
+    """List all installed services."""
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        services = manager.list()
+
+        if not services:
+            click.echo("No services installed")
+            click.echo()
+            click.echo("Add a service with: syrvis service add <git-url>")
+            return
+
+        click.echo()
+        click.echo(f"{'NAME':<20} {'VERSION':<10} {'STATUS':<12} {'URL'}")
+        click.echo("-" * 70)
+
+        for svc in services:
+            status_icon = "[+]" if svc["status"] == "running" else "[-]"
+            click.echo(
+                f"{status_icon} {svc['name']:<17} {svc['version']:<10} "
+                f"{svc['status']:<12} {svc['url']}"
+            )
+
+        click.echo()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to list services: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("start")
+@click.argument("name")
+def service_start(name):
+    """Start a service."""
+    privilege.ensure_elevated("Starting services requires elevated privileges.")
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.start(name)
+
+        if success:
+            click.echo(f"Service '{name}' started")
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to start service: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("stop")
+@click.argument("name")
+def service_stop(name):
+    """Stop a service."""
+    privilege.ensure_elevated("Stopping services requires elevated privileges.")
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.stop(name)
+
+        if success:
+            click.echo(f"Service '{name}' stopped")
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to stop service: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("update")
+@click.argument("name")
+def service_update(name):
+    """Update a service from its git repository."""
+    privilege.ensure_elevated("Updating services requires elevated privileges.")
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.update(name)
+
+        if success:
+            click.echo(message)
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to update service: {e}", err=True)
+        raise click.Abort()
+
+
+# =============================================================================
 # Top-level convenience commands
 # =============================================================================
 

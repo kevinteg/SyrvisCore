@@ -1,5 +1,5 @@
 package="syrviscore"
-version="0.1.20"
+version="0.1.21"
 displayname="SyrvisCore"
 description="Bootstrapper for SyrvisCore (Traefik + Portainer + Cloudflared). SSH in and run: 1) source /var/packages/syrviscore/target/syrviscore.profile 2) syrvisctl install 3) syrvis setup 4) syrvis doctor"
 maintainer="Kevin Tegtmeier"

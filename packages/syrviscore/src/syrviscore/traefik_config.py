@@ -2,10 +2,17 @@
 Traefik configuration generation for SyrvisCore.
 
 Generates static and dynamic configuration files for Traefik reverse proxy.
+Also handles Layer 2 service dynamic configurations.
 """
 
 import os
-from typing import Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+import yaml
+
+if TYPE_CHECKING:
+    from .service_schema import ServiceDefinition
 
 
 # =============================================================================
@@ -282,3 +289,180 @@ http:
 {synology_services}
 """
     return config
+
+
+# =============================================================================
+# Layer 2 Service Configuration
+# =============================================================================
+
+
+class ServiceTraefikConfig:
+    """Generate Traefik dynamic configuration files for Layer 2 services.
+
+    Each service gets its own config file in $SYRVIS_HOME/data/traefik/config/dynamic/
+    that Traefik hot-reloads automatically via the file provider.
+
+    The config files are placed in the Traefik config mount which maps to:
+    - Host: $SYRVIS_HOME/data/traefik/config/
+    - Container: /config/
+
+    So files in $SYRVIS_HOME/data/traefik/config/dynamic/ appear as /config/dynamic/
+    in the container, and Traefik watches the entire /config/ directory.
+    """
+
+    def __init__(self, config_dir: Optional[Path] = None):
+        """Initialize the generator.
+
+        Args:
+            config_dir: Path to Traefik dynamic config directory.
+                       Defaults to $SYRVIS_HOME/data/traefik/config/dynamic/
+        """
+        if config_dir:
+            self.config_dir = config_dir
+        else:
+            syrvis_home = os.environ.get("SYRVIS_HOME", "")
+            if not syrvis_home:
+                raise ValueError("SYRVIS_HOME environment variable not set")
+            # Use data/traefik/config/dynamic/ to match the volume mount
+            self.config_dir = Path(syrvis_home) / "data" / "traefik" / "config" / "dynamic"
+
+    def ensure_directory(self) -> None:
+        """Ensure the dynamic config directory exists."""
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+
+    def generate_config(
+        self, service: "ServiceDefinition", domain: str
+    ) -> Dict[str, Any]:
+        """Generate Traefik configuration for a service.
+
+        Args:
+            service: Service definition
+            domain: Base domain (e.g., "example.com")
+
+        Returns:
+            Traefik configuration dictionary
+        """
+        if not service.traefik.enabled or not service.traefik.subdomain:
+            return {}
+
+        host = f"{service.traefik.subdomain}.{domain}"
+        name = service.name
+
+        # Build router configurations
+        config: Dict[str, Any] = {
+            "http": {
+                "routers": {
+                    # HTTP router (redirects to HTTPS)
+                    f"{name}-http": {
+                        "entryPoints": ["web"],
+                        "rule": f"Host(`{host}`)",
+                        "middlewares": ["https-redirect"],
+                        "service": name,
+                    },
+                    # HTTPS router
+                    name: {
+                        "entryPoints": ["websecure"],
+                        "rule": f"Host(`{host}`)",
+                        "tls": {
+                            "certResolver": "letsencrypt",
+                        },
+                        "service": name,
+                    },
+                },
+                "services": {
+                    name: {
+                        "loadBalancer": {
+                            "servers": [
+                                {
+                                    "url": f"http://{service.container_name}:{service.traefik.port}"
+                                }
+                            ]
+                        }
+                    }
+                },
+            }
+        }
+
+        # Add custom middlewares if specified
+        if service.traefik.middlewares:
+            config["http"]["routers"][name]["middlewares"] = service.traefik.middlewares
+
+        return config
+
+    def write_config(self, service: "ServiceDefinition", domain: str) -> Optional[Path]:
+        """Write Traefik configuration file for a service.
+
+        Args:
+            service: Service definition
+            domain: Base domain
+
+        Returns:
+            Path to written config file, or None if no config needed
+        """
+        self.ensure_directory()
+
+        config = self.generate_config(service, domain)
+        if not config:
+            # No Traefik config needed for this service
+            return None
+
+        config_path = self.config_dir / f"{service.name}.yaml"
+        with open(config_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+        return config_path
+
+    def remove_config(self, service_name: str) -> bool:
+        """Remove Traefik configuration file for a service.
+
+        Args:
+            service_name: Name of the service
+
+        Returns:
+            True if config was removed, False if it didn't exist
+        """
+        config_path = self.config_dir / f"{service_name}.yaml"
+        if config_path.exists():
+            config_path.unlink()
+            return True
+        return False
+
+    def list_configs(self) -> List[str]:
+        """List all service configs in the dynamic directory.
+
+        Returns:
+            List of service names with configs
+        """
+        if not self.config_dir.exists():
+            return []
+
+        return [f.stem for f in self.config_dir.glob("*.yaml")]
+
+
+def get_domain_from_env() -> str:
+    """Get the domain from environment variables.
+
+    Returns:
+        Domain string
+
+    Raises:
+        ValueError: If DOMAIN not set
+    """
+    domain = os.environ.get("DOMAIN", "")
+    if not domain:
+        # Try loading from .env file
+        syrvis_home = os.environ.get("SYRVIS_HOME", "")
+        if syrvis_home:
+            env_file = Path(syrvis_home) / "config" / ".env"
+            if env_file.exists():
+                with open(env_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line.startswith("DOMAIN="):
+                            domain = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+
+    if not domain:
+        raise ValueError("DOMAIN environment variable not set")
+
+    return domain

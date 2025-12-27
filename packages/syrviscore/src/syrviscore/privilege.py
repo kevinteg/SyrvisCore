@@ -10,8 +10,16 @@ import shutil
 import click
 
 
+def is_simulation_mode() -> bool:
+    """Check if running in DSM simulation mode."""
+    return os.environ.get("DSM_SIM_ACTIVE") == "1"
+
+
 def is_root() -> bool:
-    """Check if running as root."""
+    """Check if running as root (or in simulation mode)."""
+    # In simulation mode, we pretend to be root
+    if is_simulation_mode():
+        return True
     return os.geteuid() == 0
 
 

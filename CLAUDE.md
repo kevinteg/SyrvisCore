@@ -177,6 +177,14 @@ syrvis logs [service] [-f]    # View logs
 syrvis doctor [--fix]         # Diagnose and fix issues
 syrvis config show            # Show current configuration
 syrvis compose generate       # Generate docker-compose.yaml
+
+# Layer 2 Services (user-installable containers)
+syrvis service add <git-url>  # Add service from git repo
+syrvis service remove <name>  # Remove a service
+syrvis service list           # List installed services
+syrvis service start <name>   # Start a service
+syrvis service stop <name>    # Stop a service
+syrvis service update <name>  # Update from git repo
 ```
 
 ## Installation Flow

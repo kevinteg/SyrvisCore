@@ -553,16 +553,22 @@ def generate_docker_compose(install_dir: Path) -> bool:
 
 def ensure_data_directories() -> None:
     """Ensure all data directories exist with proper permissions."""
+    syrvis_home = paths.get_syrvis_home()
     data_dir = paths.get_data_dir()
 
-    # Create all required data directories with 755 permissions
+    # Create all required directories with 755 permissions
     directories = [
+        # Core data directories
         data_dir,
         data_dir / "traefik",
         data_dir / "traefik" / "config",
+        data_dir / "traefik" / "config" / "dynamic",  # Layer 2 service configs
         data_dir / "traefik" / "logs",
         data_dir / "portainer",
         data_dir / "cloudflared",
+        # Layer 2 service directories
+        syrvis_home / "services",   # Service definitions (cloned repos)
+        syrvis_home / "compose",    # Generated compose files
     ]
 
     for directory in directories:
@@ -594,6 +600,12 @@ def generate_traefik_config() -> bool:
         dynamic_path = config_dir / "dynamic.yml"
         dynamic_path.write_text(generate_traefik_dynamic_config())
         dynamic_path.chmod(0o644)
+
+        # Dynamic directory for Layer 2 services
+        # Traefik watches this directory and hot-reloads configs
+        dynamic_dir = config_dir / "dynamic"
+        dynamic_dir.mkdir(exist_ok=True)
+        dynamic_dir.chmod(0o755)
 
         # Logs directory
         logs_dir = traefik_data / "logs"

@@ -1,0 +1,35 @@
+# Gollum Wiki Service for SyrvisCore
+# A simple wiki system built on top of Git
+
+name: gollum
+version: "1.0.0"
+description: "Personal wiki powered by Git"
+author: "SyrvisCore"
+homepage: "https://github.com/gollum/gollum"
+
+# Docker image
+image: gollum/gollum:v5.3.2
+container_name: gollum
+
+# Traefik routing
+traefik:
+  enabled: true
+  subdomain: wiki
+  port: 4567
+
+# Restart policy
+restart: unless-stopped
+
+# Volume mounts
+# - Relative paths are relative to $SYRVIS_HOME/data/<service>/
+volumes:
+  - "wiki:/wiki:rw"
+
+# Environment variables
+environment:
+  - "GOLLUM_AUTHOR_NAME=Wiki User"
+  - "GOLLUM_AUTHOR_EMAIL=wiki@localhost"
+
+# Networks (proxy is always included)
+networks:
+  - proxy
