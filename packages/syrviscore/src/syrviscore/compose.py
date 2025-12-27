@@ -197,7 +197,7 @@ class ComposeGenerator:
         """Generate Portainer service configuration on bridge network."""
         image = self.build_config["docker_images"]["portainer"]["full_image"]
 
-        return {
+        service = {
             "image": image,
             "container_name": "portainer",
             "restart": "unless-stopped",
@@ -222,6 +222,16 @@ class ComposeGenerator:
                 "traefik.http.services.portainer.loadbalancer.server.port=9000",
             ],
         }
+
+        # Add admin password file if it exists
+        # This sets the initial admin password on first run
+        # Portainer ignores this flag if admin user already exists
+        password_file = Path(os.environ.get("SYRVIS_HOME", "")) / "config" / ".portainer-password"
+        if password_file.exists():
+            service["command"] = "--admin-password-file /run/secrets/portainer-password"
+            service["volumes"].append("../config/.portainer-password:/run/secrets/portainer-password:ro")
+
+        return service
 
     def _generate_cloudflared_service(self) -> Optional[Dict[str, Any]]:
         """Generate Cloudflared service configuration on bridge network."""

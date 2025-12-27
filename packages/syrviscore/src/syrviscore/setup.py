@@ -268,7 +268,41 @@ def prompt_configuration(defaults: dict) -> dict:
     else:
         config["cloudflare_token"] = ""
 
+    # Portainer admin password
+    click.echo()
+    click.echo("  Service Credentials:")
+
+    # Check if Portainer password already configured
+    portainer_password_file = paths.get_syrvis_home() / "config" / ".portainer-password"
+    has_portainer_password = portainer_password_file.exists()
+
+    if has_portainer_password:
+        change_password = click.confirm(
+            "    Portainer admin password already set. Change it?",
+            default=False
+        )
+        if change_password:
+            config["portainer_password"] = _prompt_password("    New Portainer admin password")
+        else:
+            config["portainer_password"] = None  # Keep existing
+    else:
+        config["portainer_password"] = _prompt_password("    Portainer admin password")
+
     return config
+
+
+def _prompt_password(prompt: str) -> str:
+    """Prompt for a password with confirmation."""
+    while True:
+        password = click.prompt(
+            prompt,
+            hide_input=True,
+            confirmation_prompt=True
+        )
+        if len(password) < 8:
+            click.echo("    Password must be at least 8 characters", err=True)
+            continue
+        return password
 
 
 def display_configuration(config: dict) -> None:
@@ -285,6 +319,14 @@ def display_configuration(config: dict) -> None:
     click.echo(f"  Shim IP:      {config.get('shim_ip', 'not set')}")
     click.echo(f"  NAS IP:       {config.get('nas_ip', 'not set')}")
     click.echo(f"  Cloudflare:   {'configured' if config.get('cloudflare_token') else 'not configured'}")
+
+    # Portainer password status
+    if config.get('portainer_password'):
+        click.echo(f"  Portainer:    password will be set")
+    elif config.get('portainer_password') is None:
+        click.echo(f"  Portainer:    password unchanged")
+    else:
+        click.echo(f"  Portainer:    password not configured")
 
     # Synology services
     synology_services = []
@@ -435,6 +477,53 @@ TZ={tz}
             pass
 
     return env_path
+
+
+def create_portainer_password_file(config: dict, install_dir: Path, username: str) -> bool:
+    """Create Portainer admin password file with secure permissions.
+
+    Args:
+        config: Configuration dict containing 'portainer_password'
+        install_dir: Installation directory (SYRVIS_HOME)
+        username: Target user for file ownership
+
+    Returns:
+        True if file was created/updated, False if skipped
+    """
+    password = config.get('portainer_password')
+
+    # None means keep existing, empty string means not configured
+    if password is None:
+        return False
+
+    if not password:
+        return False
+
+    password_file = install_dir / "config" / ".portainer-password"
+
+    try:
+        # Ensure config directory exists
+        password_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write password (no trailing newline - Portainer reads the whole file)
+        password_file.write_text(password)
+
+        # Set secure permissions (readable only by owner)
+        password_file.chmod(0o600)
+
+        # Change ownership to target user if running as root
+        if os.getuid() == 0:
+            try:
+                import pwd
+                user_info = pwd.getpwnam(username)
+                os.chown(password_file, user_info.pw_uid, user_info.pw_gid)
+            except Exception:
+                pass
+
+        return True
+    except Exception as e:
+        click.echo(f"      Warning: Failed to create Portainer password file: {e}", err=True)
+        return False
 
 
 def generate_docker_compose(install_dir: Path) -> bool:
@@ -711,6 +800,9 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
 
     env_path = generate_env_file(config, install_dir, username)
     click.echo(f"      Created: {env_path}")
+
+    if create_portainer_password_file(config, install_dir, username):
+        click.echo(f"      Created: {install_dir}/config/.portainer-password")
 
     if generate_traefik_config():
         click.echo(f"      Created: {paths.get_traefik_data_dir()}/traefik.yml")

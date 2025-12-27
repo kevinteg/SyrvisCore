@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrviscore"
-version = "0.1.19"
+version = "0.1.20"
 description = "SyrvisCore - Self-hosted infrastructure platform for Synology NAS"
 readme = "README.md"
 authors = [
