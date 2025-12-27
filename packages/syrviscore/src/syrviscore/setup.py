@@ -308,7 +308,7 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
     success = True
 
     # Step 1: Verify Docker
-    click.echo("[1/6] Checking Docker installation...")
+    click.echo("[1/7] Checking Docker installation...")
     ok, msg = privileged_ops.verify_docker_installed()
     if ok:
         click.echo(f"      {msg}")
@@ -317,7 +317,7 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
         return False
 
     # Step 2: Docker group
-    click.echo("[2/6] Ensuring docker group exists...")
+    click.echo("[2/7] Ensuring docker group exists...")
     ok, msg = privileged_ops.ensure_docker_group()
     if ok:
         click.echo(f"      {msg}")
@@ -326,7 +326,7 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
         return False
 
     # Step 3: Add user to docker group
-    click.echo(f"[3/6] Adding {username} to docker group...")
+    click.echo(f"[3/7] Adding {username} to docker group...")
     ok, msg = privileged_ops.ensure_user_in_docker_group(username)
     if ok:
         click.echo(f"      {msg}")
@@ -335,7 +335,7 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
         return False
 
     # Step 4: Docker socket permissions
-    click.echo("[4/6] Setting Docker socket permissions...")
+    click.echo("[4/7] Setting Docker socket permissions...")
     ok, msg = privileged_ops.ensure_docker_socket_permissions()
     if ok:
         click.echo(f"      {msg}")
@@ -344,7 +344,7 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
         # Non-fatal, continue
 
     # Step 5: Global symlink
-    click.echo("[5/6] Creating global command symlink...")
+    click.echo("[5/7] Creating global command symlink...")
     ok, msg = privileged_ops.ensure_global_symlink(install_dir)
     if ok:
         click.echo(f"      {msg}")
@@ -353,8 +353,17 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
         # Non-fatal, continue
 
     # Step 6: Startup script
-    click.echo("[6/6] Creating startup script...")
+    click.echo("[6/7] Creating startup script...")
     ok, msg = privileged_ops.ensure_startup_script(install_dir, username)
+    if ok:
+        click.echo(f"      {msg}")
+    else:
+        click.echo(f"      Warning: {msg}")
+        # Non-fatal, continue
+
+    # Step 7: Boot script (runs startup script on reboot)
+    click.echo("[7/7] Installing boot script...")
+    ok, msg = privileged_ops.ensure_boot_script(install_dir)
     if ok:
         click.echo(f"      {msg}")
     else:

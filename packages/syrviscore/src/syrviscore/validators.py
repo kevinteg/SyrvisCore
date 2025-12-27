@@ -1024,8 +1024,7 @@ class SystemValidator:
             return CheckResult(
                 name="Startup script",
                 passed=True,
-                message=str(startup_script),
-                details="Add to Task Scheduler for boot persistence"
+                message=str(startup_script)
             )
 
         return CheckResult(
@@ -1036,6 +1035,27 @@ class SystemValidator:
             fix_action=f"startup:{self.username}"
         )
 
+    def check_boot_script(self) -> CheckResult:
+        """Check if boot script exists in /usr/local/etc/rc.d/."""
+        boot_script = Path("/usr/local/etc/rc.d/S99syrviscore.sh")
+
+        if boot_script.exists():
+            return CheckResult(
+                name="Boot script",
+                passed=True,
+                message=str(boot_script),
+                details="Ensures macvlan shim is created on reboot"
+            )
+
+        return CheckResult(
+            name="Boot script",
+            passed=False,
+            message="Missing - services won't auto-start after reboot",
+            details="Run: sudo syrvis setup",
+            fixable=True,
+            fix_action="boot_script"
+        )
+
     def validate(self) -> ValidationReport:
         """Run all system integration checks."""
         report = ValidationReport(category="System Integration")
@@ -1043,6 +1063,7 @@ class SystemValidator:
 
         if self.install_dir:
             report.checks.append(self.check_startup_script())
+            report.checks.append(self.check_boot_script())
 
         return report
 

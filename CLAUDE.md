@@ -269,24 +269,41 @@ All Docker images use specific version tags (no `:latest`).
 
 ## Systems Engineering Best Practices
 
-### Reproducibility
+### Reproducibility (CRITICAL)
 
-All operations must be reproducible and automated. **Never require manual out-of-band privileged operations.**
+**All operations must be reproducible and automated.** This is a core design principle:
+
+1. **Never require manual out-of-band operations** - If `syrvis setup` creates something, it must create everything needed. Users should never need to manually run commands after setup.
+
+2. **Boot persistence must be automatic** - If a service needs to run at boot, the setup process must install the boot hook. Don't document "run this manually after reboot."
+
+3. **Self-contained installation** - Running `syrvis setup` should result in a fully working system that survives reboots without additional intervention.
 
 **Bad:**
 ```bash
-# Don't do this - requires manual sudo
+# Don't do this - requires manual intervention
 sudo ln -sf /path/to/cmd /usr/local/bin/cmd
-sudo chown root:root /some/file
+# Or documenting: "Add to Task Scheduler manually"
+# Or: "Run this script after each reboot"
 ```
 
 **Good:**
 ```bash
-# Use PATH or environment variables
-source /var/packages/syrviscore/target/syrviscore.profile
-# Or use the full path
-/var/packages/syrviscore/target/venv/bin/syrvisctl
+# Setup installs everything including boot hooks
+sudo syrvis setup
+# After reboot, everything works automatically
 ```
+
+### Boot Persistence
+
+The installation creates two scripts for boot persistence:
+
+| Script | Location | Purpose |
+|--------|----------|---------|
+| Startup script | `$SYRVIS_HOME/bin/syrvis-startup.sh` | Creates macvlan shim, sets Docker permissions |
+| Boot hook | `/usr/local/etc/rc.d/S99syrviscore.sh` | Calls startup script on boot |
+
+Both are created automatically by `syrvis setup`. The boot hook ensures services work after Synology reboots.
 
 ### Command Access
 
@@ -294,7 +311,7 @@ SPK scripts run as an unprivileged package user. To make commands accessible:
 
 1. **Create a profile snippet** in the package directory that users can source
 2. **Document the full path** to the command
-3. **Never attempt to write to system directories** like `/usr/local/bin`
+3. **Use self-elevation** - CLI commands should detect when they need sudo and re-execute themselves
 
 The package creates `/var/packages/syrviscore/target/syrviscore.profile` which users can source to add `syrvisctl` to their PATH.
 
