@@ -31,7 +31,13 @@ log_info() {
 
 # Detect service installation directory
 find_syrvis_home() {
-    for VOLUME in /volume1 /volume2 /volume3 /volume4; do
+    for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+        # Check new path first (without docker/)
+        if [ -f "${VOLUME}/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+            echo "${VOLUME}/${PACKAGE_NAME}"
+            return 0
+        fi
+        # Check old path (with docker/) for backwards compatibility
         if [ -f "${VOLUME}/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
             echo "${VOLUME}/docker/${PACKAGE_NAME}"
             return 0

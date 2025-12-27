@@ -1,12 +1,19 @@
 #!/bin/sh
 # preupgrade - Pre-upgrade script for SyrvisCore
 # Prepares for upgrade by backing up configuration and stopping services
+#
+# IMPORTANT: This script must NOT hang or fail, as it blocks DSM package operations.
+# All potentially blocking operations have timeouts.
 
-set -e
+# DO NOT use set -e - we want to continue even if stopping services fails
+# set -e
 
 # Enhanced logging
 SCRIPT_NAME=$(basename "$0")
 LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
+
+# Timeout for docker operations (seconds)
+DOCKER_TIMEOUT=30
 
 set -x
 exec 2>>"$LOG_FILE"
@@ -15,15 +22,48 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
+# Run a command with timeout (POSIX-compatible)
+run_with_timeout() {
+    TIMEOUT_SECS="$1"
+    shift
+
+    # Start command in background
+    "$@" &
+    CMD_PID=$!
+
+    # Start timeout watcher
+    (
+        sleep "$TIMEOUT_SECS"
+        kill -9 "$CMD_PID" 2>/dev/null
+    ) &
+    TIMEOUT_PID=$!
+
+    # Wait for command
+    wait "$CMD_PID" 2>/dev/null
+    CMD_STATUS=$?
+
+    # Kill timeout watcher if command finished first
+    kill "$TIMEOUT_PID" 2>/dev/null
+    wait "$TIMEOUT_PID" 2>/dev/null
+
+    return $CMD_STATUS
+}
+
 log "===== $SCRIPT_NAME START ====="
 log "User: $(whoami)"
 log "PATH: $PATH"
 
 PACKAGE_NAME="syrviscore"
 
-# Find installation directory
+# Find installation directory - check both old and new paths
 INSTALL_DIR=""
 for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+    # Check new path first (without docker/)
+    if [ -f "$VOLUME/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="$VOLUME/${PACKAGE_NAME}"
+        break
+    fi
+    # Check old path (with docker/) for backwards compatibility
     if [ -f "$VOLUME/docker/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
         INSTALL_DIR="$VOLUME/docker/${PACKAGE_NAME}"
         break
@@ -41,7 +81,11 @@ log "Found existing installation: $INSTALL_DIR"
 
 # Read current version from manifest
 if [ -f "$INSTALL_DIR/.syrviscore-manifest.json" ]; then
-    CURRENT_VERSION=$(grep -o '"version": *"[^"]*"' "$INSTALL_DIR/.syrviscore-manifest.json" | head -1 | cut -d'"' -f4)
+    CURRENT_VERSION=$(grep -o '"active_version": *"[^"]*"' "$INSTALL_DIR/.syrviscore-manifest.json" | head -1 | cut -d'"' -f4)
+    if [ -z "$CURRENT_VERSION" ]; then
+        # Fallback to old format
+        CURRENT_VERSION=$(grep -o '"version": *"[^"]*"' "$INSTALL_DIR/.syrviscore-manifest.json" | head -1 | cut -d'"' -f4)
+    fi
     log "Current version: $CURRENT_VERSION"
     echo "$CURRENT_VERSION" > /tmp/syrviscore_previous_version
 else
@@ -49,20 +93,53 @@ else
     echo "unknown" > /tmp/syrviscore_previous_version
 fi
 
-# Stop running services
-log "Stopping services before upgrade"
-if [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
-    cd "$INSTALL_DIR"
-    
-    if /usr/bin/which syrvis >/dev/null 2>&1; then
-        log "Stopping via syrvis CLI"
-        syrvis stop 2>&1 | tee -a "$LOG_FILE" || true
+# Stop running services (with timeout to prevent hanging)
+log "Stopping services before upgrade (timeout: ${DOCKER_TIMEOUT}s)"
+
+# Check for config directory (new structure) or docker-compose.yaml (old structure)
+CONFIG_DIR="$INSTALL_DIR/config"
+if [ -f "$CONFIG_DIR/docker-compose.yaml" ] || [ -f "$INSTALL_DIR/docker-compose.yaml" ]; then
+
+    # Try syrvis CLI first (with timeout)
+    SYRVIS_CMD=""
+    if command -v syrvis >/dev/null 2>&1; then
+        SYRVIS_CMD="syrvis"
+    elif [ -f "$INSTALL_DIR/current/cli/venv/bin/syrvis" ]; then
+        SYRVIS_CMD="$INSTALL_DIR/current/cli/venv/bin/syrvis"
+    fi
+
+    if [ -n "$SYRVIS_CMD" ]; then
+        log "Stopping via syrvis CLI (timeout: ${DOCKER_TIMEOUT}s)"
+        if run_with_timeout "$DOCKER_TIMEOUT" "$SYRVIS_CMD" stop 2>&1; then
+            log "Services stopped successfully"
+        else
+            log "WARNING: syrvis stop timed out or failed (continuing anyway)"
+        fi
     else
-        log "Stopping via docker-compose"
-        if /usr/bin/which docker-compose >/dev/null 2>&1; then
-            docker-compose down 2>&1 | tee -a "$LOG_FILE" || true
-        elif /usr/bin/which docker >/dev/null 2>&1; then
-            docker compose down 2>&1 | tee -a "$LOG_FILE" || true
+        # Fallback to docker-compose
+        log "Stopping via docker-compose (timeout: ${DOCKER_TIMEOUT}s)"
+
+        # Determine compose file location
+        if [ -f "$CONFIG_DIR/docker-compose.yaml" ]; then
+            COMPOSE_FILE="$CONFIG_DIR/docker-compose.yaml"
+        else
+            COMPOSE_FILE="$INSTALL_DIR/docker-compose.yaml"
+        fi
+
+        if command -v docker-compose >/dev/null 2>&1; then
+            if run_with_timeout "$DOCKER_TIMEOUT" docker-compose -f "$COMPOSE_FILE" down 2>&1; then
+                log "Services stopped successfully"
+            else
+                log "WARNING: docker-compose down timed out or failed (continuing anyway)"
+            fi
+        elif command -v docker >/dev/null 2>&1; then
+            if run_with_timeout "$DOCKER_TIMEOUT" docker compose -f "$COMPOSE_FILE" down 2>&1; then
+                log "Services stopped successfully"
+            else
+                log "WARNING: docker compose down timed out or failed (continuing anyway)"
+            fi
+        else
+            log "WARNING: No docker-compose command found, skipping service stop"
         fi
     fi
 else
@@ -71,12 +148,19 @@ fi
 
 # Backup configuration files (not data)
 log "Backing up configuration"
-BACKUP_DIR="$INSTALL_DIR/versions/backup-$(date +%Y%m%d-%H%M%S)"
-mkdir -p "$BACKUP_DIR"
+BACKUP_DIR="$INSTALL_DIR/backups/upgrade-$(date +%Y%m%d-%H%M%S)"
+mkdir -p "$BACKUP_DIR" 2>/dev/null || true
 
 # Backup critical files
-[ -f "$INSTALL_DIR/.env" ] && cp "$INSTALL_DIR/.env" "$BACKUP_DIR/" && log "Backed up .env"
-[ -f "$INSTALL_DIR/docker-compose.yaml" ] && cp "$INSTALL_DIR/docker-compose.yaml" "$BACKUP_DIR/" && log "Backed up docker-compose.yaml"
+if [ -d "$CONFIG_DIR" ]; then
+    # New structure
+    [ -f "$CONFIG_DIR/.env" ] && cp "$CONFIG_DIR/.env" "$BACKUP_DIR/" && log "Backed up .env"
+    [ -f "$CONFIG_DIR/docker-compose.yaml" ] && cp "$CONFIG_DIR/docker-compose.yaml" "$BACKUP_DIR/" && log "Backed up docker-compose.yaml"
+else
+    # Old structure
+    [ -f "$INSTALL_DIR/.env" ] && cp "$INSTALL_DIR/.env" "$BACKUP_DIR/" && log "Backed up .env"
+    [ -f "$INSTALL_DIR/docker-compose.yaml" ] && cp "$INSTALL_DIR/docker-compose.yaml" "$BACKUP_DIR/" && log "Backed up docker-compose.yaml"
+fi
 [ -f "$INSTALL_DIR/.syrviscore-manifest.json" ] && cp "$INSTALL_DIR/.syrviscore-manifest.json" "$BACKUP_DIR/" && log "Backed up manifest"
 
 log "Configuration backed up to: $BACKUP_DIR"
