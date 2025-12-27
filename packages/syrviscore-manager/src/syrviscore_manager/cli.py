@@ -226,6 +226,8 @@ def uninstall(version, yes):
 
     Cannot uninstall the currently active version.
     """
+    import os
+
     click.echo()
 
     # Verify version exists
@@ -240,6 +242,11 @@ def uninstall(version, yes):
         click.echo(f"Cannot uninstall active version: {version}", err=True)
         click.echo("Use 'syrvisctl activate <other-version>' first", err=True)
         sys.exit(1)
+
+    # Check if we need sudo to remove the version directory
+    if check_sudo_needed(version_dir):
+        if os.geteuid() != 0:
+            reexec_with_sudo()
 
     if not yes:
         if not click.confirm(f"Uninstall version {version}?"):
@@ -308,6 +315,13 @@ def activate(version):
         click.echo(f"Version {version} is already active")
         return
 
+    # Check if we need sudo to modify the symlink
+    import os
+    current_link = paths.get_syrvis_home() / "current"
+    if check_sudo_needed(current_link):
+        if os.geteuid() != 0:
+            reexec_with_sudo()
+
     click.echo(f"Activating version {version}...")
 
     if version_manager.activate_version(version):
@@ -329,6 +343,17 @@ def rollback(version):
 
     If VERSION is not specified, shows available backups to choose from.
     """
+    import os
+
+    # Check if we need sudo early (rollback modifies files)
+    try:
+        syrvis_home = paths.get_syrvis_home()
+        if check_sudo_needed(syrvis_home):
+            if os.geteuid() != 0:
+                reexec_with_sudo()
+    except paths.SyrvisHomeError:
+        pass  # No installation yet
+
     click.echo()
     click.echo("SyrvisCore Rollback")
     click.echo("=" * 40)
@@ -809,6 +834,14 @@ def restore(backup_file, path, yes):
 
     If BACKUP_FILE is not specified, shows available backups to choose from.
     """
+    import os
+
+    # Check if we need sudo early (restore creates/modifies files)
+    install_path = Path(path) if path else None
+    if install_path and check_sudo_needed(install_path):
+        if os.geteuid() != 0:
+            reexec_with_sudo()
+
     click.echo()
     click.echo("SyrvisCore Restore")
     click.echo("=" * 40)
