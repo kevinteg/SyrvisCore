@@ -65,7 +65,7 @@ syrvis start
 ├── venv/bin/syrvisctl                 # Manager CLI
 └── syrviscore_manager-*.whl
 
-/volumeX/docker/syrviscore/            # Service installation
+/volumeX/syrviscore/                   # Service installation
 ├── current -> versions/0.2.0          # Active version symlink
 ├── versions/
 │   ├── 0.1.0/cli/venv/bin/syrvis      # Previous version

@@ -121,7 +121,7 @@ log_info "Testing version: $VERSION"
 DIST_DIR="$PROJECT_ROOT/dist"
 SPK_FILE="$DIST_DIR/syrviscore-${VERSION}-noarch.spk"
 TEST_DIR="$PROJECT_ROOT/tests/spk-test-tmp"
-TEST_INSTALL_DIR="$TEST_DIR/volume1/docker/syrviscore"
+TEST_INSTALL_DIR="$TEST_DIR/volume1/syrviscore"
 TEST_PKG_DIR="$TEST_DIR/var/packages/syrviscore"
 
 # Wizard variables (simulating user input)

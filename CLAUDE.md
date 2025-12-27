@@ -313,7 +313,7 @@ Use environment variables for configuration, not hardcoded paths:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `SYNOPKG_PKGDEST` | SPK installation directory | `/var/packages/syrviscore/target` |
-| `SYRVIS_HOME` | Service data directory | `/volumeX/docker/syrviscore` |
+| `SYRVIS_HOME` | Service data directory | `/volumeX/syrviscore` |
 | `DSM_SIM_ACTIVE` | Simulation mode flag | `0` |
 | `DSM_SIM_ROOT` | Simulation root path | (unset) |
 

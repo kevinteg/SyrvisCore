@@ -22,6 +22,50 @@ from . import paths
 from .__version__ import __version__
 
 
+def create_post_setup_backup() -> None:
+    """
+    Create a post-setup backup by calling syrvisctl.
+
+    This captures the configured state after setup completes.
+    Uses -N suffix to allow multiple setup backups per version.
+    """
+    import subprocess
+    import shutil
+
+    # Try to find syrvisctl
+    syrvisctl_paths = [
+        "/var/packages/syrviscore/target/venv/bin/syrvisctl",
+    ]
+
+    # Also check for simulation mode
+    sim_root = os.environ.get("DSM_SIM_ROOT")
+    if sim_root:
+        syrvisctl_paths.insert(0, f"{sim_root}/var/packages/syrviscore/target/venv/bin/syrvisctl")
+
+    syrvisctl = None
+    for p in syrvisctl_paths:
+        if Path(p).exists():
+            syrvisctl = p
+            break
+
+    if not syrvisctl:
+        syrvisctl = shutil.which("syrvisctl")
+
+    if not syrvisctl:
+        raise RuntimeError("syrvisctl not found")
+
+    # Call syrvisctl to create a post-setup backup with -N suffix
+    result = subprocess.run(
+        [syrvisctl, "backup", "create", "--reason", "post-setup"],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Backup command failed: {result.stderr}")
+
+
 def needs_privilege_elevation() -> bool:
     """Check if we need to elevate to root."""
     return os.getuid() != 0
@@ -440,7 +484,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
         click.echo(f"      Found: {install_dir}")
     except paths.SyrvisHomeError:
         # No existing installation - use default
-        install_dir = Path("/volume1/docker/syrviscore")
+        install_dir = Path("/volume1/syrviscore")
         click.echo(f"      New installation: {install_dir}")
 
     # Check if already setup
@@ -523,6 +567,14 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
         click.echo("      Updated: manifest")
     except Exception as e:
         click.echo(f"      Warning: Failed to update manifest: {e}")
+
+    # Create post-setup backup via syrvisctl
+    click.echo("      Creating backup...")
+    try:
+        create_post_setup_backup()
+        click.echo("      Backup created")
+    except Exception as e:
+        click.echo(f"      Warning: Backup failed: {e}")
 
     # Step 7: Start services
     click.echo()

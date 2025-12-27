@@ -2,6 +2,7 @@
 Version manager for SyrvisCore.
 
 Handles installation, activation, and rollback of service versions.
+Integrates with backup system for safe upgrades and rollbacks.
 """
 
 import os
@@ -17,6 +18,7 @@ import click
 from . import paths
 from . import manifest
 from . import downloader
+from . import backup
 
 
 def set_readable_permissions(path: Path) -> None:
@@ -46,6 +48,29 @@ def set_tree_readable(path: Path) -> None:
         pass  # Ignore permission errors
 
 
+def cache_wheel_file(version: str, wheel_path: Path) -> Optional[Path]:
+    """
+    Cache a wheel file in the version directory for backup/restore.
+
+    Args:
+        version: Version string
+        wheel_path: Path to the wheel file
+
+    Returns:
+        Path to cached wheel, or None if caching failed
+    """
+    try:
+        version_dir = paths.get_version_dir(version)
+        wheel_cache = version_dir / "wheel"
+        wheel_cache.mkdir(parents=True, exist_ok=True)
+
+        cached_path = wheel_cache / wheel_path.name
+        shutil.copy(wheel_path, cached_path)
+        return cached_path
+    except Exception:
+        return None
+
+
 def install_version(version: str, wheel_path: Path, config_path: Optional[Path] = None) -> bool:
     """
     Install a service version from wheel file.
@@ -72,7 +97,10 @@ def install_version(version: str, wheel_path: Path, config_path: Optional[Path] 
         set_readable_permissions(syrvis_home / "data")
         set_readable_permissions(syrvis_home / "bin")
 
-        # Copy wheel file
+        # Cache wheel file for backup/restore
+        cache_wheel_file(version, wheel_path)
+
+        # Copy wheel file to cli directory for installation
         cli_dir = version_dir / "cli"
         wheel_dest = cli_dir / wheel_path.name
         shutil.copy(wheel_path, wheel_dest)
@@ -230,6 +258,8 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
     """
     Download and install a service version from GitHub.
 
+    Creates a backup of the current state before upgrading.
+
     Args:
         version: Specific version to install, or None for latest
         force: Force reinstall if version exists
@@ -237,9 +267,12 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
     Returns:
         True if installation succeeded
     """
+    # Check for existing installation to backup
+    current_version = manifest.get_active_version()
+
     # Fetch release info
     if not version:
-        click.echo("[1/4] Fetching latest release...")
+        click.echo("[1/5] Fetching latest release...")
         release = downloader.get_latest_release()
         if not release:
             click.echo("      Could not fetch release information", err=True)
@@ -247,13 +280,30 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
         version = downloader.get_version_from_release(release)
     else:
         version = version.lstrip('v')
-        click.echo(f"[1/4] Fetching release v{version}...")
+        click.echo(f"[1/5] Fetching release v{version}...")
         release = downloader.get_release_by_tag(version)
         if not release:
             click.echo(f"      Release v{version} not found", err=True)
             return False
 
     click.echo(f"      Version: {version}")
+
+    # Create pre-upgrade backup if we have an existing installation
+    if current_version and current_version != version:
+        click.echo()
+        click.echo("[2/5] Creating backup of current state...")
+        try:
+            backup_path = backup.create_pre_upgrade_backup(current_version, version)
+            if backup_path:
+                click.echo(f"      Backup: {backup_path}")
+            else:
+                click.echo(f"      Backup already exists for {current_version}")
+        except Exception as e:
+            click.echo(f"      Warning: Could not create backup: {e}")
+            # Continue with install - backup failure shouldn't block upgrade
+    else:
+        click.echo()
+        click.echo("[2/5] No existing version to backup")
 
     # Check if already installed
     try:
@@ -277,7 +327,7 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
 
     # Download to temp directory
     click.echo()
-    click.echo("[2/4] Downloading...")
+    click.echo("[3/5] Downloading...")
     click.echo(f"      {wheel_asset['name']}")
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -302,7 +352,7 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
 
         # Install
         click.echo()
-        click.echo("[3/4] Installing...")
+        click.echo("[4/5] Installing...")
 
         if not install_version(version, wheel_path, config_path):
             click.echo("      Installation failed", err=True)
@@ -312,7 +362,7 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
 
     # Activate
     click.echo()
-    click.echo("[4/4] Activating version...")
+    click.echo("[5/5] Activating version...")
 
     if not activate_version(version):
         click.echo("      Activation failed", err=True)
@@ -321,6 +371,44 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
     click.echo(f"      Activated: {version}")
 
     return True
+
+
+def rollback_to_backup(version: str) -> bool:
+    """
+    Perform a full rollback to a version using its backup.
+
+    Restores both code and configuration from the backup archive.
+
+    Args:
+        version: Version to rollback to
+
+    Returns:
+        True if rollback succeeded
+    """
+    # Find backup for this version
+    backup_path = backup.get_backup_for_rollback(version)
+    if not backup_path:
+        click.echo(f"      No backup found for version {version}", err=True)
+        return False
+
+    click.echo(f"      Using backup: {backup_path.name}")
+
+    try:
+        syrvis_home = paths.get_syrvis_home()
+
+        # Restore from backup
+        click.echo("      Restoring configuration and data...")
+        backup.restore_from_backup(backup_path, syrvis_home)
+
+        # Update wrapper and profile
+        paths.create_syrvis_wrapper()
+        paths.create_syrvis_profile()
+
+        return True
+
+    except Exception as e:
+        click.echo(f"      Error during rollback: {e}", err=True)
+        return False
 
 
 def cleanup_old_versions(keep: int = 2, dry_run: bool = False) -> list:

@@ -139,7 +139,7 @@ tests/dsm-sim/
 │   └── synogroup             # Group manager mock
 ├── root/                     # Simulated filesystem
 │   ├── var/packages/syrviscore/target/
-│   ├── volume1/docker/syrviscore/
+│   ├── volume1/syrviscore/
 │   └── usr/local/bin/
 ├── state/                    # Mock state files
 │   ├── docker-status.txt

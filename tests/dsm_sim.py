@@ -61,7 +61,7 @@ class DsmSimulator:
 
         # Key paths within simulation
         self.synopkg_pkgdest = self.root / "var/packages/syrviscore/target"
-        self.syrvis_home = self.root / "volume1/docker/syrviscore"
+        self.syrvis_home = self.root / "volume1/syrviscore"
         self.usr_local_bin = self.root / "usr/local/bin"
         self.docker_sock = self.root / "var/run/docker.sock"
         self.tmp_dir = self.root / "tmp"

@@ -82,7 +82,7 @@ SyrvisCore/
 ### Synology-Specific
 - Target DSM 7.0+
 - Package filename: `syrviscore-{version}.spk`
-- Installation path: `/volume1/docker/syrviscore/`
+- Installation path: `/volume1/syrviscore/`
 - User service account: `syrvis-bot`
 - Requires Docker package on Synology
 

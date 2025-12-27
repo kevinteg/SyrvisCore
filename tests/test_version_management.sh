@@ -40,7 +40,7 @@ info "Resetting simulation environment..."
 export DSM_SIM_ACTIVE=1
 export DSM_SIM_ROOT="$SIM_ROOT"
 export SYNOPKG_PKGDEST="$SIM_ROOT/var/packages/syrviscore/target"
-export SYRVIS_HOME="$SIM_ROOT/volume1/docker/syrviscore"
+export SYRVIS_HOME="$SIM_ROOT/volume1/syrviscore"
 export PATH="$SCRIPT_DIR/dsm-sim/bin:$SIM_ROOT/usr/local/bin:$PATH"
 
 # Get syrvisctl path

@@ -34,7 +34,7 @@ log_info "Clearing SPK installation directory..."
 rm -rf "$SIM_ROOT/var/packages/syrviscore/target/"*
 
 log_info "Clearing SYRVIS_HOME directory..."
-rm -rf "$SIM_ROOT/volume1/docker/syrviscore/"*
+rm -rf "$SIM_ROOT/volume1/syrviscore/"*
 
 log_info "Clearing global symlinks..."
 rm -rf "$SIM_ROOT/usr/local/bin/"*

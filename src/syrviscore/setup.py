@@ -630,7 +630,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
         click.echo(f"      Found: {install_dir}")
     except paths.SyrvisHomeError:
         # No existing installation - use default
-        install_dir = Path("/volume1/docker/syrviscore")
+        install_dir = Path("/volume1/syrviscore")
         click.echo(f"      New installation: {install_dir}")
 
     # Check if already setup

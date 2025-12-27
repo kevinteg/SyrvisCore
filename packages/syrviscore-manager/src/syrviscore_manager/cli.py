@@ -8,10 +8,12 @@ Commands:
     uninstall <version> - Remove a service version
     list                - List installed versions
     activate <version>  - Switch active version
-    rollback            - Switch to previous version
+    rollback [version]  - Rollback to previous version (full restore)
     check               - Check for updates
     info                - Show installation info
     cleanup             - Remove old versions
+    backup              - Backup management commands
+    restore             - Restore from backup
 """
 
 import sys
@@ -24,6 +26,7 @@ from . import paths
 from . import manifest
 from . import downloader
 from . import version_manager
+from . import backup
 
 
 @click.group()
@@ -305,19 +308,70 @@ def activate(version):
 
 
 @cli.command()
-def rollback():
-    """Rollback to the previous version."""
+@click.argument('version', required=False)
+def rollback(version):
+    """Rollback to a previous version (full restore from backup).
+
+    Restores both code AND configuration from the backup archive.
+    This is a complete point-in-time restore.
+
+    If VERSION is not specified, shows available backups to choose from.
+    """
+    click.echo()
+    click.echo("SyrvisCore Rollback")
+    click.echo("=" * 40)
     click.echo()
 
     active = manifest.get_active_version()
-    previous = version_manager.get_previous_version()
+    click.echo(f"Current version: {active}")
+    click.echo()
 
-    if not previous:
-        click.echo("No previous version available for rollback")
+    # List available backups
+    backups = backup.list_backups()
+    if not backups:
+        click.echo("No backups available for rollback")
+        click.echo()
+        click.echo("Backups are created automatically when upgrading.")
         sys.exit(1)
 
-    click.echo(f"Current version: {active}")
-    click.echo(f"Rollback to:     {previous}")
+    click.echo("Available backups:")
+    backup_versions = []
+    for b in backups:
+        if b["version"] == active:
+            continue  # Skip current version
+        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+        date_str = b["created_at"][:10] if b["created_at"] else "unknown"
+        reason = b.get("reason", "unknown")
+        click.echo(f"  {b['version']}{suffix_str} ({date_str}) - {reason}")
+        if b["version"] not in backup_versions:
+            backup_versions.append(b["version"])
+
+    if not backup_versions:
+        click.echo("  (no backups for other versions)")
+        sys.exit(1)
+
+    click.echo()
+
+    # Determine version to rollback to
+    if not version:
+        # Default to most recent backup that isn't current version
+        version = backup_versions[0] if backup_versions else None
+        if not version:
+            click.echo("No version to rollback to", err=True)
+            sys.exit(1)
+
+        version = click.prompt(f"Rollback to version", default=version)
+
+    # Validate version has a backup
+    backup_path = backup.get_backup_for_rollback(version)
+    if not backup_path:
+        click.echo(f"No backup found for version {version}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Rollback to:     {version}")
+    click.echo(f"Using backup:    {backup_path.name}")
+    click.echo()
+    click.echo("This will restore both code AND configuration.")
     click.echo()
 
     if not click.confirm("Proceed with rollback?"):
@@ -326,15 +380,51 @@ def rollback():
 
     click.echo()
     click.echo("Rolling back...")
+    click.echo()
 
-    if version_manager.activate_version(previous):
-        click.echo(f"Rolled back to version {previous}")
-        click.echo()
-        click.echo("You may need to restart services:")
-        click.echo("  syrvis restart")
-    else:
+    click.echo("[1/3] Stopping services...")
+    run_syrvis_stop()
+
+    click.echo("[2/3] Restoring from backup...")
+    if not version_manager.rollback_to_backup(version):
         click.echo("Rollback failed", err=True)
         sys.exit(1)
+
+    click.echo("[3/3] Rollback complete!")
+    click.echo()
+    click.echo(f"Rolled back to version {version}")
+    click.echo()
+    click.echo("Run 'syrvis start' to start services.")
+
+
+def run_syrvis_stop():
+    """Run 'syrvis stop' to stop services."""
+    import subprocess
+    import shutil
+
+    # Find syrvis command
+    syrvis_paths = [
+        paths.get_syrvis_home() / "bin" / "syrvis",
+        paths.get_syrvis_home() / "current" / "cli" / "venv" / "bin" / "syrvis",
+    ]
+
+    syrvis_cmd = None
+    for p in syrvis_paths:
+        try:
+            if p.exists():
+                syrvis_cmd = str(p)
+                break
+        except Exception:
+            pass
+
+    if not syrvis_cmd:
+        syrvis_cmd = shutil.which("syrvis")
+
+    if syrvis_cmd:
+        try:
+            subprocess.run([syrvis_cmd, "stop"], capture_output=True, timeout=60)
+        except Exception:
+            pass
 
 
 @cli.command()
@@ -588,6 +678,252 @@ def migrate(from_legacy, dry_run):
     click.echo()
     click.echo("Your existing installation has been migrated.")
     click.echo("You can now use 'syrvisctl' to manage versions.")
+
+
+# =============================================================================
+# Backup Commands
+# =============================================================================
+
+@cli.group('backup')
+def backup_group():
+    """Backup management commands."""
+    pass
+
+
+@backup_group.command('list')
+def backup_list():
+    """List available backups."""
+    click.echo()
+    click.echo("Available backups:")
+    click.echo()
+
+    backups = backup.list_backups()
+    if not backups:
+        click.echo("  No backups found")
+        click.echo()
+        click.echo("Backups are created automatically when upgrading,")
+        click.echo("or manually with 'syrvisctl backup create'.")
+        return
+
+    click.echo(f"  {'Version':<12} {'Date':<12} {'Size':<10} {'Reason':<12}")
+    click.echo(f"  {'-'*12} {'-'*12} {'-'*10} {'-'*12}")
+
+    for b in backups:
+        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+        version_str = f"{b['version']}{suffix_str}"
+        date_str = b["created_at"][:10] if b["created_at"] else "unknown"
+        size_mb = b["size"] / (1024 * 1024)
+        size_str = f"{size_mb:.1f} MB"
+        reason = b.get("reason", "unknown")
+        click.echo(f"  {version_str:<12} {date_str:<12} {size_str:<10} {reason:<12}")
+
+    click.echo()
+    try:
+        click.echo(f"Location: {backup.get_backups_dir()}")
+    except paths.SyrvisHomeError:
+        pass
+
+
+@backup_group.command('create')
+@click.option('--output', '-o', type=click.Path(), help='Output path for backup file')
+@click.option('--reason', type=click.Choice(['manual', 'post-setup']), default='manual',
+              help='Reason for backup (affects naming)')
+def backup_create(output, reason):
+    """Create a manual backup of the current state.
+
+    Use this to create a backup for off-NAS storage or before
+    making manual configuration changes.
+    """
+    click.echo()
+    click.echo("Creating backup...")
+    click.echo()
+
+    active = manifest.get_active_version()
+    if not active:
+        click.echo("No active version to backup", err=True)
+        sys.exit(1)
+
+    click.echo(f"  Version: {active}")
+
+    try:
+        if reason == "post-setup":
+            # Post-setup backups use -N suffix
+            backup_path = backup.create_post_setup_backup(active)
+        else:
+            # Manual backups go to specified output or default location
+            output_path = Path(output) if output else None
+            backup_path = backup.create_backup(
+                output_path=output_path,
+                version=active,
+                reason="manual",
+            )
+        click.echo(f"  Output:  {backup_path}")
+        click.echo()
+
+        size_mb = backup_path.stat().st_size / (1024 * 1024)
+        click.echo(f"Backup complete: {backup_path.name} ({size_mb:.1f} MB)")
+
+    except Exception as e:
+        click.echo(f"Backup failed: {e}", err=True)
+        sys.exit(1)
+
+
+@backup_group.command('cleanup')
+@click.option('--keep', default=3, help='Number of versions to keep backups for')
+@click.option('--dry-run', is_flag=True, help='Show what would be deleted')
+def backup_cleanup(keep, dry_run):
+    """Remove old backups to free disk space.
+
+    Keeps all backups for the N most recent versions (default: 3).
+    """
+    click.echo()
+
+    to_delete = backup.cleanup_old_backups(keep_versions=keep, dry_run=True)
+
+    if not to_delete:
+        click.echo(f"No backups to remove (keeping {keep} versions)")
+        return
+
+    click.echo(f"Backups to remove ({len(to_delete)}):")
+    for path in to_delete:
+        click.echo(f"  {path.name}")
+
+    if dry_run:
+        click.echo()
+        click.echo("Dry run - no changes made")
+        return
+
+    click.echo()
+    if not click.confirm("Proceed with cleanup?"):
+        click.echo("Cleanup cancelled")
+        return
+
+    deleted = backup.cleanup_old_backups(keep_versions=keep, dry_run=False)
+    click.echo()
+    click.echo(f"Removed {len(deleted)} backup(s)")
+
+
+@cli.command()
+@click.argument('backup_file', required=False, type=click.Path(exists=True))
+@click.option('--path', type=click.Path(), help='Installation path')
+@click.option('-y', '--yes', is_flag=True, help='Skip confirmation')
+def restore(backup_file, path, yes):
+    """Restore from a backup archive.
+
+    Use this for disaster recovery after a fresh DSM install.
+    Restores configuration, data, and installs the version from backup.
+
+    If BACKUP_FILE is not specified, shows available backups to choose from.
+    """
+    click.echo()
+    click.echo("SyrvisCore Restore")
+    click.echo("=" * 40)
+    click.echo()
+
+    # If no backup file specified, try to list available backups
+    if not backup_file:
+        try:
+            backups = backup.list_backups()
+            if backups:
+                click.echo("Available backups:")
+                click.echo()
+                for i, b in enumerate(backups, 1):
+                    suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+                    date_str = b["created_at"][:10] if b["created_at"] else "unknown"
+                    click.echo(f"  {i}. {b['version']}{suffix_str} ({date_str}) - {b['path']}")
+                click.echo()
+
+                choice = click.prompt("Select backup (number)", type=int, default=1)
+                if 1 <= choice <= len(backups):
+                    backup_file = str(backups[choice - 1]["path"])
+                else:
+                    click.echo("Invalid selection", err=True)
+                    sys.exit(1)
+            else:
+                click.echo("No backups found in default location")
+                click.echo()
+                click.echo("Specify a backup file path:")
+                click.echo("  syrvisctl restore /path/to/backup.tar.gz")
+                sys.exit(1)
+        except paths.SyrvisHomeError:
+            click.echo("No existing installation found")
+            click.echo()
+            click.echo("Specify a backup file path:")
+            click.echo("  syrvisctl restore /path/to/backup.tar.gz")
+            sys.exit(1)
+
+    backup_path = Path(backup_file)
+    click.echo(f"Backup file: {backup_path}")
+
+    # Read backup metadata
+    import tarfile
+    import json
+
+    try:
+        with tarfile.open(backup_path, "r:gz") as tar:
+            meta_file = tar.extractfile("backup-metadata.json")
+            if meta_file:
+                metadata = json.loads(meta_file.read().decode())
+            else:
+                click.echo("Backup file missing metadata", err=True)
+                sys.exit(1)
+    except Exception as e:
+        click.echo(f"Could not read backup: {e}", err=True)
+        sys.exit(1)
+
+    version = metadata.get("version", "unknown")
+    created_at = metadata.get("created_at", "unknown")[:10]
+    original_path = metadata.get("syrvis_home", "/volume1/syrviscore")
+
+    click.echo(f"Version:     {version}")
+    click.echo(f"Created:     {created_at}")
+    click.echo(f"Original:    {original_path}")
+    click.echo()
+
+    # Determine install path
+    if path:
+        install_path = Path(path)
+    else:
+        install_path = Path(original_path)
+        if not yes:
+            user_path = click.prompt(f"Install path [{install_path}]",
+                                     default=str(install_path), show_default=False)
+            install_path = Path(user_path)
+
+    click.echo(f"Restore to:  {install_path}")
+    click.echo()
+
+    if not yes:
+        if not click.confirm("Proceed with restore?"):
+            click.echo("Restore cancelled")
+            return
+
+    click.echo()
+    click.echo("Restoring...")
+    click.echo()
+
+    try:
+        click.echo("[1/3] Extracting backup...")
+        backup.restore_from_backup(backup_path, install_path)
+
+        click.echo("[2/3] Creating wrapper scripts...")
+        import os
+        os.environ["SYRVIS_HOME"] = str(install_path)
+        paths.create_syrvis_wrapper()
+        paths.create_syrvis_profile()
+
+        click.echo("[3/3] Restore complete!")
+        click.echo()
+        click.echo(f"Restored version {version} to {install_path}")
+        click.echo()
+        click.echo("Next steps:")
+        click.echo(f"  1. Source the profile: source {install_path}/syrvis.profile")
+        click.echo("  2. Run diagnostics: syrvis doctor")
+        click.echo("  3. Start services: syrvis start")
+
+    except Exception as e:
+        click.echo(f"Restore failed: {e}", err=True)
+        sys.exit(1)
 
 
 def main():

@@ -4,7 +4,7 @@ Path management for SyrvisCore.
 Handles versioned directory structure and provides helpers for common paths.
 
 Directory Structure (v2):
-    /volume1/docker/syrviscore/
+    /volume1/syrviscore/
     ├── current -> versions/0.1.0/     # Symlink to active version
     ├── versions/
     │   ├── 0.0.1/                     # Previous version (rollback target)
@@ -57,7 +57,7 @@ def get_syrvis_home() -> Path:
 
     Tries multiple strategies:
     1. SYRVIS_HOME environment variable
-    2. Default location /volume1/docker/syrviscore
+    2. Default location /volume1/syrviscore
     3. Search other volumes (volume2-volume9)
     4. Derive from script location
 
@@ -75,13 +75,13 @@ def get_syrvis_home() -> Path:
             return syrvis_path
 
     # Strategy 2: Default location
-    default = Path("/volume1/docker/syrviscore")
+    default = Path("/volume1/syrviscore")
     if default.exists() and (default / ".syrviscore-manifest.json").exists():
         return default
 
     # Strategy 3: Search other volumes
     for vol_num in range(2, 10):
-        candidate = Path(f"/volume{vol_num}/docker/syrviscore")
+        candidate = Path(f"/volume{vol_num}/syrviscore")
         if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
             return candidate
 

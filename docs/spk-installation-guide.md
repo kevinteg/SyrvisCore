@@ -101,7 +101,7 @@ syrvis status
 
 ```bash
 # Check directory structure
-ls -la /volumeX/docker/syrviscore/
+ls -la /volumeX/syrviscore/
 
 # Expected:
 # current -> versions/0.x.x/   (symlink to active version)
@@ -287,13 +287,13 @@ syrvisctl install [version]
 2. Find SyrvisCore
 3. Click Uninstall
 
-**Note:** Data is preserved by default in `/volumeX/docker/syrviscore/`
+**Note:** Data is preserved by default in `/volumeX/syrviscore/`
 
 ### Complete Removal
 
 ```bash
 # After uninstalling SPK
-sudo rm -rf /volumeX/docker/syrviscore
+sudo rm -rf /volumeX/syrviscore
 ```
 
 ## Backup and Restore
@@ -301,19 +301,19 @@ sudo rm -rf /volumeX/docker/syrviscore
 ### Backup
 
 ```bash
-cd /volumeX/docker
-tar -czf syrviscore-backup-$(date +%Y%m%d).tar.gz \
-    syrviscore/config/ \
-    syrviscore/data/ \
-    syrviscore/.syrviscore-manifest.json
+cd /volumeX/syrviscore
+tar -czf ~/syrviscore-backup-$(date +%Y%m%d).tar.gz \
+    config/ \
+    data/ \
+    .syrviscore-manifest.json
 ```
 
 ### Restore
 
 ```bash
 # Install SyrvisCore first, then restore data
-cd /volumeX/docker/syrviscore
-sudo tar -xzf /path/to/backup.tar.gz --strip-components=1
+cd /volumeX/syrviscore
+sudo tar -xzf /path/to/backup.tar.gz
 ```
 
 ## Security Notes

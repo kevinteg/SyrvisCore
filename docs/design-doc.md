@@ -68,7 +68,7 @@ The architecture separates concerns between two packages:
 ├── wheels/                            # Bundled Python dependencies
 └── syrviscore_manager-*.whl
 
-/volumeX/docker/syrviscore/            # SYRVIS_HOME (managed by syrvisctl)
+/volumeX/syrviscore/                   # SYRVIS_HOME (managed by syrvisctl)
 ├── current -> versions/0.2.0          # Symlink to active version
 ├── versions/
 │   ├── 0.1.0/cli/venv/bin/syrvis      # Previous version
@@ -153,7 +153,7 @@ The system uses environment variables set during installation:
 | Variable | Source | Description |
 |----------|--------|-------------|
 | `SYNOPKG_PKGDEST` | DSM | SPK installation directory |
-| `SYRVIS_HOME` | Wizard | Service data directory (e.g., `/volume1/docker/syrviscore`) |
+| `SYRVIS_HOME` | Wizard | Service data directory (e.g., `/volume1/syrviscore`) |
 | `PACKAGE_NAME` | DSM | Always `syrviscore` |
 
 ### Manifest File
@@ -164,7 +164,7 @@ The manifest (`.syrviscore-manifest.json`) tracks installation state:
 {
   "schema_version": 3,
   "active_version": "0.2.0",
-  "install_path": "/volume1/docker/syrviscore",
+  "install_path": "/volume1/syrviscore",
   "setup_complete": true,
   "versions": {
     "0.1.0": { "status": "available", "installed_at": "..." },

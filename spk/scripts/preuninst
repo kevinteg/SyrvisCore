@@ -49,8 +49,8 @@ log_info "  Working directory: $(pwd)"
 log_info "[1/3] Detecting installation directory..."
 INSTALL_DIR=""
 for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
-    if [ -f "${VOLUME}/docker/syrviscore/.syrviscore-manifest.json" ]; then
-        INSTALL_DIR="${VOLUME}/docker/syrviscore"
+    if [ -f "${VOLUME}/syrviscore/.syrviscore-manifest.json" ]; then
+        INSTALL_DIR="${VOLUME}/syrviscore"
         log_info "  Found installation at: $INSTALL_DIR"
         break
     fi

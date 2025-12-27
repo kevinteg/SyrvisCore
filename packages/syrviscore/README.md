@@ -49,7 +49,7 @@ syrvis compose generate  # Generate docker-compose.yaml
 
 ## Configuration
 
-Configuration is stored in `/volumeX/docker/syrviscore/config/.env`.
+Configuration is stored in `/volumeX/syrviscore/config/.env`.
 
 Key settings:
 - `DOMAIN`: Your domain name
@@ -60,7 +60,7 @@ Key settings:
 ## Directory Structure
 
 ```
-/volumeX/docker/syrviscore/
+/volumeX/syrviscore/
 ├── current -> versions/0.2.0      # Active version
 ├── versions/                      # Installed versions
 │   └── 0.2.0/

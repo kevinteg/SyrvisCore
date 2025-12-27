@@ -163,7 +163,7 @@ SyrvisCore Installation Info
 ============================
 Manager version:  0.1.0
 Service version:  0.2.0 (active)
-Install path:     /volume1/docker/syrviscore
+Install path:     /volume1/syrviscore
 Setup complete:   yes
 
 Installed versions: 2

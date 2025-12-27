@@ -45,7 +45,7 @@ export PATH="$SCRIPT_DIR/bin:$PATH"
 
 # Set DSM-specific environment variables
 export SYNOPKG_PKGDEST="$SIM_ROOT/var/packages/syrviscore/target"
-export SYRVIS_HOME="$SIM_ROOT/volume1/docker/syrviscore"
+export SYRVIS_HOME="$SIM_ROOT/volume1/syrviscore"
 export PACKAGE_NAME="syrviscore"
 
 # Wizard variables (default test values, can be overridden)
