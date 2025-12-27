@@ -1,7 +1,7 @@
 package="syrviscore"
 version="0.1.19"
 displayname="SyrvisCore"
-description="Self-hosted infrastructure platform with Traefik, Portainer, and Cloudflared. INSTALLATION: After installing this package, run: sudo syrvis setup --interactive"
+description="Bootstrapper for SyrvisCore (Traefik + Portainer + Cloudflared). SSH in and run: 1) source /var/packages/syrviscore/target/syrviscore.profile 2) syrvisctl install 3) sudo syrvis setup 4) syrvis doctor"
 maintainer="Kevin Tegtmeier"
 maintainer_url="https://github.com/kevinteg/SyrvisCore"
 support_url="https://github.com/kevinteg/SyrvisCore/issues"
