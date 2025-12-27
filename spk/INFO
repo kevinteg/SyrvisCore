@@ -1,5 +1,5 @@
 package="syrviscore"
-version="0.0.1"
+version="0.1.17"
 displayname="SyrvisCore"
 description="Self-hosted infrastructure platform with Traefik, Portainer, and Cloudflared. INSTALLATION: After installing this package, run: sudo syrvis setup --interactive"
 maintainer="Kevin Tegtmeier"

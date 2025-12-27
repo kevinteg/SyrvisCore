@@ -42,15 +42,24 @@ log_info "Project root: $PROJECT_ROOT"
 # Change to project root
 cd "$PROJECT_ROOT"
 
-# Read version from manager package
-VERSION_FILE="$MANAGER_DIR/src/syrviscore_manager/__version__.py"
-if [ ! -f "$VERSION_FILE" ]; then
-    log_error "Version file not found: $VERSION_FILE"
+# Read version from SERVICE package (unified versioning)
+# The SPK version matches the service version for unified releases
+SERVICE_VERSION_FILE="$PROJECT_ROOT/packages/syrviscore/src/syrviscore/__version__.py"
+MANAGER_VERSION_FILE="$MANAGER_DIR/src/syrviscore_manager/__version__.py"
+
+if [ ! -f "$SERVICE_VERSION_FILE" ]; then
+    log_error "Service version file not found: $SERVICE_VERSION_FILE"
     exit 1
 fi
 
-VERSION=$(grep '^__version__' "$VERSION_FILE" | cut -d'"' -f2)
-log_info "Building version: $VERSION"
+if [ ! -f "$MANAGER_VERSION_FILE" ]; then
+    log_error "Manager version file not found: $MANAGER_VERSION_FILE"
+    exit 1
+fi
+
+VERSION=$(grep '^__version__' "$SERVICE_VERSION_FILE" | cut -d'"' -f2)
+MANAGER_VERSION=$(grep '^__version__' "$MANAGER_VERSION_FILE" | cut -d'"' -f2)
+log_info "Building SPK version: $VERSION (contains manager $MANAGER_VERSION)"
 
 # Define paths
 SPK_DIR="$PROJECT_ROOT/spk"
@@ -334,9 +343,10 @@ log_success "SPK package built successfully!"
 log_success "=========================================="
 log_info "Package: $DIST_DIR/$PACKAGE_NAME"
 log_info "Version: $VERSION"
+log_info "Manager: $MANAGER_VERSION"
 log_info "Size: $SPK_SIZE"
 log_info ""
-log_info "This SPK contains the SyrvisCore Manager (syrvisctl)."
+log_info "This SPK contains the SyrvisCore Manager (syrvisctl $MANAGER_VERSION)."
 log_info "After installation, users run 'syrvisctl install' to install the service."
 log_info ""
 log_info "Next steps:"
