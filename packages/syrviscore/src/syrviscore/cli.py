@@ -1,4 +1,4 @@
-"""SyrvisCore CLI - Service management entry point."""
+"""SyrvisCore CLI - Main entry point."""
 
 import click
 from dotenv import load_dotenv
@@ -13,6 +13,8 @@ from syrviscore.traefik_config import (
 )
 from syrviscore.setup import setup
 from syrviscore.doctor import doctor
+from syrviscore.update import update
+from syrviscore import privilege
 
 
 @click.group()
@@ -25,6 +27,7 @@ def cli():
 # Register command groups
 cli.add_command(setup)
 cli.add_command(doctor)
+cli.add_command(update)
 
 
 # =============================================================================
@@ -33,7 +36,7 @@ cli.add_command(doctor)
 
 @cli.command()
 def status():
-    """Show status of all services."""
+    """Show status of all services (alias for 'core status')."""
     try:
         manager = DockerManager()
         statuses = manager.get_container_status()
@@ -80,7 +83,7 @@ def status():
 @click.option("--follow", "-f", is_flag=True, help="Follow log output")
 @click.option("--tail", "-n", default=100, help="Number of lines to show")
 def logs(service, follow, tail):
-    """View service logs."""
+    """View service logs (alias for 'core logs')."""
     try:
         manager = DockerManager()
 
@@ -110,7 +113,8 @@ def logs(service, follow, tail):
 
 @cli.command()
 def start():
-    """Start all services."""
+    """Start all services (alias for 'core start')."""
+    privilege.ensure_elevated("Starting services requires elevated privileges.")
     try:
         click.echo("Starting services...")
         manager = DockerManager()
@@ -133,7 +137,8 @@ def start():
 
 @cli.command()
 def stop():
-    """Stop all services."""
+    """Stop all services (alias for 'core stop')."""
+    privilege.ensure_elevated("Stopping services requires elevated privileges.")
     try:
         click.echo("Stopping services...")
         manager = DockerManager()
@@ -155,7 +160,8 @@ def stop():
 
 @cli.command()
 def restart():
-    """Restart all services."""
+    """Restart all services (alias for 'core restart')."""
+    privilege.ensure_elevated("Restarting services requires elevated privileges.")
     try:
         click.echo("Restarting services...")
         manager = DockerManager()
@@ -173,6 +179,145 @@ def restart():
         raise click.Abort()
     except Exception as e:
         click.echo(f"Failed to restart services: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.command()
+@click.option("--volumes", "-v", is_flag=True, help="Also remove named volumes")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def clean(volumes, yes):
+    """Remove all SyrvisCore containers and networks.
+
+    Useful for cleaning up before reinstall or when containers/networks
+    are in a bad state. This stops and removes:
+    - traefik, portainer, cloudflared containers
+    - proxy and syrvis-macvlan networks
+    """
+    privilege.ensure_elevated("Cleaning up containers requires elevated privileges.")
+
+    if not yes:
+        msg = "This will remove all SyrvisCore containers and networks."
+        if volumes:
+            msg += " Named volumes will also be removed."
+        click.echo(msg)
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    try:
+        click.echo("Cleaning up containers and networks...")
+        manager = DockerManager()
+        results = manager.clean_core_services(remove_volumes=volumes)
+
+        click.echo()
+        click.echo("Cleanup Results:")
+
+        # Show containers
+        if results.get("containers_stopped"):
+            click.echo(f"  Containers stopped: {', '.join(results['containers_stopped'])}")
+        else:
+            click.echo(f"  Containers stopped: (none)")
+
+        # Show networks
+        if results.get("networks_cleaned"):
+            click.echo(f"  Networks removed:   {', '.join(results['networks_cleaned'])}")
+        else:
+            click.echo(f"  Networks removed:   (none)")
+
+        # Show volumes if requested
+        if volumes:
+            if results.get("volumes_cleaned"):
+                click.echo(f"  Volumes removed:    {', '.join(results['volumes_cleaned'])}")
+            else:
+                click.echo(f"  Volumes removed:    (none)")
+
+        if results["errors"]:
+            click.echo()
+            click.echo("Warnings:", err=True)
+            for error in results["errors"]:
+                click.echo(f"  - {error}", err=True)
+
+        click.echo()
+        click.echo("Cleanup complete")
+
+    except DockerConnectionError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to clean: {e}", err=True)
+        raise click.Abort()
+
+
+@cli.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def reset(yes):
+    """Clean everything and start services fresh.
+
+    This is the nuclear option - removes all containers and networks,
+    then starts services from scratch. Useful when:
+    - Reinstalling after an update
+    - Containers/networks are in a broken state
+    - Port conflicts or network issues
+
+    Unlike 'setup', this does NOT reconfigure anything - it just restarts
+    the existing configuration. Use 'setup' if you need to change settings.
+    """
+    privilege.ensure_elevated("Resetting services requires elevated privileges.")
+
+    if not yes:
+        click.echo()
+        click.echo("RESET: Restart services from scratch (keeps existing configuration)")
+        click.echo("-" * 60)
+        click.echo("This will:")
+        click.echo(f"  1. Stop and remove containers: {', '.join(DockerManager.CORE_SERVICES)}")
+        click.echo("  2. Remove Docker networks (proxy, syrvis-macvlan)")
+        click.echo("  3. Recreate macvlan shim for host-to-container communication")
+        click.echo("  4. Start all services fresh")
+        click.echo()
+        click.echo("Your configuration (.env) and certificates (acme.json) are preserved.")
+        click.echo()
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    try:
+        click.echo()
+        click.echo("Resetting services...")
+        click.echo()
+        click.echo("[1/2] Cleaning up...")
+        manager = DockerManager()
+        results = manager.reset_core_services()
+
+        # Show what was stopped/removed
+        if results.get("containers_stopped"):
+            click.echo(f"      Stopped: {', '.join(results['containers_stopped'])}")
+        if results.get("networks_cleaned"):
+            click.echo(f"      Removed networks: {', '.join(results['networks_cleaned'])}")
+
+        if results["errors"]:
+            click.echo("      Warnings:", err=True)
+            for error in results["errors"]:
+                click.echo(f"        - {error}", err=True)
+
+        click.echo()
+        click.echo("[2/2] Starting services...")
+        # Show what's being started
+        click.echo(f"      Starting: {', '.join(DockerManager.CORE_SERVICES)}")
+
+        click.echo()
+        click.echo("Reset complete. Run 'syrvis status' to verify.")
+
+    except SyrvisHomeError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except DockerConnectionError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except DockerError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to reset: {e}", err=True)
         raise click.Abort()
 
 
@@ -219,24 +364,24 @@ def generate(config, output):
         load_dotenv()
 
         click.echo(f"Reading build config from: {config}")
-        compose_data = generate_compose_from_config(config_path=config, output_path=output)
+        compose = generate_compose_from_config(config_path=config, output_path=output)
 
         click.echo(f"Generated docker-compose.yaml at: {output}")
         click.echo()
         click.echo("Services configured:")
-        for service_name in compose_data["services"].keys():
-            service = compose_data["services"][service_name]
+        for service_name in compose["services"].keys():
+            service = compose["services"][service_name]
             click.echo(f"  {service_name:<15} {service['image']}")
 
         # Show Traefik's dedicated IP
-        traefik_networks = compose_data["services"]["traefik"]["networks"]
+        traefik_networks = compose["services"]["traefik"]["networks"]
         if isinstance(traefik_networks, dict) and "syrvis-macvlan" in traefik_networks:
             traefik_ip = traefik_networks["syrvis-macvlan"]["ipv4_address"]
             click.echo()
             click.echo("Network Configuration:")
             click.echo(f"  Traefik IP: {traefik_ip}")
             click.echo(
-                f"  Interface:  {compose_data['networks']['syrvis-macvlan']['driver_opts']['parent']}"
+                f"  Interface:  {compose['networks']['syrvis-macvlan']['driver_opts']['parent']}"
             )
 
         click.echo()
@@ -263,6 +408,7 @@ def core():
 @core.command('start')
 def core_start():
     """Start core services."""
+    privilege.ensure_elevated("Starting services requires elevated privileges.")
     try:
         click.echo("Starting core services...")
         manager = DockerManager()
@@ -289,6 +435,7 @@ def core_start():
 @core.command('stop')
 def core_stop():
     """Stop core services."""
+    privilege.ensure_elevated("Stopping services requires elevated privileges.")
     try:
         click.echo("Stopping core services...")
         manager = DockerManager()
@@ -314,6 +461,7 @@ def core_stop():
 @core.command('restart')
 def core_restart():
     """Restart core services."""
+    privilege.ensure_elevated("Restarting services requires elevated privileges.")
     try:
         click.echo("Restarting core services...")
         manager = DockerManager()

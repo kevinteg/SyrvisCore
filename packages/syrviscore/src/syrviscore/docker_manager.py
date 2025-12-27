@@ -10,9 +10,11 @@ from typing import Dict, List, Optional
 
 import docker
 from docker.errors import DockerException
+from dotenv import load_dotenv
 
 from syrviscore.paths import (
     get_docker_compose_path,
+    get_env_path,
     get_syrvis_home,
     validate_docker_compose_exists,
 )
@@ -126,6 +128,9 @@ class DockerManager:
 
         This method is idempotent and safe to call multiple times.
         """
+        # Load .env to get DOMAIN, ACME_EMAIL etc for traefik config
+        load_dotenv(get_env_path(), override=True)
+
         syrvis_home = get_syrvis_home()
         traefik_data = syrvis_home / "data" / "traefik"
 
@@ -152,11 +157,45 @@ class DockerManager:
             acme_file.touch()
             acme_file.chmod(0o600)
 
+    def _ensure_macvlan_shim(self) -> None:
+        """
+        Ensure macvlan shim interface exists for host-to-container communication.
+
+        This is required because macvlan containers cannot communicate with
+        their host directly. The shim allows Traefik to reach NAS services.
+        """
+        import os
+        from . import privileged_ops
+
+        # Get network settings from environment
+        interface = os.getenv("NETWORK_INTERFACE", "")
+        traefik_ip = os.getenv("TRAEFIK_IP", "")
+        shim_ip = os.getenv("SHIM_IP", "")
+
+        if not interface or not traefik_ip:
+            return  # Skip if not configured
+
+        # If SHIM_IP not set, calculate from traefik_ip + 1 for backwards compatibility
+        if not shim_ip:
+            try:
+                parts = traefik_ip.split('.')
+                last_octet = int(parts[3])
+                shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
+            except (IndexError, ValueError):
+                return  # Skip if IP format is unexpected
+
+        # Create shim (requires root, but we're already elevated for Docker)
+        ok, msg = privileged_ops.ensure_macvlan_shim(interface, traefik_ip, shim_ip)
+        if not ok:
+            # Log warning but don't fail - services might still work
+            import sys
+            print(f"Warning: {msg}", file=sys.stderr)
+
     def start_core_services(self) -> None:
         """
         Start core services using docker-compose.
 
-        Creates required Traefik files before starting services.
+        Creates required Traefik files and macvlan shim before starting services.
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
@@ -164,6 +203,9 @@ class DockerManager:
         """
         # Create required Traefik files
         self._create_traefik_files()
+
+        # Ensure macvlan shim exists for host-to-container communication
+        self._ensure_macvlan_shim()
 
         # Start services
         self._run_compose_command(["up", "-d"])
@@ -177,6 +219,140 @@ class DockerManager:
             DockerError: If docker-compose fails
         """
         self._run_compose_command(["stop"])
+
+    def clean_core_services(self, remove_volumes: bool = False) -> dict:
+        """
+        Remove all SyrvisCore containers and networks.
+
+        This is useful for cleaning up before reinstall or when containers/networks
+        are in a bad state.
+
+        Args:
+            remove_volumes: If True, also remove named volumes
+
+        Returns:
+            Dictionary with counts of removed resources
+
+        Raises:
+            DockerConnectionError: If Docker daemon unreachable
+        """
+        results = {
+            "containers_removed": 0,
+            "containers_stopped": [],  # List of stopped container names
+            "networks_removed": 0,
+            "networks_cleaned": [],  # List of removed network names
+            "volumes_removed": 0,
+            "volumes_cleaned": [],  # List of removed volume names
+            "errors": [],
+        }
+
+        # Stop and remove containers by name (more reliable than compose labels)
+        for container_name in self.CORE_SERVICES:
+            try:
+                container = self.client.containers.get(container_name)
+                container.stop(timeout=10)
+                container.remove(force=True)
+                results["containers_removed"] += 1
+                results["containers_stopped"].append(container_name)
+            except docker.errors.NotFound:
+                pass  # Container doesn't exist
+            except Exception as e:
+                results["errors"].append(f"Container {container_name}: {e}")
+
+        # Also try to get containers by compose project label (catches renamed containers)
+        try:
+            containers = self.client.containers.list(
+                all=True,
+                filters={"label": f"com.docker.compose.project={self.PROJECT_NAME}"},
+            )
+            for container in containers:
+                try:
+                    container_name = container.name
+                    container.stop(timeout=10)
+                    container.remove(force=True)
+                    results["containers_removed"] += 1
+                    if container_name not in results["containers_stopped"]:
+                        results["containers_stopped"].append(container_name)
+                except Exception as e:
+                    results["errors"].append(f"Container {container.name}: {e}")
+        except Exception as e:
+            results["errors"].append(f"Listing containers: {e}")
+
+        # Remove networks - try various naming patterns
+        network_patterns = [
+            "proxy",
+            "syrvis-macvlan",
+            f"{self.PROJECT_NAME}_syrvis-macvlan",
+            f"{self.PROJECT_NAME}_proxy",
+            "config_syrvis-macvlan",  # Old naming pattern
+            "config_proxy",
+        ]
+
+        for network_name in network_patterns:
+            try:
+                network = self.client.networks.get(network_name)
+                # Disconnect any remaining containers first
+                try:
+                    network.reload()
+                    for container_id in network.attrs.get("Containers", {}).keys():
+                        try:
+                            network.disconnect(container_id, force=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                network.remove()
+                results["networks_removed"] += 1
+                results["networks_cleaned"].append(network_name)
+            except docker.errors.NotFound:
+                pass  # Network doesn't exist
+            except Exception as e:
+                # Only log error if it's not a "not found" type error
+                if "not found" not in str(e).lower():
+                    results["errors"].append(f"Network {network_name}: {e}")
+
+        # Optionally remove volumes
+        if remove_volumes:
+            volume_patterns = [
+                f"{self.PROJECT_NAME}_traefik_data",
+                f"{self.PROJECT_NAME}_portainer_data",
+            ]
+            for volume_name in volume_patterns:
+                try:
+                    volume = self.client.volumes.get(volume_name)
+                    volume.remove(force=True)
+                    results["volumes_removed"] += 1
+                    results["volumes_cleaned"].append(volume_name)
+                except docker.errors.NotFound:
+                    pass
+                except Exception as e:
+                    results["errors"].append(f"Volume {volume_name}: {e}")
+
+        return results
+
+    def reset_core_services(self) -> dict:
+        """
+        Clean all containers/networks and start fresh.
+
+        This is the nuclear option - removes everything and starts from scratch.
+        Useful when reinstalling or when things are in a broken state.
+
+        Returns:
+            Dictionary with clean results and start status
+
+        Raises:
+            DockerConnectionError: If Docker daemon unreachable
+            DockerError: If start fails after clean
+        """
+        # First clean everything
+        clean_results = self.clean_core_services()
+
+        # Now start fresh
+        self._create_traefik_files()
+        self._run_compose_command(["up", "-d"])
+
+        clean_results["started"] = True
+        return clean_results
 
     def restart_core_services(self) -> None:
         """

@@ -225,8 +225,10 @@ def create_backup(
 
     # Determine output path
     if output_path is None:
-        ensure_backups_dir()
         output_path = get_backup_path(version, suffix)
+
+    # Always ensure parent directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Build metadata
     metadata = {

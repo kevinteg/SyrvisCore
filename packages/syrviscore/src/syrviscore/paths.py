@@ -1,13 +1,13 @@
 """
-Path management for SyrvisCore service.
+Path management for SyrvisCore.
 
 Handles versioned directory structure and provides helpers for common paths.
 
-Directory Structure:
-    /volumeX/syrviscore/
+Directory Structure (v2):
+    /volume1/syrviscore/
     ├── current -> versions/0.1.0/     # Symlink to active version
     ├── versions/
-    │   ├── 0.0.1/                     # Previous version
+    │   ├── 0.0.1/                     # Previous version (rollback target)
     │   └── 0.1.0/                     # Current active version
     ├── config/                        # Shared configuration
     │   ├── .env
@@ -30,7 +30,25 @@ class SyrvisHomeError(Exception):
 
 
 # Schema version for manifest compatibility
-MANIFEST_SCHEMA_VERSION = 3
+MANIFEST_SCHEMA_VERSION = 2
+
+
+# =============================================================================
+# Simulation Mode Support
+# =============================================================================
+
+def is_simulation_mode() -> bool:
+    """Check if running in DSM simulation mode."""
+    return os.environ.get("DSM_SIM_ACTIVE") == "1"
+
+
+def get_sim_root() -> Optional[Path]:
+    """Get simulation root path if in simulation mode."""
+    if is_simulation_mode():
+        sim_root = os.environ.get("DSM_SIM_ROOT")
+        if sim_root:
+            return Path(sim_root)
+    return None
 
 
 def get_syrvis_home() -> Path:
@@ -39,7 +57,7 @@ def get_syrvis_home() -> Path:
 
     Tries multiple strategies:
     1. SYRVIS_HOME environment variable
-    2. Default location /volume1/docker/syrviscore
+    2. Default location /volume1/syrviscore
     3. Search other volumes (volume2-volume9)
     4. Derive from script location
 
@@ -85,7 +103,7 @@ def get_syrvis_home() -> Path:
 
 
 # =============================================================================
-# Versioned Directory Structure
+# Versioned Directory Structure (v2)
 # =============================================================================
 
 def get_versions_dir() -> Path:
@@ -265,6 +283,7 @@ def get_manifest() -> Dict[str, Any]:
     Raises:
         SyrvisHomeError: If SYRVIS_HOME cannot be determined
         FileNotFoundError: If manifest file doesn't exist
+        json.JSONDecodeError: If manifest is invalid JSON
     """
     manifest_path = get_manifest_path()
     if not manifest_path.exists():
@@ -273,15 +292,35 @@ def get_manifest() -> Dict[str, Any]:
     return json.loads(manifest_path.read_text())
 
 
-def save_manifest(manifest: Dict[str, Any]) -> None:
+def create_manifest(
+    version: str,
+    install_path: Path,
+) -> Dict[str, Any]:
     """
-    Save manifest to disk.
+    Create a new manifest with default values.
 
     Args:
-        manifest: Complete manifest dictionary to save
+        version: The version being installed
+        install_path: Path to SYRVIS_HOME
+
+    Returns:
+        New manifest dictionary
     """
-    manifest_path = get_manifest_path()
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    return {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "active_version": version,
+        "install_path": str(install_path),
+        "setup_complete": False,
+        "created_at": datetime.now().isoformat(),
+        "versions": {
+            version: {
+                "installed_at": datetime.now().isoformat(),
+                "status": "active",
+            }
+        },
+        "update_history": [],
+        "privileged_setup": {},
+    }
 
 
 def update_manifest(updates: Dict[str, Any]) -> None:
@@ -290,6 +329,10 @@ def update_manifest(updates: Dict[str, Any]) -> None:
 
     Args:
         updates: Dictionary of values to update in manifest
+
+    Raises:
+        SyrvisHomeError: If SYRVIS_HOME cannot be determined
+        FileNotFoundError: If manifest file doesn't exist
     """
     manifest_path = get_manifest_path()
     manifest = get_manifest()
@@ -305,6 +348,27 @@ def update_manifest(updates: Dict[str, Any]) -> None:
 
     deep_merge(manifest, updates)
     manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Make manifest world-readable so doctor can read it without sudo
+    try:
+        manifest_path.chmod(0o644)
+    except OSError:
+        pass  # May fail if not owner, but that's OK
+
+
+def save_manifest(manifest: Dict[str, Any]) -> None:
+    """
+    Save manifest to disk.
+
+    Args:
+        manifest: Complete manifest dictionary to save
+    """
+    manifest_path = get_manifest_path()
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    # Make manifest world-readable so doctor can read it without sudo
+    try:
+        manifest_path.chmod(0o644)
+    except OSError:
+        pass  # May fail if not owner, but that's OK
 
 
 def verify_setup_complete() -> bool:
@@ -321,30 +385,106 @@ def verify_setup_complete() -> bool:
         return False
 
 
-def mark_setup_complete() -> None:
-    """Mark setup as complete in manifest."""
-    update_manifest({"setup_complete": True})
+def add_version_to_manifest(version: str, status: str = "available") -> None:
+    """
+    Add a new version entry to the manifest.
+
+    Args:
+        version: Version string (e.g., "0.1.0")
+        status: Version status ("available", "active", "deprecated")
+    """
+    update_manifest({
+        "versions": {
+            version: {
+                "installed_at": datetime.now().isoformat(),
+                "status": status,
+            }
+        }
+    })
+
+
+def set_active_version(version: str) -> None:
+    """
+    Set a version as active in the manifest.
+
+    Args:
+        version: Version string to activate
+    """
+    manifest = get_manifest()
+
+    # Update previous active version status
+    old_version = manifest.get("active_version")
+    if old_version and old_version in manifest.get("versions", {}):
+        manifest["versions"][old_version]["status"] = "available"
+
+    # Set new active version
+    manifest["active_version"] = version
+    if version in manifest.get("versions", {}):
+        manifest["versions"][version]["status"] = "active"
+        manifest["versions"][version]["activated_at"] = datetime.now().isoformat()
+
+    # Add to update history
+    if old_version and old_version != version:
+        history_entry = {
+            "from": old_version,
+            "to": version,
+            "timestamp": datetime.now().isoformat(),
+            "type": "upgrade" if version > old_version else "rollback",
+        }
+        if "update_history" not in manifest:
+            manifest["update_history"] = []
+        manifest["update_history"].append(history_entry)
+
+    save_manifest(manifest)
 
 
 # =============================================================================
 # Directory Creation Helpers
 # =============================================================================
 
-def ensure_config_directories() -> None:
-    """Ensure config directories exist."""
-    config_dir = get_config_dir()
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "traefik").mkdir(exist_ok=True)
+def ensure_directory_structure(install_path: Path, version: str) -> None:
+    """
+    Create the complete directory structure for a new installation.
+
+    Args:
+        install_path: Path to SYRVIS_HOME
+        version: Version being installed
+    """
+    # Root directories
+    (install_path / "versions").mkdir(parents=True, exist_ok=True)
+    (install_path / "config").mkdir(exist_ok=True)
+    (install_path / "config" / "traefik").mkdir(exist_ok=True)
+    (install_path / "data").mkdir(exist_ok=True)
+    (install_path / "data" / "traefik").mkdir(exist_ok=True)
+    (install_path / "data" / "traefik" / "config").mkdir(exist_ok=True)
+    (install_path / "data" / "traefik" / "logs").mkdir(exist_ok=True)
+    (install_path / "data" / "portainer").mkdir(exist_ok=True)
+    (install_path / "data" / "cloudflared").mkdir(exist_ok=True)
+
+    # Version-specific directories
+    version_dir = install_path / "versions" / version
+    version_dir.mkdir(exist_ok=True)
+    (version_dir / "cli").mkdir(exist_ok=True)
+    (version_dir / "build").mkdir(exist_ok=True)
 
 
-def ensure_data_directories() -> None:
-    """Ensure data directories exist."""
-    data_dir = get_data_dir()
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "traefik").mkdir(exist_ok=True)
-    (data_dir / "traefik" / "config").mkdir(exist_ok=True)
-    (data_dir / "portainer").mkdir(exist_ok=True)
-    (data_dir / "cloudflared").mkdir(exist_ok=True)
+def update_current_symlink(version: str) -> None:
+    """
+    Update the 'current' symlink to point to a version.
+
+    Args:
+        version: Version to point to
+    """
+    syrvis_home = get_syrvis_home()
+    current = syrvis_home / "current"
+    target = Path("versions") / version  # Relative path
+
+    # Remove existing symlink if present
+    if current.exists() or current.is_symlink():
+        current.unlink()
+
+    # Create new symlink
+    current.symlink_to(target)
 
 
 # =============================================================================

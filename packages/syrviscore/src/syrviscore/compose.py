@@ -14,6 +14,29 @@ from typing import Any, Dict, Optional
 import yaml
 
 
+# Default Docker image versions - used when config.yaml doesn't exist
+DEFAULT_DOCKER_IMAGES = {
+    "traefik": {
+        "image": "traefik",
+        "tag": "v3.6.5",
+        "full_image": "traefik:v3.6.5",
+        "description": "",
+    },
+    "portainer": {
+        "image": "portainer/portainer-ce",
+        "tag": "2.33.6-alpine",
+        "full_image": "portainer/portainer-ce:2.33.6-alpine",
+        "description": "",
+    },
+    "cloudflared": {
+        "image": "cloudflare/cloudflared",
+        "tag": "2025.11.1",
+        "full_image": "cloudflare/cloudflared:2025.11.1",
+        "description": "",
+    },
+}
+
+
 class ComposeGenerator:
     """Generate docker-compose.yaml from build configuration and environment variables."""
 
@@ -29,23 +52,27 @@ class ComposeGenerator:
 
     def load_config(self) -> Dict[str, Any]:
         """
-        Load build configuration from YAML file.
+        Load build configuration from YAML file, or use defaults.
+
+        If config.yaml doesn't exist, uses built-in default Docker image versions.
 
         Returns:
             Parsed configuration dictionary
-
-        Raises:
-            FileNotFoundError: If config file doesn't exist
-            yaml.YAMLError: If config file is invalid YAML
         """
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+        if self.config_path.exists():
+            with open(self.config_path, "r") as f:
+                self.build_config = yaml.safe_load(f)
 
-        with open(self.config_path, "r") as f:
-            self.build_config = yaml.safe_load(f)
-
-        if not self.build_config or "docker_images" not in self.build_config:
-            raise ValueError("Invalid config: missing docker_images section")
+            if not self.build_config or "docker_images" not in self.build_config:
+                raise ValueError("Invalid config: missing docker_images section")
+        else:
+            # Use built-in defaults
+            self.build_config = {
+                "metadata": {
+                    "description": "Using default Docker image versions",
+                },
+                "docker_images": DEFAULT_DOCKER_IMAGES,
+            }
 
         return self.build_config
 
@@ -149,22 +176,20 @@ class ComposeGenerator:
             "networks": {
                 "syrvis-macvlan": {
                     "ipv4_address": traefik_ip,
-                }
+                },
+                "proxy": {},
             },
-            "ports": ["80:80", "443:443"],
+            # No port bindings needed - traefik has its own IP via macvlan
             "environment": ["TZ=UTC"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
-                "./data/traefik/traefik.yml:/traefik.yml:ro",
-                "./data/traefik/config/:/config/:ro",
-                "./data/traefik/acme.json:/acme.json",
-                "./data/traefik/logs:/logs",
+                "../data/traefik/traefik.yml:/traefik.yml:ro",
+                "../data/traefik/config/:/config/:ro",
+                "../data/traefik/acme.json:/acme.json",
+                "../data/traefik/logs:/logs",
             ],
             "labels": [
-                "traefik.enable=true",
-                "traefik.http.routers.traefik.entrypoints=https",
-                "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)",
-                "traefik.http.routers.traefik.service=api@internal",
+                "traefik.enable=false",
             ],
         }
 
@@ -180,12 +205,20 @@ class ComposeGenerator:
             "networks": ["proxy"],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
-                "./data/portainer:/data",
+                "../data/portainer:/data",
             ],
             "labels": [
                 "traefik.enable=true",
-                "traefik.http.routers.portainer.entrypoints=https",
+                # HTTP router (redirect to HTTPS)
+                "traefik.http.routers.portainer-http.entrypoints=web",
+                "traefik.http.routers.portainer-http.rule=Host(`portainer.${DOMAIN}`)",
+                "traefik.http.routers.portainer-http.middlewares=https-redirect@file",
+                # HTTPS router (with Let's Encrypt)
+                "traefik.http.routers.portainer.entrypoints=websecure",
                 "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)",
+                "traefik.http.routers.portainer.tls=true",
+                "traefik.http.routers.portainer.tls.certresolver=letsencrypt",
+                # Service
                 "traefik.http.services.portainer.loadbalancer.server.port=9000",
             ],
         }
