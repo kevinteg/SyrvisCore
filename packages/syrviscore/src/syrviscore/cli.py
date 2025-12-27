@@ -348,8 +348,8 @@ def compose():
     "--config",
     "-c",
     default="build/config.yaml",
-    help="Path to build configuration file",
-    type=click.Path(exists=True),
+    help="Path to build configuration file (uses defaults if missing)",
+    type=click.Path(),
 )
 @click.option(
     "--output",
@@ -359,11 +359,16 @@ def compose():
     type=click.Path(),
 )
 def generate(config, output):
-    """Generate docker-compose.yaml from build configuration."""
+    """Generate docker-compose.yaml and Traefik configuration files."""
+    from pathlib import Path
+
     try:
         load_dotenv()
 
-        click.echo(f"Reading build config from: {config}")
+        if Path(config).exists():
+            click.echo(f"Reading build config from: {config}")
+        else:
+            click.echo("Using default Docker image versions")
         compose = generate_compose_from_config(config_path=config, output_path=output)
 
         click.echo(f"Generated docker-compose.yaml at: {output}")
@@ -383,6 +388,25 @@ def generate(config, output):
             click.echo(
                 f"  Interface:  {compose['networks']['syrvis-macvlan']['driver_opts']['parent']}"
             )
+
+        # Also regenerate Traefik configuration files
+        click.echo()
+        click.echo("Regenerating Traefik configuration...")
+        syrvis_home = get_syrvis_home()
+        traefik_data = syrvis_home / "data" / "traefik"
+        traefik_data.mkdir(parents=True, exist_ok=True)
+        config_dir = traefik_data / "config"
+        config_dir.mkdir(exist_ok=True)
+
+        static_config_path = traefik_data / "traefik.yml"
+        static_config_path.write_text(generate_traefik_static_config())
+        static_config_path.chmod(0o644)
+        click.echo(f"  Generated: {static_config_path}")
+
+        dynamic_config_path = config_dir / "dynamic.yml"
+        dynamic_config_path.write_text(generate_traefik_dynamic_config())
+        dynamic_config_path.chmod(0o644)
+        click.echo(f"  Generated: {dynamic_config_path}")
 
         click.echo()
         click.echo("Run 'syrvis start' to start services.")
