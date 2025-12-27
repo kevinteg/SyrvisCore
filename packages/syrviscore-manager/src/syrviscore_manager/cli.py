@@ -72,30 +72,42 @@ def reexec_with_sudo():
     os.execv(sudo_path, args)
 
 
+def _find_syrvis_command():
+    """
+    Find the syrvis command path.
+
+    Checks:
+    1. SYRVIS_HOME/bin/syrvis (wrapper script)
+    2. SYRVIS_HOME/current/cli/venv/bin/syrvis (venv)
+    3. PATH (system-wide)
+
+    Returns:
+        Path to syrvis command or None if not found
+    """
+    import shutil
+
+    try:
+        syrvis_home = paths.get_syrvis_home()
+        candidates = [
+            syrvis_home / "bin" / "syrvis",
+            syrvis_home / "current" / "cli" / "venv" / "bin" / "syrvis",
+        ]
+
+        for p in candidates:
+            if p.exists():
+                return str(p)
+    except Exception:
+        pass
+
+    # Fallback to PATH
+    return shutil.which("syrvis")
+
+
 def run_syrvis_clean():
     """Run 'syrvis clean -y' to remove containers and networks."""
     import subprocess
-    import shutil
 
-    # Find syrvis command
-    syrvis_paths = [
-        paths.get_syrvis_home() / "bin" / "syrvis",
-        paths.get_syrvis_home() / "current" / "cli" / "venv" / "bin" / "syrvis",
-    ]
-
-    syrvis_cmd = None
-    for p in syrvis_paths:
-        try:
-            if p.exists():
-                syrvis_cmd = str(p)
-                break
-        except Exception:
-            pass
-
-    if not syrvis_cmd:
-        # Try PATH
-        syrvis_cmd = shutil.which("syrvis")
-
+    syrvis_cmd = _find_syrvis_command()
     if not syrvis_cmd:
         return False, "syrvis command not found"
 
@@ -400,26 +412,8 @@ def rollback(version):
 def run_syrvis_stop():
     """Run 'syrvis stop' to stop services."""
     import subprocess
-    import shutil
 
-    # Find syrvis command
-    syrvis_paths = [
-        paths.get_syrvis_home() / "bin" / "syrvis",
-        paths.get_syrvis_home() / "current" / "cli" / "venv" / "bin" / "syrvis",
-    ]
-
-    syrvis_cmd = None
-    for p in syrvis_paths:
-        try:
-            if p.exists():
-                syrvis_cmd = str(p)
-                break
-        except Exception:
-            pass
-
-    if not syrvis_cmd:
-        syrvis_cmd = shutil.which("syrvis")
-
+    syrvis_cmd = _find_syrvis_command()
     if syrvis_cmd:
         try:
             subprocess.run([syrvis_cmd, "stop"], capture_output=True, timeout=60)

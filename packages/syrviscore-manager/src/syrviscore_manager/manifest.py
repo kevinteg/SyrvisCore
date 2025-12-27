@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 from .paths import get_manifest_path, get_syrvis_home, SyrvisHomeError
+from .downloader import compare_versions
 
 
 # Schema version for manifest compatibility
@@ -155,11 +156,13 @@ def set_active_version(version: str) -> None:
 
     # Add to update history
     if old_version and old_version != version:
+        # Use proper version comparison (handles 0.10.0 vs 0.2.0 correctly)
+        is_upgrade = compare_versions(version, old_version) > 0
         history_entry = {
             "from": old_version,
             "to": version,
             "timestamp": datetime.now().isoformat(),
-            "type": "upgrade" if version > old_version else "rollback",
+            "type": "upgrade" if is_upgrade else "rollback",
         }
         if "update_history" not in manifest:
             manifest["update_history"] = []

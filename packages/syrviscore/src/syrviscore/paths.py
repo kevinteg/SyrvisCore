@@ -30,7 +30,8 @@ class SyrvisHomeError(Exception):
 
 
 # Schema version for manifest compatibility
-MANIFEST_SCHEMA_VERSION = 2
+# Must match syrviscore_manager.manifest.MANIFEST_SCHEMA_VERSION
+MANIFEST_SCHEMA_VERSION = 3
 
 
 # =============================================================================
