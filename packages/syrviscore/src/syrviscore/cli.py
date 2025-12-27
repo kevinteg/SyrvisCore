@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from syrviscore.__version__ import __version__
 from syrviscore.compose import generate_compose_from_config
 from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
-from syrviscore.paths import SyrvisHomeError, get_syrvis_home, get_active_version
+from syrviscore.paths import SyrvisHomeError, get_syrvis_home, get_active_version, get_env_path
 from syrviscore.traefik_config import (
     generate_traefik_dynamic_config,
     generate_traefik_static_config,
@@ -363,7 +363,14 @@ def generate(config, output):
     from pathlib import Path
 
     try:
-        load_dotenv()
+        # Load .env from SYRVIS_HOME/config/.env
+        env_path = get_env_path()
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+        else:
+            click.echo(f"Warning: No .env file found at {env_path}", err=True)
+            click.echo("Run 'syrvis setup' to configure first.", err=True)
+            raise click.Abort()
 
         if Path(config).exists():
             click.echo(f"Reading build config from: {config}")
