@@ -18,11 +18,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Allow running both as a module and as a script.
+# Allow running as an installed module OR directly from the source tree with no
+# install (`python .../deploy/gen.py ...`). The generator only needs the stdlib,
+# so this makes the sudoers/shim/provision artifacts reproducible from any
+# Python 3.10+ without setting up a venv. parents[2] is the package's src/ dir.
 try:
     from syrviscore_mcp.commands import COMMANDS, Command, FlagValue
 except ImportError:  # pragma: no cover
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from syrviscore_mcp.commands import COMMANDS, Command, FlagValue
 
 

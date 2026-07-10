@@ -57,17 +57,26 @@ the policy matches the real command paths. Otherwise sudo denies everything.
 
 ### Step 1 — generate the provisioning script (on your Mac)
 
+The generator needs only the Python standard library, so you can run it **without
+installing anything** — straight from the repo with any Python 3.10+. From the
+repo root:
+
 ```bash
-# from packages/syrviscore-mcp, in the 3.12 venv.
-# --home is your SYRVIS_HOME (default /volume1/syrviscore); --pubkey is the
-# operator's public key; --from restricts which network may use that key.
-ssh-keygen -t ed25519 -f ~/.ssh/syrvis_mcp_ed25519 -C syrvis-mcp   # if you don't have a key yet
-python -m syrviscore_mcp.deploy.gen provision \
+# make an operator keypair (once), then generate YOUR script.
+# --home is your SYRVIS_HOME (find it with `syrvisctl info`; default /volume1/syrviscore);
+# --pubkey is the operator's public key; --from restricts which network may use that key.
+ssh-keygen -t ed25519 -f ~/.ssh/syrvis_mcp_ed25519 -C syrvis-mcp
+
+python3 packages/syrviscore-mcp/src/syrviscore_mcp/deploy/gen.py provision \
     --home /volume1/syrviscore \
     --pubkey ~/.ssh/syrvis_mcp_ed25519.pub \
     --from 192.168.8.0/24 \
     > /tmp/manual_mcp_account_provision.sh
 ```
+
+(If you've installed the package into a venv — see the top of this README — the
+equivalent is `python -m syrviscore_mcp.deploy.gen provision …`. Installing the
+package is only required to *run the MCP server*, not to generate this script.)
 
 Read the generated script — it is plain, auditable POSIX sh — then copy it over:
 
