@@ -7,85 +7,70 @@ Provides:
 - Full restore for rollback and disaster recovery
 - Version-aware backup cleanup
 
+v2 rules:
+- Archives contain secrets (acme.json, Cloudflared credentials) and are
+  created with mode 0600.
+- Extraction is containment-checked: no archive member may escape the
+  install path, regardless of what the archive claims its name is.
+- Restore threads the install path through every step explicitly — it can
+  never silently touch a different installation.
+- File modes are restored from the archive (with acme.json forced to 0600),
+  never guessed from filename suffixes.
+
 Backup naming convention:
     0.1.12.tar.gz      - Pre-upgrade backup (before upgrading FROM 0.1.12)
     0.1.12-1.tar.gz    - Post-setup backup #1
     0.1.12-2.tar.gz    - Post-setup backup #2
 """
 
+import io
 import json
+import os
 import re
 import tarfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from . import paths
-from . import manifest
+from . import manifest, paths
 from .__version__ import __version__
-
+from .errors import BackupError, RestoreError
 
 # Backup metadata schema version
 BACKUP_SCHEMA_VERSION = 1
 
+LogCallback = Callable[[str], None]
 
-def get_backups_dir() -> Path:
+
+def _noop_log(_message: str) -> None:
+    return None
+
+
+def get_backups_dir(home: Path) -> Path:
     """Get the backups directory path."""
-    return paths.get_syrvis_home() / "backups"
+    return home / "backups"
 
 
-def ensure_backups_dir() -> Path:
-    """Ensure backups directory exists and return path."""
-    backups_dir = get_backups_dir()
-    backups_dir.mkdir(parents=True, exist_ok=True)
-    return backups_dir
-
-
-def get_backup_path(version: str, suffix: Optional[int] = None) -> Path:
-    """
-    Get the path for a backup file.
-
-    Args:
-        version: Version string (e.g., "0.1.12")
-        suffix: Optional numeric suffix for post-setup backups (e.g., 1, 2)
-
-    Returns:
-        Path like backups/0.1.12.tar.gz or backups/0.1.12-1.tar.gz
-    """
+def get_backup_path(home: Path, version: str, suffix: Optional[int] = None) -> Path:
+    """Get the path for a backup file (backups/<version>[-<suffix>].tar.gz)."""
     if suffix is not None:
-        filename = f"{version}-{suffix}.tar.gz"
+        filename = "{}-{}.tar.gz".format(version, suffix)
     else:
-        filename = f"{version}.tar.gz"
-    return get_backups_dir() / filename
+        filename = "{}.tar.gz".format(version)
+    return get_backups_dir(home) / filename
 
 
 def parse_backup_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
-    """
-    Parse a backup filename to extract version and suffix.
-
-    Args:
-        filename: Backup filename (e.g., "0.1.12.tar.gz" or "0.1.12-2.tar.gz")
-
-    Returns:
-        Tuple of (version, suffix) where suffix is None for base backups
-    """
-    # Match patterns like "0.1.12.tar.gz" or "0.1.12-2.tar.gz"
+    """Parse a backup filename into (version, suffix); suffix None for base backups."""
     match = re.match(r"^(\d+\.\d+\.\d+)(?:-(\d+))?\.tar\.gz$", filename)
     if match:
-        version = match.group(1)
-        suffix = int(match.group(2)) if match.group(2) else None
-        return version, suffix
+        return match.group(1), int(match.group(2)) if match.group(2) else None
     return None, None
 
 
-def list_backups() -> List[Dict[str, Any]]:
-    """
-    List all available backups with metadata.
-
-    Returns:
-        List of backup info dicts, sorted by version (newest first), then suffix
-    """
-    backups_dir = get_backups_dir()
+def list_backups(home: Path) -> List[Dict[str, Any]]:
+    """List all available backups with metadata, newest version first."""
+    backups_dir = get_backups_dir(home)
     if not backups_dir.exists():
         return []
 
@@ -95,10 +80,9 @@ def list_backups() -> List[Dict[str, Any]]:
         if version is None:
             continue
 
-        # Try to read metadata from archive
         metadata = None
         try:
-            with tarfile.open(backup_file, "r:gz") as tar:
+            with tarfile.open(str(backup_file), "r:gz") as tar:
                 try:
                     meta_file = tar.extractfile("backup-metadata.json")
                     if meta_file:
@@ -108,19 +92,19 @@ def list_backups() -> List[Dict[str, Any]]:
         except (tarfile.TarError, OSError):
             pass
 
-        backup_info = {
-            "path": backup_file,
-            "filename": backup_file.name,
-            "version": version,
-            "suffix": suffix,
-            "size": backup_file.stat().st_size,
-            "created_at": metadata.get("created_at") if metadata else None,
-            "reason": metadata.get("reason") if metadata else "unknown",
-            "metadata": metadata,
-        }
-        backups.append(backup_info)
+        backups.append(
+            {
+                "path": backup_file,
+                "filename": backup_file.name,
+                "version": version,
+                "suffix": suffix,
+                "size": backup_file.stat().st_size,
+                "created_at": metadata.get("created_at") if metadata else None,
+                "reason": metadata.get("reason") if metadata else "unknown",
+                "metadata": metadata,
+            }
+        )
 
-    # Sort by version (newest first), then by suffix (base first, then ascending)
     def sort_key(b):
         version_parts = tuple(int(p) for p in b["version"].split("."))
         suffix = b["suffix"] if b["suffix"] is not None else -1
@@ -129,70 +113,32 @@ def list_backups() -> List[Dict[str, Any]]:
     return sorted(backups, key=sort_key, reverse=True)
 
 
-def list_backup_versions() -> List[str]:
-    """
-    Get list of unique versions that have backups.
-
-    Returns:
-        List of version strings, sorted newest first
-    """
-    backups = list_backups()
-    versions = sorted(
-        set(b["version"] for b in backups),
-        reverse=True,
-        key=lambda v: tuple(int(p) for p in v.split(".")),
-    )
-    return versions
-
-
-def get_next_suffix(version: str) -> int:
-    """
-    Get the next available suffix number for a version.
-
-    Args:
-        version: Version string
-
-    Returns:
-        Next suffix number (1 if no suffixed backups exist)
-    """
-    backups_dir = get_backups_dir()
+def get_next_suffix(home: Path, version: str) -> int:
+    """Get the next available suffix number for a version's backups."""
+    backups_dir = get_backups_dir(home)
     if not backups_dir.exists():
         return 1
 
-    existing_suffixes = []
-    for backup_file in backups_dir.glob(f"{version}-*.tar.gz"):
+    existing = []
+    for backup_file in backups_dir.glob("{}-*.tar.gz".format(version)):
         _, suffix = parse_backup_filename(backup_file.name)
         if suffix is not None:
-            existing_suffixes.append(suffix)
+            existing.append(suffix)
 
-    if not existing_suffixes:
-        return 1
-    return max(existing_suffixes) + 1
+    return max(existing) + 1 if existing else 1
 
 
-def get_wheel_path(version: str) -> Optional[Path]:
-    """
-    Get the cached wheel file path for a version.
-
-    Args:
-        version: Version string
-
-    Returns:
-        Path to wheel file, or None if not found
-    """
-    version_dir = paths.get_version_dir(version)
-    wheel_dir = version_dir / "wheel"
-
+def get_wheel_path(home: Path, version: str) -> Optional[Path]:
+    """Get the cached wheel file path for an installed version."""
+    wheel_dir = paths.version_dir(home, version) / "wheel"
     if not wheel_dir.exists():
         return None
-
     wheels = list(wheel_dir.glob("*.whl"))
-    if wheels:
-        return wheels[0]
-    return None
+    return wheels[0] if wheels else None
 
 
 def create_backup(
+    home: Path,
     output_path: Optional[Path] = None,
     version: Optional[str] = None,
     reason: str = "manual",
@@ -202,130 +148,96 @@ def create_backup(
     """
     Create a backup archive of the current state.
 
-    Args:
-        output_path: Where to save the backup (default: backups/<version>.tar.gz)
-        version: Version to backup (default: current active version)
-        reason: Reason for backup ("manual", "pre-upgrade", "post-setup")
-        suffix: Numeric suffix for the filename (for post-setup backups)
-        extra_metadata: Additional metadata to include
-
-    Returns:
-        Path to created backup file
+    The archive is created with mode 0600 (it contains ACME private keys and
+    tunnel credentials).
 
     Raises:
-        ValueError: If no version is active and none specified
+        BackupError: If no version is active and none was specified.
     """
-    syrvis_home = paths.get_syrvis_home()
-
-    # Determine version
     if version is None:
-        version = manifest.get_active_version()
+        version = manifest.get_active_version(home)
         if version is None:
-            raise ValueError("No active version and none specified")
+            raise BackupError("No active version and none specified")
 
-    # Determine output path
     if output_path is None:
-        output_path = get_backup_path(version, suffix)
-
-    # Always ensure parent directory exists
+        output_path = get_backup_path(home, version, suffix)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build metadata
     metadata = {
         "backup_version": BACKUP_SCHEMA_VERSION,
         "created_at": datetime.now().isoformat(),
         "version": version,
         "manager_version": __version__,
         "reason": reason,
-        "syrvis_home": str(syrvis_home),
+        "syrvis_home": str(home),
     }
     if extra_metadata:
         metadata.update(extra_metadata)
 
-    # Create backup archive
-    with tarfile.open(output_path, "w:gz") as tar:
-        # Add metadata
-        metadata_json = json.dumps(metadata, indent=2).encode()
-        meta_info = tarfile.TarInfo(name="backup-metadata.json")
-        meta_info.size = len(metadata_json)
-        meta_info.mtime = int(datetime.now().timestamp())
-        tar.addfile(meta_info, fileobj=__import__("io").BytesIO(metadata_json))
+    # 0600 from the moment of creation — never world-readable, even briefly
+    fd = os.open(str(output_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fileobj:
+            with tarfile.open(fileobj=fileobj, mode="w:gz") as tar:
+                metadata_json = json.dumps(metadata, indent=2).encode()
+                meta_info = tarfile.TarInfo(name="backup-metadata.json")
+                meta_info.size = len(metadata_json)
+                meta_info.mtime = int(datetime.now().timestamp())
+                tar.addfile(meta_info, fileobj=io.BytesIO(metadata_json))
 
-        # Add manifest
-        manifest_path = syrvis_home / ".syrviscore-manifest.json"
-        if manifest_path.exists():
-            tar.add(manifest_path, arcname="manifest.json")
+                mpath = paths.manifest_path(home)
+                if mpath.exists():
+                    tar.add(str(mpath), arcname="manifest.json")
 
-        # Add config directory
-        config_dir = syrvis_home / "config"
-        if config_dir.exists():
-            for item in config_dir.rglob("*"):
-                if item.is_file():
-                    arcname = f"config/{item.relative_to(config_dir)}"
-                    tar.add(item, arcname=arcname)
+                config_dir = home / "config"
+                if config_dir.exists():
+                    for item in sorted(config_dir.rglob("*")):
+                        if item.is_file():
+                            tar.add(
+                                str(item),
+                                arcname="config/{}".format(item.relative_to(config_dir)),
+                            )
 
-        # Add data directories (selective - skip logs)
-        data_items = [
-            ("data/traefik/acme.json", syrvis_home / "data/traefik/acme.json"),
-            ("data/traefik/traefik.yml", syrvis_home / "data/traefik/traefik.yml"),
-        ]
+                data_items = [
+                    ("data/traefik/acme.json", home / "data/traefik/acme.json"),
+                    ("data/traefik/traefik.yml", home / "data/traefik/traefik.yml"),
+                ]
+                for subdir in ("data/traefik/config", "data/portainer", "data/cloudflared"):
+                    root = home / subdir
+                    if root.exists():
+                        for item in sorted(root.rglob("*")):
+                            if item.is_file():
+                                data_items.append(
+                                    ("{}/{}".format(subdir, item.relative_to(root)), item)
+                                )
 
-        # Add Traefik config directory
-        traefik_config = syrvis_home / "data/traefik/config"
-        if traefik_config.exists():
-            for item in traefik_config.rglob("*"):
-                if item.is_file():
-                    arcname = f"data/traefik/config/{item.relative_to(traefik_config)}"
-                    data_items.append((arcname, item))
+                for arcname, src_path in data_items:
+                    if src_path.exists():
+                        tar.add(str(src_path), arcname=arcname)
 
-        # Add Portainer data
-        portainer_dir = syrvis_home / "data/portainer"
-        if portainer_dir.exists():
-            for item in portainer_dir.rglob("*"):
-                if item.is_file():
-                    arcname = f"data/portainer/{item.relative_to(portainer_dir)}"
-                    data_items.append((arcname, item))
-
-        # Add Cloudflared data
-        cloudflared_dir = syrvis_home / "data/cloudflared"
-        if cloudflared_dir.exists():
-            for item in cloudflared_dir.rglob("*"):
-                if item.is_file():
-                    arcname = f"data/cloudflared/{item.relative_to(cloudflared_dir)}"
-                    data_items.append((arcname, item))
-
-        for arcname, src_path in data_items:
-            if isinstance(src_path, Path) and src_path.exists():
-                tar.add(src_path, arcname=arcname)
-
-        # Add wheel file for the version
-        wheel_path = get_wheel_path(version)
-        if wheel_path and wheel_path.exists():
-            tar.add(wheel_path, arcname=f"wheel/{wheel_path.name}")
+                wheel_path = get_wheel_path(home, version)
+                if wheel_path and wheel_path.exists():
+                    tar.add(str(wheel_path), arcname="wheel/{}".format(wheel_path.name))
+    except BaseException:
+        try:
+            output_path.unlink()
+        except OSError:
+            pass
+        raise
 
     return output_path
 
 
-def create_pre_upgrade_backup(current_version: str, target_version: str) -> Optional[Path]:
-    """
-    Create a backup before upgrading to a new version.
-
-    Only creates backup if one doesn't already exist for this version.
-
-    Args:
-        current_version: Version currently installed
-        target_version: Version being upgraded to
-
-    Returns:
-        Path to backup file, or None if backup already exists
-    """
-    backup_path = get_backup_path(current_version)
-
-    # If backup already exists, don't overwrite
+def create_pre_upgrade_backup(
+    home: Path, current_version: str, target_version: str
+) -> Optional[Path]:
+    """Create a backup before upgrading, unless one already exists for this version."""
+    backup_path = get_backup_path(home, current_version)
     if backup_path.exists():
         return None
 
     return create_backup(
+        home,
         output_path=backup_path,
         version=current_version,
         reason="pre-upgrade",
@@ -333,176 +245,135 @@ def create_pre_upgrade_backup(current_version: str, target_version: str) -> Opti
     )
 
 
-def create_post_setup_backup(version: str) -> Path:
-    """
-    Create a backup after successful setup.
-
-    Uses -N suffix to allow multiple post-setup backups.
-
-    Args:
-        version: Version that was set up
-
-    Returns:
-        Path to backup file
-    """
-    suffix = get_next_suffix(version)
+def create_post_setup_backup(home: Path, version: str) -> Path:
+    """Create a backup after successful setup (with -N suffix)."""
     return create_backup(
-        version=version,
-        reason="post-setup",
-        suffix=suffix,
+        home, version=version, reason="post-setup", suffix=get_next_suffix(home, version)
     )
+
+
+def read_backup_metadata(backup_path: Path) -> Dict[str, Any]:
+    """Read and validate the metadata of a backup archive.
+
+    Raises:
+        RestoreError: If the archive is unreadable or has no valid metadata.
+    """
+    if not backup_path.exists():
+        raise RestoreError("Backup not found: {}".format(backup_path))
+    try:
+        with tarfile.open(str(backup_path), "r:gz") as tar:
+            meta_file = tar.extractfile("backup-metadata.json")
+            if not meta_file:
+                raise RestoreError("Backup missing backup-metadata.json")
+            metadata = json.loads(meta_file.read().decode())
+    except (tarfile.TarError, KeyError, json.JSONDecodeError, OSError) as e:
+        raise RestoreError("Could not read backup {}: {}".format(backup_path, e))
+
+    if not metadata.get("version"):
+        raise RestoreError("Backup metadata missing version")
+    return metadata
+
+
+def _safe_dest(install_path: Path, relative: str) -> Path:
+    """Resolve an archive member path, refusing anything that escapes install_path."""
+    if relative.startswith("/") or ".." in Path(relative).parts:
+        raise RestoreError(
+            "Backup archive contains an unsafe path {!r} — refusing to restore".format(relative)
+        )
+    dest = install_path / relative
+    # Belt and braces: verify containment on the normalized path as well
+    base = os.path.realpath(str(install_path))
+    resolved_parent = os.path.realpath(str(dest.parent))
+    if not (resolved_parent == base or resolved_parent.startswith(base + os.sep)):
+        raise RestoreError(
+            "Backup archive member {!r} escapes the install path — refusing to restore".format(
+                relative
+            )
+        )
+    return dest
 
 
 def restore_from_backup(
-    backup_path: Path,
-    install_path: Optional[Path] = None,
-) -> bool:
+    backup_path: Path, install_path: Path, log: LogCallback = _noop_log
+) -> Dict[str, Any]:
     """
-    Restore from a backup archive.
+    Restore from a backup archive into ``install_path``.
 
-    Args:
-        backup_path: Path to backup archive
-        install_path: Where to restore (default: from backup metadata)
+    The version's venv is rebuilt from the cached wheel and verified BEFORE
+    the ``current`` symlink is switched — a restore can never claim success
+    while leaving a non-runnable installation active.
 
     Returns:
-        True if restore succeeded
+        The backup metadata dict.
+
+    Raises:
+        RestoreError: On unsafe/invalid archives or a failed venv rebuild.
     """
-    if not backup_path.exists():
-        raise FileNotFoundError(f"Backup not found: {backup_path}")
+    metadata = read_backup_metadata(backup_path)
+    version = paths.validate_version(metadata["version"])
 
-    with tarfile.open(backup_path, "r:gz") as tar:
-        # Read metadata
-        try:
-            meta_file = tar.extractfile("backup-metadata.json")
-            if meta_file:
-                metadata = json.loads(meta_file.read().decode())
-            else:
-                raise ValueError("Backup missing metadata")
-        except (KeyError, json.JSONDecodeError) as e:
-            raise ValueError(f"Invalid backup metadata: {e}")
+    install_path.mkdir(parents=True, exist_ok=True)
 
-        version = metadata.get("version")
-        if not version:
-            raise ValueError("Backup metadata missing version")
-
-        # Determine install path
-        if install_path is None:
-            install_path = Path(metadata.get("syrvis_home", "/volume1/syrviscore"))
-
-        # Create base directory structure
-        install_path.mkdir(parents=True, exist_ok=True)
-
-        # Extract config and data
+    with tarfile.open(str(backup_path), "r:gz") as tar:
         for member in tar.getmembers():
-            # Skip metadata file
             if member.name == "backup-metadata.json":
                 continue
+            if not member.isfile():
+                continue
 
-            # Determine destination
             if member.name.startswith("config/") or member.name.startswith("data/"):
-                dest = install_path / member.name
+                dest = _safe_dest(install_path, member.name)
             elif member.name == "manifest.json":
-                dest = install_path / ".syrviscore-manifest.json"
+                dest = install_path / paths.MANIFEST_FILENAME
             elif member.name.startswith("wheel/"):
-                # Extract wheel to version directory
-                version_dir = install_path / "versions" / version
-                version_dir.mkdir(parents=True, exist_ok=True)
-                wheel_dir = version_dir / "wheel"
-                wheel_dir.mkdir(exist_ok=True)
                 wheel_name = Path(member.name).name
-                dest = wheel_dir / wheel_name
+                dest = _safe_dest(install_path, "versions/{}/wheel/{}".format(version, wheel_name))
             else:
                 continue
 
-            # Extract file
-            if member.isfile():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                with tar.extractfile(member) as src:
-                    if src:
-                        dest.write_bytes(src.read())
-                # Preserve permissions for sensitive files
-                if "acme.json" in str(dest):
-                    dest.chmod(0o600)
-                elif dest.suffix in (".sh", ""):
-                    dest.chmod(0o755)
-                else:
-                    dest.chmod(0o644)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src = tar.extractfile(member)
+            if src is None:
+                continue
+            with src:
+                dest.write_bytes(src.read())
 
-        # Install version from wheel if not already installed
-        version_venv = install_path / "versions" / version / "cli" / "venv"
-        if not version_venv.exists():
-            wheel_dir = install_path / "versions" / version / "wheel"
-            wheels = list(wheel_dir.glob("*.whl")) if wheel_dir.exists() else []
-            if wheels:
-                install_version_from_wheel(version, wheels[0], install_path)
+            # Restore the recorded mode; secrets are always clamped to 0600
+            if dest.name == "acme.json" or "cloudflared" in dest.parts:
+                dest.chmod(0o600)
+            else:
+                dest.chmod(member.mode & 0o777 or 0o644)
 
-        # Update current symlink
-        paths.update_current_symlink(version)
+    # Rebuild the venv from the cached wheel if needed (single install path)
+    version_venv = install_path / "versions" / version / "cli" / "venv"
+    if not (version_venv / "bin" / "syrvis").exists():
+        wheel_dir = install_path / "versions" / version / "wheel"
+        wheels = list(wheel_dir.glob("*.whl")) if wheel_dir.exists() else []
+        if not wheels:
+            raise RestoreError(
+                "Backup for {} contains no cached wheel and no venv exists; "
+                "run 'syrvisctl install {}' after restore".format(version, version)
+            )
+        log("Rebuilding venv for {} from cached wheel...".format(version))
+        from . import version_manager  # local import to avoid a module cycle
 
-        # Update manifest
-        manifest.set_active_version(version)
+        version_manager.install_version(install_path, version, wheels[0], force=True, log=log)
 
-    return True
+    # Venv verified — now make the version active
+    paths.update_current_symlink(install_path, version)
+    paths.create_syrvis_wrapper(install_path)
+    paths.create_syrvis_profile(install_path)
+    manifest.set_active_version(install_path, version)
 
-
-def install_version_from_wheel(version: str, wheel_path: Path, install_path: Path) -> bool:
-    """
-    Install a version from a wheel file.
-
-    Args:
-        version: Version string
-        wheel_path: Path to wheel file
-        install_path: SYRVIS_HOME path
-
-    Returns:
-        True if installation succeeded
-    """
-    import subprocess
-
-    version_dir = install_path / "versions" / version
-    version_dir.mkdir(parents=True, exist_ok=True)
-
-    cli_dir = version_dir / "cli"
-    cli_dir.mkdir(exist_ok=True)
-
-    venv_path = cli_dir / "venv"
-
-    # Create virtual environment
-    result = subprocess.run(
-        ["python3", "-m", "venv", str(venv_path)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return False
-
-    # Install wheel
-    pip_path = venv_path / "bin" / "pip"
-    result = subprocess.run(
-        [str(pip_path), "install", "--no-cache-dir", str(wheel_path)],
-        capture_output=True,
-        text=True,
-    )
-
-    return result.returncode == 0
+    return metadata
 
 
-def cleanup_old_backups(keep_versions: int = 3, dry_run: bool = False) -> List[Path]:
-    """
-    Remove old backups, keeping the most recent N versions.
-
-    Args:
-        keep_versions: Number of versions to keep (keeps all backups for those versions)
-        dry_run: If True, only return what would be deleted
-
-    Returns:
-        List of backup paths that were (or would be) deleted
-    """
-    backups = list_backups()
+def cleanup_old_backups(home: Path, keep_versions: int = 3, dry_run: bool = False) -> List[Path]:
+    """Remove old backups, keeping all backups for the most recent N versions."""
+    backups = list_backups(home)
     if not backups:
         return []
 
-    # Get unique versions, sorted newest first
     all_versions = []
     seen = set()
     for b in backups:
@@ -510,19 +381,11 @@ def cleanup_old_backups(keep_versions: int = 3, dry_run: bool = False) -> List[P
             all_versions.append(b["version"])
             seen.add(b["version"])
 
-    # Sort by semantic version (newest first)
     all_versions.sort(key=lambda v: tuple(int(p) for p in v.split(".")), reverse=True)
-
-    # Determine versions to keep
     versions_to_keep = set(all_versions[:keep_versions])
 
-    # Find backups to delete
-    to_delete = []
-    for backup in backups:
-        if backup["version"] not in versions_to_keep:
-            to_delete.append(backup["path"])
+    to_delete = [b["path"] for b in backups if b["version"] not in versions_to_keep]
 
-    # Delete if not dry run
     if not dry_run:
         for path in to_delete:
             path.unlink()
@@ -530,37 +393,28 @@ def cleanup_old_backups(keep_versions: int = 3, dry_run: bool = False) -> List[P
     return to_delete
 
 
-def get_backup_for_rollback(version: str) -> Optional[Path]:
+def get_backup_for_rollback(home: Path, version: str) -> Optional[Path]:
     """
     Get the backup file to use for rolling back to a version.
 
-    Prefers the base backup (no suffix), falls back to highest suffix.
-
-    Args:
-        version: Version to rollback to
-
-    Returns:
-        Path to backup file, or None if not found
+    Prefers the base backup (no suffix), falls back to the highest suffix.
     """
-    # Try base backup first
-    base_backup = get_backup_path(version)
+    base_backup = get_backup_path(home, version)
     if base_backup.exists():
         return base_backup
 
-    # Look for suffixed backups
-    backups_dir = get_backups_dir()
+    backups_dir = get_backups_dir(home)
     if not backups_dir.exists():
         return None
 
-    suffixed_backups = []
-    for backup_file in backups_dir.glob(f"{version}-*.tar.gz"):
+    suffixed = []
+    for backup_file in backups_dir.glob("{}-*.tar.gz".format(version)):
         _, suffix = parse_backup_filename(backup_file.name)
         if suffix is not None:
-            suffixed_backups.append((suffix, backup_file))
+            suffixed.append((suffix, backup_file))
 
-    if suffixed_backups:
-        # Return the one with highest suffix (most recent setup)
-        suffixed_backups.sort(reverse=True)
-        return suffixed_backups[0][1]
+    if suffixed:
+        suffixed.sort(reverse=True)
+        return suffixed[0][1]
 
     return None
