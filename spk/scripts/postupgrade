@@ -73,8 +73,12 @@ show_debug_help() {
 PACKAGE_NAME="syrviscore"
 SYNOPKG_PKGDEST="${SYNOPKG_PKGDEST:-/var/packages/${PACKAGE_NAME}/target}"
 
-# Trap errors to show debug help
-trap 'show_debug_help' ERR
+# fail: log an error, show debug help, and exit (POSIX sh has no ERR trap)
+fail() {
+    log_error "$1"
+    show_debug_help
+    exit 1
+}
 
 log_info "==================================================================="
 log_info "Upgrading SyrvisCore Manager"
@@ -96,16 +100,15 @@ log_info ""
 log_info "[1/3] Upgrading manager virtual environment..."
 
 MANAGER_VENV="${SYNOPKG_PKGDEST}/venv"
+STAGING_VENV="${SYNOPKG_PKGDEST}/venv.new"
 
-# Remove old venv
-if [ -d "$MANAGER_VENV" ]; then
-    rm -rf "$MANAGER_VENV"
-    log_info "  Removed old venv"
+# Build the replacement venv in a staging path; the old venv stays
+# untouched until the new one is proven to work.
+rm -rf "$STAGING_VENV"
+if ! python3 -m venv "$STAGING_VENV" >> "$LOG_FILE" 2>&1; then
+    fail "Failed to create staging venv at ${STAGING_VENV} (see $LOG_FILE)"
 fi
-
-# Create new venv
-python3 -m venv "$MANAGER_VENV"
-log_info "  Created new venv"
+log_info "  Created staging venv"
 
 # === Install manager package from bundled wheels ===
 log_info "[2/3] Installing manager package (offline from bundled wheels)..."
@@ -146,48 +149,49 @@ echo "============================" >> "$PIP_LOG_FILE" 2>/dev/null || true
 if [ "${DSM_SIM_ACTIVE:-0}" = "1" ]; then
     # Simulation mode: use bundled wheels but allow network for platform-specific deps
     log_info "  (Simulation mode: allowing network for platform-specific wheels)"
-    if ! "${MANAGER_VENV}/bin/pip" install \
+    if ! "${STAGING_VENV}/bin/pip" install \
         --no-cache-dir \
         --find-links "$WHEELS_DIR" \
         "$MANAGER_WHEEL" >> "$PIP_LOG_FILE" 2>&1; then
-        log_error "Pip install failed! Check $PIP_LOG_FILE for details"
         log_error "Last 20 lines of pip log:"
         tail -20 "$PIP_LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
         tail -20 "$PIP_LOG_FILE" >&2
-        exit 1
+        fail "Pip install failed! Check $PIP_LOG_FILE for details"
     fi
 else
     # Production mode: fully offline installation
-    if ! "${MANAGER_VENV}/bin/pip" install \
+    if ! "${STAGING_VENV}/bin/pip" install \
         --no-cache-dir \
         --no-index \
         --find-links "$WHEELS_DIR" \
         "$MANAGER_WHEEL" >> "$PIP_LOG_FILE" 2>&1; then
-        log_error "Pip install failed! Check $PIP_LOG_FILE for details"
         log_error "Last 20 lines of pip log:"
         tail -20 "$PIP_LOG_FILE" >> "$LOG_FILE" 2>/dev/null || true
         tail -20 "$PIP_LOG_FILE" >&2
-        exit 1
+        fail "Pip install failed! Check $PIP_LOG_FILE for details"
     fi
 fi
 
 log_info "  Manager package and dependencies installed successfully"
 
-# Verify installation
-if [ ! -f "${MANAGER_VENV}/bin/syrvisctl" ]; then
-    log_error "syrvisctl command not found after install"
-    log_error "Expected location: ${MANAGER_VENV}/bin/syrvisctl"
-    log_error "Contents of ${MANAGER_VENV}/bin/:"
-    ls -la "${MANAGER_VENV}/bin/" >> "$LOG_FILE" 2>&1
-    ls -la "${MANAGER_VENV}/bin/" >&2
-    exit 1
+# Verify installation IN THE STAGING VENV before touching the old one
+if [ ! -f "${STAGING_VENV}/bin/syrvisctl" ]; then
+    ls -la "${STAGING_VENV}/bin/" >> "$LOG_FILE" 2>&1 || true
+    fail "syrvisctl not found in staging venv - old venv left untouched"
 fi
 
-# Test that syrvisctl actually works
-if ! "${MANAGER_VENV}/bin/syrvisctl" --version >> "$LOG_FILE" 2>&1; then
-    log_error "syrvisctl command found but failed to execute"
-    exit 1
+if ! "${STAGING_VENV}/bin/syrvisctl" --version >> "$LOG_FILE" 2>&1; then
+    fail "staged syrvisctl failed to execute - old venv left untouched"
 fi
+
+# Staging venv verified - swap it into place
+log_info "  Staged venv verified - swapping into place"
+rm -rf "${MANAGER_VENV}.old"
+if [ -d "$MANAGER_VENV" ]; then
+    mv "$MANAGER_VENV" "${MANAGER_VENV}.old"
+fi
+mv "$STAGING_VENV" "$MANAGER_VENV"
+rm -rf "${MANAGER_VENV}.old"
 
 SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
 log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"

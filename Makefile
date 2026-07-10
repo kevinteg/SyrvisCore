@@ -130,6 +130,10 @@ build-spk: build-manager ## Build SPK package (manager only)
 	@echo "$(BLUE)[INFO]$(NC) Building SPK package..."
 	chmod +x $(BUILD_TOOLS)/build-spk.sh
 	./$(BUILD_TOOLS)/build-spk.sh
+
+tarball: ## Build the devkit tarball (dev loop: wheels + bootstrap.sh)
+	chmod +x $(BUILD_TOOLS)/build-tarball.sh $(BUILD_TOOLS)/bootstrap.sh
+	./$(BUILD_TOOLS)/build-tarball.sh
 	@if [ -f "$(DIST_DIR)/$(SPK_NAME)" ]; then \
 		echo "$(GREEN)[SUCCESS]$(NC) SPK built: $(SPK_NAME)"; \
 		ls -lh $(DIST_DIR)/$(SPK_NAME); \
@@ -177,6 +181,26 @@ install: ## Install SPK to Synology via SSH (requires SSH_HOST variable)
 	@echo ""
 	@echo "Monitor installation logs:"
 	@echo "  ssh $(SSH_USER)@$(SSH_HOST) 'tail -f /var/log/synopkg.log'"
+
+nas-dev: tarball ## Ship the devkit to the NAS and bootstrap a dev install (requires SSH_HOST)
+	@if [ -z "$(SSH_HOST)" ]; then \
+		echo "$(RED)[ERROR]$(NC) SSH_HOST variable not set"; \
+		echo "Usage: make nas-dev SSH_HOST=192.168.0.100"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)[INFO]$(NC) Shipping devkit to $(SSH_HOST)..."
+	scp dist/syrviscore-devkit-$(VERSION).tar.gz $(SSH_USER)@$(SSH_HOST):/tmp/
+	ssh $(SSH_USER)@$(SSH_HOST) 'mkdir -p ~/syrviscore-devkit && \
+		tar xzf /tmp/syrviscore-devkit-$(VERSION).tar.gz --strip-components=1 -C ~/syrviscore-devkit && \
+		cd ~/syrviscore-devkit && ./bootstrap.sh --yes'
+	@echo "$(GREEN)[SUCCESS]$(NC) Dev install bootstrapped on $(SSH_HOST)"
+
+nas-dev-clean: ## Tear down the dev install on the NAS (requires SSH_HOST)
+	@if [ -z "$(SSH_HOST)" ]; then \
+		echo "$(RED)[ERROR]$(NC) SSH_HOST variable not set"; \
+		exit 1; \
+	fi
+	ssh $(SSH_USER)@$(SSH_HOST) 'cd ~/syrviscore-devkit && ./bootstrap.sh --clean'
 
 uninstall: ## Uninstall SPK from Synology via SSH (requires SSH_HOST variable)
 	@if [ -z "$(SSH_HOST)" ]; then \

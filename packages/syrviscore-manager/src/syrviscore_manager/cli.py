@@ -166,6 +166,12 @@ def _progress_bar(downloaded: int, total: int) -> None:
     type=click.Path(exists=True, dir_okay=False),
     help="Install from a local wheel file instead of GitHub (dev loop)",
 )
+@click.option(
+    "--config",
+    "config_file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Bundle this config.yaml into the version (only with --wheel)",
+)
 @click.option("--force", is_flag=True, help="Force reinstall even if version exists")
 @click.option("--clean", is_flag=True, help="Clean Docker containers/networks before reinstall")
 @click.option("--path", type=click.Path(), help="Installation path (default: auto-detect)")
@@ -176,7 +182,7 @@ def _progress_bar(downloaded: int, total: int) -> None:
     help="Allow installing releases that publish no SHA256SUMS asset",
 )
 @handle_errors
-def install(version, wheel_file, force, clean, path, yes, no_verify):
+def install(version, wheel_file, config_file, force, clean, path, yes, no_verify):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
@@ -223,7 +229,13 @@ def install(version, wheel_file, force, clean, path, yes, no_verify):
     home = paths.resolve_home(explicit=install_path, create=True)
 
     if wheel_file:
-        version_manager.install_from_wheel(home, Path(wheel_file), force=force, log=click.echo)
+        version_manager.install_from_wheel(
+            home,
+            Path(wheel_file),
+            config_path=Path(config_file) if config_file else None,
+            force=force,
+            log=click.echo,
+        )
     else:
         confirm = None if yes else (lambda msg: click.confirm("      " + msg, default=False))
         result = version_manager.download_and_install(

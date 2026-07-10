@@ -74,6 +74,43 @@ def _pip_install_wheel(venv_path: Path, wheel_path: Path) -> None:
         raise InstallError("pip install failed: {}".format(result.stderr.strip()))
 
 
+def _verify_cli_executes(syrvis_bin: Path) -> None:
+    result = subprocess.run(
+        [str(syrvis_bin), "--version"], capture_output=True, text=True, timeout=60
+    )
+    if result.returncode != 0:
+        raise InstallError(
+            "installed syrvis CLI failed to execute: {}".format(
+                (result.stderr or result.stdout).strip()
+            )
+        )
+
+
+def _fixup_relocated_venv(venv_dir: Path, old_prefix: str, new_prefix: str) -> None:
+    """Rewrite absolute paths baked into a venv that was built at another path.
+
+    Console-script shebangs and activate scripts embed the venv's absolute
+    path at creation time; after the staging-directory rename they would
+    point at the (now gone) staging path.
+    """
+    bin_dir = venv_dir / "bin"
+    if not bin_dir.is_dir():
+        return
+    old_bytes = old_prefix.encode()
+    new_bytes = new_prefix.encode()
+    for item in bin_dir.iterdir():
+        if not item.is_file() or item.is_symlink():
+            continue
+        try:
+            content = item.read_bytes()
+        except OSError:
+            continue
+        if old_bytes in content:
+            mode = item.stat().st_mode
+            item.write_bytes(content.replace(old_bytes, new_bytes))
+            item.chmod(mode)
+
+
 # =============================================================================
 # Permissions
 # =============================================================================
@@ -164,8 +201,10 @@ def install_version(
             )
 
         staging_dir = paths.versions_dir(home) / ".staging-{}".format(version)
-        if staging_dir.exists():
-            shutil.rmtree(str(staging_dir))
+        old_dir = paths.versions_dir(home) / ".old-{}".format(version)
+        for leftover in (staging_dir, old_dir):
+            if leftover.exists():
+                shutil.rmtree(str(leftover))
 
         try:
             _build_version_tree(home, version, wheel_path, config_path, staging_dir, log)
@@ -173,12 +212,27 @@ def install_version(
             shutil.rmtree(str(staging_dir), ignore_errors=True)
             raise
 
-        # Build is complete and verified — now (and only now) swap it in.
+        # Build succeeded — move any existing copy ASIDE (not deleted) and
+        # swap the staged tree in.
         if final_dir.exists():
-            shutil.rmtree(str(final_dir))
+            final_dir.rename(old_dir)
         staging_dir.rename(final_dir)
 
-        set_tree_readable(final_dir)
+        try:
+            # Venvs bake their absolute path into script shebangs; rewrite
+            # them from the staging path to the final path.
+            _fixup_relocated_venv(final_dir / "cli" / "venv", str(staging_dir), str(final_dir))
+            set_tree_readable(final_dir)
+            _verify_cli_executes(final_dir / "cli" / "venv" / "bin" / "syrvis")
+        except BaseException:
+            # Restore the previous copy of this version, if there was one.
+            shutil.rmtree(str(final_dir), ignore_errors=True)
+            if old_dir.exists():
+                old_dir.rename(final_dir)
+            raise
+
+        if old_dir.exists():
+            shutil.rmtree(str(old_dir))
         manifest.add_version_to_manifest(home, version, "available")
 
 

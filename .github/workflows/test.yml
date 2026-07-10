@@ -40,3 +40,47 @@ jobs:
       - name: Lint with Ruff
         run: |
           ruff check packages/syrviscore-manager/src packages/syrviscore/src tests
+
+  # End-to-end dev loop: build the devkit tarball, then bootstrap a complete
+  # install from it (real venvs, real pip, offline manager install) — the same
+  # flow used against the NAS via `make nas-dev`.
+  dev-loop:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+          cache: 'pip'
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build devkit tarball
+        run: |
+          chmod +x build-tools/*.sh
+          ./build-tools/build-tarball.sh
+
+      - name: Bootstrap from the tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/devkit"
+          tar xzf dist/syrviscore-devkit-*.tar.gz --strip-components=1 -C "$RUNNER_TEMP/devkit"
+          cd "$RUNNER_TEMP/devkit"
+          ./bootstrap.sh --home "$RUNNER_TEMP/syrvis-dev-home" --yes
+
+      - name: Verify the bootstrapped install
+        run: |
+          test -L "$RUNNER_TEMP/syrvis-dev-home/current"
+          "$RUNNER_TEMP/syrvis-dev-home/current/cli/venv/bin/syrvis" --version
+          SYRVIS_HOME="$RUNNER_TEMP/syrvis-dev-home" \
+            "$RUNNER_TEMP/devkit/manager-venv/bin/syrvisctl" list --json
+
+      - name: Tear down with --clean
+        run: |
+          cd "$RUNNER_TEMP/devkit"
+          ./bootstrap.sh --home "$RUNNER_TEMP/syrvis-dev-home" --clean
+          test ! -d "$RUNNER_TEMP/syrvis-dev-home"

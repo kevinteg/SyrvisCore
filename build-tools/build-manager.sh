@@ -79,22 +79,33 @@ log_success "Manager wheel built: $WHEEL_NAME ($WHEEL_SIZE)"
 log_info "Downloading dependencies for offline installation..."
 mkdir -p "$DEPS_DIR"
 
-# Download wheels for the manager package and all its dependencies
-# Using --platform linux_x86_64 to get Linux-compatible wheels for Synology
-# Also get manylinux wheels which are compatible with most Linux systems
-pip download \
+# Download wheels for the manager package and all its dependencies.
+# Pins come from constraints-bundle.txt so two builds of the same tag bundle
+# the same bytes. Platform flags target the NAS (linux x86_64, Python 3.8).
+# NO silent fallback: a host-platform wheel bundled here would make the
+# offline install fail on the NAS with an opaque pip error — fail loudly
+# at build time instead.
+CONSTRAINTS_FILE="$MANAGER_DIR/constraints-bundle.txt"
+if [ ! -f "$CONSTRAINTS_FILE" ]; then
+    log_error "Constraints file not found: $CONSTRAINTS_FILE"
+    exit 1
+fi
+
+# --platform any: bundle ONLY pure-Python (py3-none-any) wheels. Every
+# pinned dependency publishes one, and a pure bundle installs identically
+# on the NAS (linux x86_64), macOS (local testing), and CI.
+if ! pip download \
     --dest "$DEPS_DIR" \
     --only-binary=:all: \
     --python-version 3.8 \
-    --platform manylinux2014_x86_64 \
-    --platform linux_x86_64 \
     --platform any \
-    "$WHEEL_FILE" 2>/dev/null || {
-    log_info "Some platform-specific wheels not available, downloading universal wheels..."
-    pip download \
-        --dest "$DEPS_DIR" \
-        "$WHEEL_FILE"
-}
+    --constraint "$CONSTRAINTS_FILE" \
+    "$WHEEL_FILE"; then
+    log_error "Dependency download failed (pure-Python py3.8 wheels)."
+    log_error "A pinned dependency likely stopped publishing a py3-none-any wheel;"
+    log_error "fix the pin in $CONSTRAINTS_FILE."
+    exit 1
+fi
 
 # Count downloaded wheels
 WHEEL_COUNT=$(ls -1 "$DEPS_DIR"/*.whl 2>/dev/null | wc -l | tr -d ' ')

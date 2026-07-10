@@ -41,7 +41,9 @@ def fake_venv_backend(monkeypatch):
         (venv_path / "bin" / "pip").write_text("#!/bin/sh\n")
 
     def _pip_install_wheel(venv_path, wheel_path):
-        (venv_path / "bin" / "syrvis").write_text("#!/bin/sh\necho fake\n")
+        (venv_path / "bin" / "syrvis").write_text(
+            "#!/bin/sh\n# venv: {}\necho fake\n".format(venv_path)
+        )
 
     monkeypatch.setattr(version_manager, "_create_venv", _create_venv)
     monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)

@@ -15,9 +15,6 @@ LOG_FILE="/tmp/syrviscore_${SCRIPT_NAME}.log"
 # Timeout for docker operations (seconds)
 DOCKER_TIMEOUT=30
 
-set -x
-exec 2>>"$LOG_FILE"
-
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
@@ -57,7 +54,7 @@ PACKAGE_NAME="syrviscore"
 
 # Find installation directory - check both old and new paths
 INSTALL_DIR=""
-for VOLUME in /volume1 /volume2 /volume3 /volume4 /volume5; do
+for VOLUME in /volume[0-9]*; do
     # Check new path first (without docker/)
     if [ -f "$VOLUME/${PACKAGE_NAME}/.syrviscore-manifest.json" ]; then
         INSTALL_DIR="$VOLUME/${PACKAGE_NAME}"

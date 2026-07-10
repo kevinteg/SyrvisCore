@@ -50,7 +50,11 @@ def fake_venv_backend(monkeypatch):
         (venv_path / "bin" / "pip").write_text("#!/bin/sh\n")
 
     def _pip_install_wheel(venv_path, wheel_path):
-        (venv_path / "bin" / "syrvis").write_text("#!/bin/sh\necho fake-syrvis\n")
+        # Real pip bakes the venv's absolute path into script shebangs;
+        # embed it here so the staging->final relocation fixup is exercised.
+        (venv_path / "bin" / "syrvis").write_text(
+            "#!/bin/sh\n# venv: {}\necho fake-syrvis\n".format(venv_path)
+        )
 
     monkeypatch.setattr(version_manager, "_create_venv", _create_venv)
     monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)
@@ -147,7 +151,12 @@ class TestInstall:
         assert result["version"] == "0.1.0"
 
         vdir = home / "versions" / "0.1.0"
-        assert (vdir / "cli" / "venv" / "bin" / "syrvis").exists()
+        marker = vdir / "cli" / "venv" / "bin" / "syrvis"
+        assert marker.exists()
+        # The staging path must have been rewritten to the final location
+        content = marker.read_text()
+        assert ".staging-" not in content
+        assert str(vdir) in content
         assert list((vdir / "wheel").glob("*.whl"))
         assert paths.active_version(home) == "0.1.0"
         assert (home / "bin" / "syrvis").exists()

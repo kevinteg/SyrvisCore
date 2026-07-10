@@ -1,0 +1,11 @@
+# Exact pins for the wheels bundled into the SPK / devkit tarball.
+# Two builds of the same tag must bundle the same bytes — transitive
+# dependencies float otherwise (the audit's reproducibility finding).
+# All pins must support Python 3.8 (the DSM runtime) and publish
+# py3-none-any or manylinux2014_x86_64 wheels.
+click==8.1.7
+requests==2.32.3
+urllib3==2.2.3
+certifi==2025.1.31
+idna==3.10
+charset-normalizer==3.4.0

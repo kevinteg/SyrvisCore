@@ -104,10 +104,10 @@ fi
 
 log_success "All required files present"
 
-# Update version in INFO file
-log_info "Updating version in INFO file"
-sed -i.bak "s/^version=.*/version=\"${VERSION}\"/" spk/INFO
-rm -f spk/INFO.bak
+# Stage INFO into the build directory and version the COPY (never
+# mutate the source tree during a build)
+log_info "Staging INFO with version ${VERSION}"
+sed "s/^version=.*/version=\"${VERSION}\"/" spk/INFO > "$BUILD_DIR/INFO"
 
 # Find the MANAGER wheel file and dependencies
 log_info "Looking for manager wheel file and dependencies"
@@ -178,8 +178,6 @@ PACKAGE_SIZE=$(du -h "$BUILD_DIR/package.tgz" | cut -f1)
 log_success "Created package.tgz ($PACKAGE_SIZE)"
 
 # Copy SPK metadata files to build directory
-log_info "Copying SPK metadata"
-cp spk/INFO "$BUILD_DIR/"
 
 # Copy icons
 log_info "Copying icons"
