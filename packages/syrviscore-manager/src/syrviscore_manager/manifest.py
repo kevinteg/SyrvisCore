@@ -180,7 +180,7 @@ def verify_setup_complete() -> bool:
     """
     try:
         manifest = get_manifest()
-        return manifest.get('setup_complete', False)
+        return manifest.get("setup_complete", False)
     except (SyrvisHomeError, FileNotFoundError):
         return False
 

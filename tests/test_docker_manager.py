@@ -32,6 +32,7 @@ def temp_syrvis_home_with_compose(tmp_path):
 
     # Create manifest
     import json
+
     manifest = {
         "schema_version": 2,
         "active_version": "0.0.1",

@@ -113,10 +113,7 @@ def run_syrvis_clean():
 
     try:
         result = subprocess.run(
-            [syrvis_cmd, "clean", "-y"],
-            capture_output=True,
-            text=True,
-            timeout=60
+            [syrvis_cmd, "clean", "-y"], capture_output=True, text=True, timeout=60
         )
         return True, result.stdout + result.stderr
     except subprocess.TimeoutExpired:
@@ -126,11 +123,11 @@ def run_syrvis_clean():
 
 
 @cli.command()
-@click.argument('version', required=False)
-@click.option('--force', is_flag=True, help='Force reinstall even if version exists')
-@click.option('--clean', is_flag=True, help='Clean Docker containers/networks before reinstall')
-@click.option('--path', type=click.Path(), help='Installation path (default: auto-detect)')
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompts')
+@click.argument("version", required=False)
+@click.option("--force", is_flag=True, help="Force reinstall even if version exists")
+@click.option("--clean", is_flag=True, help="Clean Docker containers/networks before reinstall")
+@click.option("--path", type=click.Path(), help="Installation path (default: auto-detect)")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompts")
 def install(version, force, clean, path, yes):
     """Download and install a service version from GitHub.
 
@@ -178,7 +175,7 @@ def install(version, force, clean, path, yes):
             user_path = click.prompt(
                 f"  Installation path [{default_path}]",
                 default=str(default_path),
-                show_default=False
+                show_default=False,
             )
             install_path = Path(user_path)
 
@@ -219,8 +216,8 @@ def install(version, force, clean, path, yes):
 
 
 @cli.command()
-@click.argument('version')
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
+@click.argument("version")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 def uninstall(version, yes):
     """Remove a service version.
 
@@ -261,7 +258,7 @@ def uninstall(version, yes):
         sys.exit(1)
 
 
-@cli.command('list')
+@cli.command("list")
 def list_versions():
     """List installed service versions."""
     click.echo()
@@ -291,7 +288,7 @@ def list_versions():
 
 
 @cli.command()
-@click.argument('version')
+@click.argument("version")
 def activate(version):
     """Activate a specific service version.
 
@@ -317,6 +314,7 @@ def activate(version):
 
     # Check if we need sudo to modify the symlink
     import os
+
     current_link = paths.get_syrvis_home() / "current"
     if check_sudo_needed(current_link):
         if os.geteuid() != 0:
@@ -334,7 +332,7 @@ def activate(version):
 
 
 @cli.command()
-@click.argument('version', required=False)
+@click.argument("version", required=False)
 def rollback(version):
     """Rollback to a previous version (full restore from backup).
 
@@ -376,7 +374,7 @@ def rollback(version):
     for b in backups:
         if b["version"] == active:
             continue  # Skip current version
-        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+        suffix_str = f"-{b['suffix']}" if b["suffix"] else ""
         date_str = b["created_at"][:10] if b["created_at"] else "unknown"
         reason = b.get("reason", "unknown")
         click.echo(f"  {b['version']}{suffix_str} ({date_str}) - {reason}")
@@ -397,7 +395,7 @@ def rollback(version):
             click.echo("No version to rollback to", err=True)
             sys.exit(1)
 
-        version = click.prompt(f"Rollback to version", default=version)
+        version = click.prompt("Rollback to version", default=version)
 
     # Validate version has a backup
     backup_path = backup.get_backup_for_rollback(version)
@@ -481,7 +479,7 @@ def check():
         body = release.get("body", "")
         if body:
             click.echo("  Release notes:")
-            for line in body.split('\n')[:10]:
+            for line in body.split("\n")[:10]:
                 click.echo(f"    {line}")
             click.echo()
 
@@ -552,8 +550,8 @@ def info():
 
 
 @cli.command()
-@click.option('--keep', default=2, help='Number of versions to keep')
-@click.option('--dry-run', is_flag=True, help='Show what would be removed')
+@click.option("--keep", default=2, help="Number of versions to keep")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed")
 def cleanup(keep, dry_run):
     """Remove old versions to free disk space.
 
@@ -602,8 +600,8 @@ def cleanup(keep, dry_run):
 
 
 @cli.command()
-@click.option('--from-legacy', is_flag=True, help='Migrate from legacy (monolithic) installation')
-@click.option('--dry-run', is_flag=True, help='Show what would be migrated')
+@click.option("--from-legacy", is_flag=True, help="Migrate from legacy (monolithic) installation")
+@click.option("--dry-run", is_flag=True, help="Show what would be migrated")
 def migrate(from_legacy, dry_run):
     """Migrate from a legacy installation.
 
@@ -703,13 +701,14 @@ def migrate(from_legacy, dry_run):
 # Backup Commands
 # =============================================================================
 
-@cli.group('backup')
+
+@cli.group("backup")
 def backup_group():
     """Backup management commands."""
     pass
 
 
-@backup_group.command('list')
+@backup_group.command("list")
 def backup_list():
     """List available backups."""
     click.echo()
@@ -728,7 +727,7 @@ def backup_list():
     click.echo(f"  {'-'*12} {'-'*12} {'-'*10} {'-'*12}")
 
     for b in backups:
-        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+        suffix_str = f"-{b['suffix']}" if b["suffix"] else ""
         version_str = f"{b['version']}{suffix_str}"
         date_str = b["created_at"][:10] if b["created_at"] else "unknown"
         size_mb = b["size"] / (1024 * 1024)
@@ -743,10 +742,14 @@ def backup_list():
         pass
 
 
-@backup_group.command('create')
-@click.option('--output', '-o', type=click.Path(), help='Output path for backup file')
-@click.option('--reason', type=click.Choice(['manual', 'post-setup']), default='manual',
-              help='Reason for backup (affects naming)')
+@backup_group.command("create")
+@click.option("--output", "-o", type=click.Path(), help="Output path for backup file")
+@click.option(
+    "--reason",
+    type=click.Choice(["manual", "post-setup"]),
+    default="manual",
+    help="Reason for backup (affects naming)",
+)
 def backup_create(output, reason):
     """Create a manual backup of the current state.
 
@@ -787,9 +790,9 @@ def backup_create(output, reason):
         sys.exit(1)
 
 
-@backup_group.command('cleanup')
-@click.option('--keep', default=3, help='Number of versions to keep backups for')
-@click.option('--dry-run', is_flag=True, help='Show what would be deleted')
+@backup_group.command("cleanup")
+@click.option("--keep", default=3, help="Number of versions to keep backups for")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
 def backup_cleanup(keep, dry_run):
     """Remove old backups to free disk space.
 
@@ -823,9 +826,9 @@ def backup_cleanup(keep, dry_run):
 
 
 @cli.command()
-@click.argument('backup_file', required=False, type=click.Path(exists=True))
-@click.option('--path', type=click.Path(), help='Installation path')
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation')
+@click.argument("backup_file", required=False, type=click.Path(exists=True))
+@click.option("--path", type=click.Path(), help="Installation path")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
 def restore(backup_file, path, yes):
     """Restore from a backup archive.
 
@@ -855,7 +858,7 @@ def restore(backup_file, path, yes):
                 click.echo("Available backups:")
                 click.echo()
                 for i, b in enumerate(backups, 1):
-                    suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+                    suffix_str = f"-{b['suffix']}" if b["suffix"] else ""
                     date_str = b["created_at"][:10] if b["created_at"] else "unknown"
                     click.echo(f"  {i}. {b['version']}{suffix_str} ({date_str}) - {b['path']}")
                 click.echo()
@@ -913,8 +916,9 @@ def restore(backup_file, path, yes):
     else:
         install_path = Path(original_path)
         if not yes:
-            user_path = click.prompt(f"Install path [{install_path}]",
-                                     default=str(install_path), show_default=False)
+            user_path = click.prompt(
+                f"Install path [{install_path}]", default=str(install_path), show_default=False
+            )
             install_path = Path(user_path)
 
     click.echo(f"Restore to:  {install_path}")
@@ -935,6 +939,7 @@ def restore(backup_file, path, yes):
 
         click.echo("[2/3] Creating wrapper scripts...")
         import os
+
         os.environ["SYRVIS_HOME"] = str(install_path)
         paths.create_syrvis_wrapper()
         paths.create_syrvis_profile()

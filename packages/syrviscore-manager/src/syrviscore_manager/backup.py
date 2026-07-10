@@ -14,11 +14,8 @@ Backup naming convention:
 """
 
 import json
-import os
 import re
-import shutil
 import tarfile
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -73,7 +70,7 @@ def parse_backup_filename(filename: str) -> Tuple[Optional[str], Optional[int]]:
         Tuple of (version, suffix) where suffix is None for base backups
     """
     # Match patterns like "0.1.12.tar.gz" or "0.1.12-2.tar.gz"
-    match = re.match(r'^(\d+\.\d+\.\d+)(?:-(\d+))?\.tar\.gz$', filename)
+    match = re.match(r"^(\d+\.\d+\.\d+)(?:-(\d+))?\.tar\.gz$", filename)
     if match:
         version = match.group(1)
         suffix = int(match.group(2)) if match.group(2) else None
@@ -140,8 +137,11 @@ def list_backup_versions() -> List[str]:
         List of version strings, sorted newest first
     """
     backups = list_backups()
-    versions = sorted(set(b["version"] for b in backups), reverse=True,
-                      key=lambda v: tuple(int(p) for p in v.split(".")))
+    versions = sorted(
+        set(b["version"] for b in backups),
+        reverse=True,
+        key=lambda v: tuple(int(p) for p in v.split(".")),
+    )
     return versions
 
 
@@ -511,10 +511,7 @@ def cleanup_old_backups(keep_versions: int = 3, dry_run: bool = False) -> List[P
             seen.add(b["version"])
 
     # Sort by semantic version (newest first)
-    all_versions.sort(
-        key=lambda v: tuple(int(p) for p in v.split(".")),
-        reverse=True
-    )
+    all_versions.sort(key=lambda v: tuple(int(p) for p in v.split(".")), reverse=True)
 
     # Determine versions to keep
     versions_to_keep = set(all_versions[:keep_versions])

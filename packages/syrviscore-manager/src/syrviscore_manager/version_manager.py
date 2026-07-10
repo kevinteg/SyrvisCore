@@ -115,8 +115,7 @@ def install_version(version: str, wheel_path: Path, config_path: Optional[Path] 
         if not venv_path.exists():
             click.echo("      Creating virtual environment...")
             result = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_path)],
-                capture_output=True, text=True
+                [sys.executable, "-m", "venv", str(venv_path)], capture_output=True, text=True
             )
             if result.returncode != 0:
                 click.echo(f"      Error creating venv: {result.stderr}", err=True)
@@ -125,15 +124,13 @@ def install_version(version: str, wheel_path: Path, config_path: Optional[Path] 
         # Upgrade pip
         pip_path = venv_path / "bin" / "pip"
         subprocess.run(
-            [str(pip_path), "install", "--upgrade", "pip", "--quiet"],
-            capture_output=True
+            [str(pip_path), "install", "--upgrade", "pip", "--quiet"], capture_output=True
         )
 
         # Install wheel into venv
         click.echo("      Installing service package...")
         result = subprocess.run(
-            [str(pip_path), "install", "--quiet", str(wheel_dest)],
-            capture_output=True, text=True
+            [str(pip_path), "install", "--quiet", str(wheel_dest)], capture_output=True, text=True
         )
         if result.returncode != 0:
             click.echo(f"      Error installing wheel: {result.stderr}", err=True)
@@ -279,7 +276,7 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
             return False
         version = downloader.get_version_from_release(release)
     else:
-        version = version.lstrip('v')
+        version = version.lstrip("v")
         click.echo(f"[1/5] Fetching release v{version}...")
         release = downloader.get_release_by_tag(version)
         if not release:
@@ -345,9 +342,7 @@ def download_and_install(version: Optional[str] = None, force: bool = False) -> 
             config_path = tmp_path / "config.yaml"
             click.echo("      config.yaml")
             downloader.download_file(
-                config_asset["browser_download_url"],
-                config_path,
-                show_progress=False
+                config_asset["browser_download_url"], config_path, show_progress=False
             )
 
         # Install

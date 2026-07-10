@@ -32,6 +32,7 @@ def can_access_docker() -> bool:
 def needs_elevation_for_path(path) -> bool:
     """Check if we need elevation to write to a path."""
     from pathlib import Path
+
     path = Path(path)
 
     # Check if path exists and is writable

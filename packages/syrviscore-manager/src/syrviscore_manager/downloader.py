@@ -27,7 +27,7 @@ def get_latest_release() -> Optional[Dict[str, Any]]:
             GITHUB_API_URL,
             params={"per_page": 20},
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code != 200:
             return None
@@ -54,13 +54,13 @@ def get_release_by_tag(tag: str) -> Optional[Dict[str, Any]]:
     """Fetch specific release by tag."""
     try:
         # Ensure tag has 'v' prefix
-        if not tag.startswith('v'):
+        if not tag.startswith("v"):
             tag = f"v{tag}"
 
         response = requests.get(
             f"{GITHUB_API_URL}/tags/{tag}",
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code == 200:
             return response.json()
@@ -76,7 +76,7 @@ def list_releases(limit: int = 10) -> List[Dict[str, Any]]:
             GITHUB_API_URL,
             params={"per_page": limit},
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code == 200:
             return response.json()
@@ -88,9 +88,9 @@ def list_releases(limit: int = 10) -> List[Dict[str, Any]]:
 def parse_version(version_str: str) -> Tuple[int, ...]:
     """Parse version string into comparable tuple."""
     # Remove 'v' prefix if present
-    v = version_str.lstrip('v')
+    v = version_str.lstrip("v")
     try:
-        return tuple(int(p) for p in v.split('.'))
+        return tuple(int(p) for p in v.split("."))
     except ValueError:
         return (0, 0, 0)
 
@@ -148,10 +148,10 @@ def download_file(url: str, dest: Path, show_progress: bool = True) -> bool:
         response = requests.get(url, stream=True, timeout=60)
         response.raise_for_status()
 
-        total_size = int(response.headers.get('content-length', 0))
+        total_size = int(response.headers.get("content-length", 0))
         downloaded = 0
 
-        with open(dest, 'wb') as f:
+        with open(dest, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
@@ -160,7 +160,7 @@ def download_file(url: str, dest: Path, show_progress: bool = True) -> bool:
                         percent = (downloaded / total_size) * 100
                         bar_len = 30
                         filled = int(bar_len * downloaded / total_size)
-                        bar = '=' * filled + '-' * (bar_len - filled)
+                        bar = "=" * filled + "-" * (bar_len - filled)
                         click.echo(f"\r      [{bar}] {percent:.0f}%", nl=False)
 
         if show_progress:
@@ -175,4 +175,4 @@ def download_file(url: str, dest: Path, show_progress: bool = True) -> bool:
 def get_version_from_release(release: Dict[str, Any]) -> str:
     """Extract version string from release."""
     tag = release.get("tag_name", "")
-    return tag.lstrip('v')
+    return tag.lstrip("v")
