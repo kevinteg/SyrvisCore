@@ -84,6 +84,32 @@ def test_dsm_native_tooling():
     assert "for t in synouser synogroup install cp id awk chmod chown mktemp" in script
 
 
+def test_operator_login_shell_set_to_sh():
+    script = _render()
+    # DSM's synouser creates users as /sbin/nologin, which cannot run the shim.
+    assert "set operator login shell" in script
+    assert '$7="/bin/sh"' in script
+    # idempotent: skip when already /bin/sh
+    assert '[ "$CUR_SHELL" = "/bin/sh" ]' in script
+    # atomic swap: temp in /etc (same fs), then rename over /etc/passwd
+    assert 'mv -f "$PW_NEW" /etc/passwd' in script
+    # a record-count guard means it refuses to install a mangled passwd
+    assert "refusing to install /etc/passwd" in script
+
+
+def test_shell_rollback_is_surgical_not_full_overwrite():
+    script = _render()
+    # rollback restores only the one shell field via _setshell, never cp/mv of a
+    # whole /etc/passwd backup (which could clobber unrelated later changes).
+    assert "_setshell()" in script
+    assert "setshell) printf" in script
+    # the manifest entry that drives it
+    assert "printf 'setshell %s %s\\n'" in script
+    # we never capture_original the whole passwd file
+    assert 'capture_original "/etc/passwd"' not in script
+    assert 'capture_original "$PW' not in script
+
+
 def test_dry_run_tolerates_missing_operator_home():
     # In --dry-run the account isn't created, so /etc/passwd has no home entry.
     # The preview must not abort there; it assumes the DSM default home instead.

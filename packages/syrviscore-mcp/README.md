@@ -95,9 +95,15 @@ sudo sh /tmp/manual_mcp_account_provision.sh             # apply
 
 It creates the `syrvis-operator` user with the correct DSM `synouser` syntax
 (`username password "full name" expired mail AppPrivilege` — SSH-key-only, a
-random unused password), ensures the `docker` group exists and adds the operator
-to it via `--memberadd` (which does **not** replace existing members), installs
-the sudoers policy (staged under a dotted name `sudo` ignores, then renamed into
+random unused password), then gives it a real login shell. **DSM creates every
+account with `/sbin/nologin`, which cannot run the forced-command shim** — sshd
+executes the shim *through* the login shell, so a `nologin` operator makes every
+key login fail with a misleading password prompt. The script sets the operator's
+shell to `/bin/sh` **surgically** (rewriting only that one field of its
+`/etc/passwd` line, atomically via rename — never a full-file overwrite). It
+then ensures the `docker` group exists and adds the operator to it via
+`--memberadd` (which does **not** replace existing members), installs the
+sudoers policy (staged under a dotted name `sudo` ignores, then renamed into
 place — atomic; `visudo`-validated too if your DSM has it), the shim, and the
 operator key. The key install is **additive** — it preserves any other keys on
 the account (e.g. a break-glass admin key) and just replaces its own line.
@@ -105,7 +111,8 @@ the account (e.g. a break-glass admin key) and just replaces its own line.
 Before changing any system file it records the **true pre-install state once**
 (under `/var/log/syrviscore-mcp-provision/original/`) and writes a
 `/var/log/syrviscore-mcp-provision/rollback.sh` that reverts *exactly* —
-restoring a file that existed, or removing one the script created. To undo
+restoring a file that existed, removing one the script created, or putting the
+operator's login shell back (again field-surgically, not a passwd overwrite). To undo
 everything: `sudo sh /var/log/syrviscore-mcp-provision/rollback.sh`. If
 `synouser`/`synogroup` aren't available on your DSM version, the script tells
 you to create the user / add the group via Control Panel and re-run. The
