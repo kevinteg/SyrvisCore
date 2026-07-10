@@ -112,11 +112,11 @@ Adopt the audit's priority list verbatim (audit §4): gating CI on Python 3.8.12
 
 ## 11. Phases
 
-| Phase | Contents | Exit criteria |
-|---|---|---|
-| **0. Hygiene** | Delete dead artifacts (wizard, `spk/package/`, root pyproject, orphaned tests); fix Makefile/tox/CI to monorepo; pin manager deps | CI green and gating on 3.8 |
-| **1. Manager core** | Rewrite internals per §3/§4: typed core, atomic ops, checksums, `--json`, `install --wheel` | Hermetic install→activate→rollback→restore tests pass |
-| **2. Dev loop** | Tarball build + `bootstrap.sh` (+`--clean`); SPK script rewrite; `verify --smoke` | Full loop green on the real NAS against a dev `SYRVIS_HOME` |
+| Phase | Contents | Exit criteria | Status |
+|---|---|---|---|
+| **0. Hygiene** | Delete dead artifacts (wizard, `spk/package/`, root pyproject, orphaned tests); fix Makefile/tox/CI to monorepo; pin manager deps | CI green and gating on 3.8 | ✅ done (2026-07-09) |
+| **1. Manager core** | Rewrite internals per §3/§4: typed core, atomic ops, checksums, `--json`, `install --wheel` | Hermetic install→activate→rollback→restore tests pass | ✅ done (2026-07-09) |
+| **2. Dev loop** | Tarball build + `bootstrap.sh` (+`--clean`); SPK script rewrite | Full loop green on the real NAS against a dev `SYRVIS_HOME` | 🟡 built + verified locally and in CI (`make tarball`, dev-loop CI job); NAS run pending (`make nas-dev SSH_HOST=…`). `verify --smoke` moved to Phase 4 with the rest of the verify engine — the bootstrap gate currently checks install integrity + CLI execution |
 | **3. Service refactor** | Security fixes (L2 C1/C2), elevation redesign (H2), thin CLI over structured managers, compose v2 unification | `sudo syrvis service …` works; malicious-manifest tests pass |
 | **4. Verify engine** | Drift check, fixer gaps, JSON reports | `verify` catches an injected drift on the NAS |
 | **5. MCP + skills** | MCP server over SSH+`--json`; sudoers enumeration; home-tech operator skills | home-tech session deploys + verifies a Layer 2 service end-to-end via MCP |
