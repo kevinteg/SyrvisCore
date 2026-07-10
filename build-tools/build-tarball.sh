@@ -87,8 +87,10 @@ if "$TAR_BIN" --version 2>/dev/null | grep -q "GNU tar"; then
         -czf "$DIST_DIR/$TARBALL_NAME" devkit
 else
     # bsdtar (macOS): not bit-reproducible; SHA256SUMS inside still covers
-    # content integrity. COPYFILE_DISABLE prevents AppleDouble ._* leakage.
-    COPYFILE_DISABLE=1 "$TAR_BIN" -czf "$DIST_DIR/$TARBALL_NAME" devkit
+    # content integrity. COPYFILE_DISABLE prevents AppleDouble ._* leakage;
+    # --no-mac-metadata drops the com.apple.provenance xattr that otherwise
+    # makes GNU tar on the NAS print "Ignoring unknown extended header".
+    COPYFILE_DISABLE=1 "$TAR_BIN" --no-mac-metadata -czf "$DIST_DIR/$TARBALL_NAME" devkit
     log_info "  (bsdtar: archive is not bit-reproducible; install gnu-tar for that)"
 fi
 

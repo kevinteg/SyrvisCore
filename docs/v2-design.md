@@ -116,11 +116,11 @@ Adopt the audit's priority list verbatim (audit §4): gating CI on Python 3.8.12
 |---|---|---|---|
 | **0. Hygiene** | Delete dead artifacts (wizard, `spk/package/`, root pyproject, orphaned tests); fix Makefile/tox/CI to monorepo; pin manager deps | CI green and gating on 3.8 | ✅ done (2026-07-09) |
 | **1. Manager core** | Rewrite internals per §3/§4: typed core, atomic ops, checksums, `--json`, `install --wheel` | Hermetic install→activate→rollback→restore tests pass | ✅ done (2026-07-09) |
-| **2. Dev loop** | Tarball build + `bootstrap.sh` (+`--clean`); SPK script rewrite | Full loop green on the real NAS against a dev `SYRVIS_HOME` | 🟡 built + verified locally and in CI (`make tarball`, dev-loop CI job); NAS run pending (`make nas-dev SSH_HOST=…`). `verify --smoke` moved to Phase 4 with the rest of the verify engine — the bootstrap gate currently checks install integrity + CLI execution |
-| **3. Service refactor** | Security fixes (L2 C1/C2), elevation redesign (H2), thin CLI over structured managers, compose v2 unification | `sudo syrvis service …` works; malicious-manifest tests pass |
-| **4. Verify engine** | Drift check, fixer gaps, JSON reports | `verify` catches an injected drift on the NAS |
-| **5. MCP + skills** | MCP server over SSH+`--json`; sudoers enumeration; home-tech operator skills | home-tech session deploys + verifies a Layer 2 service end-to-end via MCP |
-| **6. Spec v2** | `syrvis-service.yaml` schema versioning + validation + docs; tie into Cadence #17 | pursuit repo deploys an internal site by advertising a manifest |
+| **2. Dev loop** | Tarball build + `bootstrap.sh` (+`--clean`); SPK script rewrite | Full loop green on the real NAS against a dev `SYRVIS_HOME` | ✅ done (2026-07-09). Validated on the NAS (Synology avoton, DSM Python 3.8.12) as user `cerebrate` into `~/syrviscore-dev`: checksums verified, offline manager venv, `install --wheel`, `--json` output, idempotent re-run, `--clean` teardown — all green. `setup` skipped (no passwordless sudo / docker for that user; privileged setup is Phase 4/5). `verify --smoke` moved to Phase 4 |
+| **3. Service refactor** | Security fixes (L2 C1/C2), elevation redesign (H2), thin CLI over structured managers, compose v2 unification | `sudo syrvis service …` works; malicious-manifest tests pass | ✅ security fixes done (2026-07-09); non-security cleanups tracked in `PHASE3-NONSECURITY-NOTES.md` |
+| **4. Verify engine** ⚠️ | Drift check, fixer gaps, JSON reports | `verify` catches an injected drift on the NAS | ⚠️ **route to a non-Fable model** — centers on the privileged layer (docker socket, macvlan, sudo remediation) that trips Fable's dual-use safeguards. See `~/.claude/.../memory/fable-avoid-privileged-layer.md` |
+| **5. MCP + skills** ⚠️ | MCP server over SSH+`--json`; sudoers enumeration; home-tech operator skills | home-tech session deploys + verifies a Layer 2 service end-to-end via MCP | ⚠️ **route to a non-Fable model** — privileged/sudoers surface |
+| **6. Spec v2** | `syrvis-service.yaml` schema versioning + validation + docs; tie into Cadence #17 | pursuit repo deploys an internal site by advertising a manifest | not started (non-privileged; Fable-safe) |
 
 Production cutover (replacing the currently-installed instance) happens only after Phase 4, via the SPK, with a pre-cutover `syrvisctl backup` and a rehearsed rollback.
 
