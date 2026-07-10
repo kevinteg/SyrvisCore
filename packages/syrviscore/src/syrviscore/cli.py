@@ -116,13 +116,20 @@ def service_remove(name, purge, yes):
 
 
 @service.command("list")
-def service_list():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+def service_list(as_json):
     """List all installed services."""
     try:
         from syrviscore.service_manager import ServiceManager
 
         manager = ServiceManager()
         services = manager.list()
+
+        if as_json:
+            import json as jsonlib
+
+            click.echo(jsonlib.dumps({"services": services}, indent=2, default=str))
+            return
 
         if not services:
             click.echo("No services installed")
@@ -143,10 +150,12 @@ def service_list():
 
         click.echo()
 
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
     except Exception as e:
+        if as_json:
+            import json as jsonlib
+
+            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
+            raise SystemExit(1)
         click.echo(f"Failed to list services: {e}", err=True)
         raise click.Abort()
 
@@ -232,11 +241,21 @@ def service_update(name):
 
 
 @cli.command()
-def status():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+def status(as_json):
     """Show status of all services (alias for 'core status')."""
     try:
         manager = DockerManager()
         statuses = manager.get_container_status()
+        active = get_active_version()
+
+        if as_json:
+            import json as jsonlib
+
+            click.echo(
+                jsonlib.dumps({"version": active, "services": statuses}, indent=2, default=str)
+            )
+            return
 
         if not statuses:
             click.echo("No services found")
@@ -248,7 +267,6 @@ def status():
         click.echo("=" * 60)
 
         # Show version info
-        active = get_active_version()
         if active:
             click.echo(f"Version: {active}")
         click.echo()
@@ -264,13 +282,20 @@ def status():
 
         click.echo()
 
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
+    except (SyrvisHomeError, DockerConnectionError) as e:
+        if as_json:
+            import json as jsonlib
+
+            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
+            raise SystemExit(1)
         click.echo(f"Error: {e}", err=True)
         raise click.Abort()
     except Exception as e:
+        if as_json:
+            import json as jsonlib
+
+            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
+            raise SystemExit(1)
         click.echo(f"Failed to get status: {e}", err=True)
         raise click.Abort()
 
