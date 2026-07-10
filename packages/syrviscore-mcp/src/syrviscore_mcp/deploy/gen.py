@@ -282,6 +282,10 @@ AUTHLINE='{authline}'
 """
 
     helpers = r"""
+# DSM keeps synouser/synogroup in /usr/syno/sbin, which sudo's secure_path omits.
+PATH="/usr/syno/sbin:/usr/syno/bin:$PATH"
+export PATH
+
 DRYRUN=0
 [ "${1:-}" = "--dry-run" ] && DRYRUN=1
 
@@ -345,7 +349,9 @@ write_rollback() {
 # --- Preflight -------------------------------------------------------------
 STEP="preflight"
 [ "$(id -u)" = "0" ] || die "run this as root: sudo sh $0"
-for t in visudo synouser synogroup getent install cp; do
+# DSM has no visudo/getent; we validate sudoers via an atomic install and read
+# users/groups from /etc/passwd + /etc/group instead.
+for t in synouser synogroup install cp id awk chmod chown mktemp; do
     command -v "$t" >/dev/null 2>&1 || die "required tool not found: $t"
 done
 if [ ! -x "$SYRVIS_HOME/bin/syrvis" ]; then
@@ -374,7 +380,7 @@ fi
 
 # --- 2. docker access (read-only tools read the docker socket) -------------
 STEP="docker group membership"
-if ! getent group docker >/dev/null 2>&1; then
+if ! grep -q "^docker:" /etc/group 2>/dev/null; then
     say "docker group missing — creating it"
     run "synogroup --add docker"
 fi
@@ -394,28 +400,35 @@ else
     fi
 fi
 
-# --- 3. sudoers policy (validate BEFORE installing, re-validate after) ------
+# --- 3. sudoers policy (atomic install; DSM has no visudo) ------------------
 STEP="install sudoers policy"
 say "installing sudoers policy -> $SUDOERS_PATH"
-TMP_SUDOERS="$RUN_DIR/sudoers.new"
+# Stage the temp in the SAME directory with a dotted name (which sudo's
+# #includedir ignores), so the only state sudo ever sees is an atomic rename
+# into place — no torn write can break sudo, even without visudo.
+TMP_SUDOERS="$(dirname "$SUDOERS_PATH")/.syrviscore-mcp.tmp.$$"
 """
 
     # sudoers heredoc — raw body, must not be expanded
     sudoers_block = (
         'if [ "$DRYRUN" = 1 ]; then\n'
-        "  printf '   [dry-run] would write, visudo-validate, install %s\\n' \"$SUDOERS_PATH\"\n"
+        "  printf '   [dry-run] would write, validate, atomically install %s\\n' \"$SUDOERS_PATH\"\n"
         "else\n"
         "cat > \"$TMP_SUDOERS\" <<'SYRVIS_SUDOERS_EOF'\n" + sudoers_body + "\nSYRVIS_SUDOERS_EOF\n"
-        '  visudo -cf "$TMP_SUDOERS" || die "generated sudoers failed visudo validation (not installed)"\n'
+        '  chmod 0440 "$TMP_SUDOERS" || { rm -f "$TMP_SUDOERS"; die "chmod failed"; }\n'
+        '  chown root:root "$TMP_SUDOERS" 2>/dev/null || true\n'
+        "  # visudo is absent on DSM; the content is visudo-validated in CI and the\n"
+        "  # atomic rename below prevents torn writes. Validate here too if available.\n"
+        "  if command -v visudo >/dev/null 2>&1; then\n"
+        '    visudo -cf "$TMP_SUDOERS" || { rm -f "$TMP_SUDOERS"; die "sudoers failed visudo validation (not installed)"; }\n'
+        "  else\n"
+        '    say "note: visudo not on this system; relying on CI-validated content + atomic install"\n'
+        "  fi\n"
         "fi\n"
     )
 
     sudoers_install = r"""capture_original "$SUDOERS_PATH"
-run "install -m 0440 -o root -g root '$TMP_SUDOERS' '$SUDOERS_PATH'"
-# Re-validate what actually landed, so a torn write can't silently break sudo.
-if [ "$DRYRUN" != 1 ]; then
-    visudo -cf "$SUDOERS_PATH" || { rm -f "$SUDOERS_PATH"; die "landed sudoers failed validation; removed to keep sudo working"; }
-fi
+run "mv -f '$TMP_SUDOERS' '$SUDOERS_PATH'"
 
 # --- 4. forced-command shim ------------------------------------------------
 STEP="install forced-command shim"
@@ -436,7 +449,7 @@ run "install -m 0755 -o root -g root '$TMP_SHIM' '$SHIM_PATH'"
 
 # --- 5. operator SSH key, locked to the shim (ADDITIVE) --------------------
 STEP="install operator SSH key"
-HOMEDIR=$(getent passwd "$OPERATOR" | cut -d: -f6)
+HOMEDIR=$(awk -F: -v u="$OPERATOR" '$1==u{print $6; exit}' /etc/passwd)
 [ -n "$HOMEDIR" ] || die "could not resolve home dir for '$OPERATOR' (enable the user-home service in DSM, then re-run). sudoers + shim are installed; run '$ROLLBACK' to revert if you want to start over."
 SSH_DIR="$HOMEDIR/.ssh"
 AUTH="$SSH_DIR/authorized_keys"

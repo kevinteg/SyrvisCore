@@ -37,10 +37,8 @@ def test_bakes_in_key_and_source_restriction():
     assert 'command="/usr/local/bin/syrvis-mcp-shim"' in script
 
 
-def test_backs_up_and_validates_before_install():
+def test_captures_original_before_change():
     script = _render()
-    # visudo validation must appear before the sudoers install
-    assert script.index("visudo -cf") < script.index("install -m 0440")
     # the true pre-install state of each target is captured before it's changed
     assert 'capture_original "$SUDOERS_PATH"' in script
     assert 'capture_original "$SHIM_PATH"' in script
@@ -55,11 +53,15 @@ def test_generates_rollback_and_points_at_it():
     assert "cp -a $BACKUP_DIR/* /" not in script
 
 
-def test_landed_sudoers_revalidated():
+def test_sudoers_installed_atomically():
     script = _render()
-    # after install, the landed file is re-validated and removed if bad
-    assert script.count("visudo -cf") >= 2
-    assert "removed to keep sudo working" in script
+    # staged in the sudoers.d dir with a dotted name sudo ignores, then renamed
+    assert ".syrviscore-mcp.tmp" in script
+    assert "mv -f '$TMP_SUDOERS' '$SUDOERS_PATH'" in script
+    # capture the original before the rename
+    assert script.index('capture_original "$SUDOERS_PATH"') < script.index("mv -f '$TMP_SUDOERS'")
+    # visudo is used only if present (DSM has none) — never a hard requirement
+    assert "command -v visudo" in script
 
 
 def test_authorized_keys_is_additive():
@@ -69,9 +71,21 @@ def test_authorized_keys_is_additive():
     assert '> "$AUTH"' not in script
 
 
+def test_dsm_native_tooling():
+    script = _render()
+    # DSM has no getent/visudo; synouser/synogroup live in /usr/syno/sbin.
+    # getent must not be INVOKED (a comment mentioning it is fine).
+    assert "getent passwd" not in script
+    assert "getent group" not in script
+    assert "/usr/syno/sbin" in script
+    assert "awk -F: -v u=" in script  # home dir from /etc/passwd
+    assert 'grep -q "^docker:" /etc/group' in script  # group from /etc/group
+    # visudo and getent are NOT in the required-tools preflight
+    assert "for t in synouser synogroup install cp id awk chmod chown mktemp" in script
+
+
 def test_docker_group_ensured_and_verified():
     script = _render()
-    assert "getent group docker" in script
     assert "synogroup --add docker" in script
     assert "--memberadd docker" in script
 
