@@ -189,13 +189,16 @@ if [ "$DO_CLEAN" = 1 ]; then
     else
         "$SC" cleanup --keep "$KEEP" -y >> "$LOG_FILE" 2>&1 || warn "cleanup reported an error (see $LOG_FILE)"
     fi
-    # AppleDouble/build junk that older SPK builds leaked into the target
+    # AppleDouble/build junk that older SPK builds leaked into the target.
+    # NB: /var/packages/<pkg>/target is a SYMLINK (-> @appstore/...); find won't
+    # descend a symlink unless it's resolved first, so resolve to the real dir.
     STEP="cleanup build junk"
-    JUNK=$(find "$SPK_TARGET" -maxdepth 2 -name '._*' 2>/dev/null)
+    JUNK_DIR=$(readlink -f "$SPK_TARGET" 2>/dev/null || echo "$SPK_TARGET")
+    JUNK=$(find "$JUNK_DIR" -maxdepth 2 -name '._*' 2>/dev/null)
     if [ -n "$JUNK" ]; then
-        log "Removing macOS AppleDouble junk from $SPK_TARGET:"
+        log "Removing macOS AppleDouble junk from $JUNK_DIR:"
         printf '%s\n' "$JUNK" | sed 's/^/     /'
-        run "find '$SPK_TARGET' -maxdepth 2 -name '._*' -delete"
+        run "find '$JUNK_DIR' -maxdepth 2 -name '._*' -delete"
     fi
 fi
 
