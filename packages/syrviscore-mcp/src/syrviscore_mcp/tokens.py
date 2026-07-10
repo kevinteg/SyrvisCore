@@ -20,10 +20,12 @@ outstanding tokens. The model can only relay a server-minted token; it cannot
 forge one.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
-from typing import Dict
+import threading
+from typing import Dict, Optional
 
 from .errors import ConfirmationError
 
@@ -57,10 +59,13 @@ def verify(
     presented: str,
     now: float,
     used_nonces: set,
+    lock: Optional[threading.Lock] = None,
 ) -> None:
     """Validate a presented confirmation token, or raise ConfirmationError.
 
-    On success the nonce is consumed (single use).
+    On success the nonce is consumed (single use). The check-and-consume is done
+    under ``lock`` so two concurrent confirmations of the same token cannot both
+    succeed (FastMCP dispatches sync tools on a threadpool).
     """
     if not presented or not isinstance(presented, str):
         raise ConfirmationError(
@@ -77,13 +82,18 @@ def verify(
         raise ConfirmationError(
             "confirmation token expired", operator_hint="request a fresh plan and retry"
         )
-    if nonce in used_nonces:
-        raise ConfirmationError("confirmation token was already used")
 
+    # Signature + TTL are pure checks (no shared state); the nonce single-use
+    # check must be atomic with its consumption.
     expected = _sign(secret, tool, args, state, nonce, exp)
     if not hmac.compare_digest(expected, sig):
         raise ConfirmationError(
             "confirmation token does not match this operation or the current NAS state",
             operator_hint="the target or state changed — request a fresh plan",
         )
-    used_nonces.add(nonce)
+
+    guard = lock if lock is not None else contextlib.nullcontext()
+    with guard:
+        if nonce in used_nonces:
+            raise ConfirmationError("confirmation token was already used")
+        used_nonces.add(nonce)

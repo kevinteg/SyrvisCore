@@ -55,6 +55,8 @@ class TestName:
 
 
 class TestGitUrl:
+    HOSTS = ["github.com"]
+
     @pytest.mark.parametrize(
         "u",
         [
@@ -65,7 +67,14 @@ class TestGitUrl:
         ],
     )
     def test_valid(self, u):
-        assert validate.validate_git_url(u) == u
+        assert validate.validate_git_url(u, self.HOSTS) == u
+
+    def test_empty_allowlist_fails_closed(self):
+        # no allowlist -> service_add disabled (fail closed), never allow-any
+        with pytest.raises(ValidationError):
+            validate.validate_git_url("https://github.com/u/r", [])
+        with pytest.raises(ValidationError):
+            validate.validate_git_url("https://github.com/u/r", None)
 
     @pytest.mark.parametrize(
         "u",
@@ -88,6 +97,15 @@ class TestGitUrl:
         validate.validate_git_url("https://github.com/u/r", allowed_hosts=["github.com"])
         with pytest.raises(ValidationError):
             validate.validate_git_url("https://evil.com/u/r", allowed_hosts=["github.com"])
+        with pytest.raises(ValidationError):
+            validate.validate_git_url("git@evil.example:u/r", allowed_hosts=["github.com"])
+
+
+class TestUnicodeDigits:
+    def test_unicode_version_rejected(self):
+        # homoglyph digits must not pass (re.ASCII)
+        with pytest.raises(ValidationError):
+            validate.validate_version("१.२.३")
 
 
 class TestInts:

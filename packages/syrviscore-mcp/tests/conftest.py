@@ -1,5 +1,6 @@
 """Shared fixtures for the MCP test suite (all offline; no NAS, no fastmcp needed)."""
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -7,13 +8,17 @@ import pytest
 from syrviscore_mcp.config import NASConfig
 from syrviscore_mcp.remote import build_remote_tokens
 
+# Isolated control-socket dir so the RemoteRunner's 0700 chmod never touches a
+# shared system dir like /tmp (which would be dangerous under a root CI runner).
+_CM_DIR = tempfile.mkdtemp(prefix="syrvis-mcp-cm-")
+
 
 def make_config(**overrides) -> NASConfig:
     base = dict(
         host="192.168.8.3",
         ssh_target="syrvis-nas",
         ssh_config_file=Path("/dev/null"),
-        control_path="/tmp/cm",
+        control_path=f"{_CM_DIR}/cm-%r@%h:%p",
         command_timeout_s=120,
         profile="prod",
         syrvisctl_path="/var/packages/syrviscore/target/venv/bin/syrvisctl",

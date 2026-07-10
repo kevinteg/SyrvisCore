@@ -55,11 +55,17 @@ class NASConfig:
     # resolved
     ssh_user: Optional[str] = None
 
+    def is_production(self) -> bool:
+        # Accept BOTH the 'prod' shorthand and the 'production' long form so a
+        # natural typo can't silently downgrade security to an ephemeral secret.
+        # (environment is validated against a known set at load time.)
+        return self.environment in ("prod", "production")
+
     def token_secret(self) -> bytes:
         secret = os.environ.get(self.token_secret_env)
         if secret:
             return secret.encode()
-        if self.environment == "production":
+        if self.is_production():
             raise ConfigError(
                 f"{self.token_secret_env} is not set",
                 operator_hint=f"export {self.token_secret_env}=<random> before starting the server",
@@ -156,6 +162,21 @@ def load_config(path: Optional[str] = None) -> NASConfig:
         raise ConfigError(
             f"ssh User for {cfg.ssh_target!r} is {cfg.ssh_user!r} — use a dedicated "
             f"operator account, not {sorted(_FORBIDDEN_SSH_USERS)}",
+        )
+
+    # Validate the environment label so a typo can't slip through unnoticed.
+    if cfg.environment not in ("prod", "production", "dev", "test", "development"):
+        raise ConfigError(
+            f"safety.environment {cfg.environment!r} is not a recognized value",
+            operator_hint="use one of: prod, production, dev, test",
+        )
+
+    # service_add clones + runs new code; require an explicit host allowlist in
+    # production so it fails closed rather than accepting any git host.
+    if cfg.is_production() and not cfg.git_url_allowed_hosts:
+        raise ConfigError(
+            "safety.git_url_allowed_hosts must be non-empty in production",
+            operator_hint="set safety.git_url_allowed_hosts (e.g. ['github.com'])",
         )
 
     return cfg

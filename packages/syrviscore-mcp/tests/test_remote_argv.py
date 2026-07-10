@@ -35,7 +35,8 @@ class TestArgvExact:
         toks = remote.build_remote_tokens(cfg, get_command("service_stop"), {"name": "gollum"})
         assert toks == ["sudo", "-n", WRAP, "service", "stop", "--", "gollum"]
 
-    def test_service_add(self, cfg):
+    def test_service_add(self):
+        cfg = make_config(git_url_allowed_hosts=["github.com"])
         toks = remote.build_remote_tokens(
             cfg, get_command("service_add"), {"git_url": "https://github.com/u/r.git"}
         )

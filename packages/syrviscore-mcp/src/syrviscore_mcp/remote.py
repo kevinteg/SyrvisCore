@@ -199,6 +199,14 @@ class RemoteRunner:
         self._audit_path = audit_path or Path(
             os.path.expanduser("~/.config/syrviscore-mcp/audit.jsonl")
         )
+        # A ControlMaster socket is 60s of authenticated NAS access; keep its
+        # directory owner-only so a co-resident local process can't reuse it.
+        try:
+            cm_dir = Path(cfg.control_path).expanduser().parent
+            cm_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(cm_dir, 0o700)
+        except OSError:
+            pass
 
     def _exec(self, argv: List[str], timeout: int) -> RunResult:
         proc = self._run(argv, capture_output=True, text=True, timeout=timeout, shell=False)
@@ -209,20 +217,30 @@ class RemoteRunner:
             stderr=getattr(proc, "stderr", "") or "",
         )
 
-    def _audit(self, command: Command, remote_tokens: List[str], rc: Optional[int], outcome: str):
+    def _write_audit(self, entry: dict) -> None:
         try:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
-            entry = {
+            with open(self._audit_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass  # auditing must never block an operation
+
+    def _audit(self, command: Command, remote_tokens: List[str], rc: Optional[int], outcome: str):
+        self._write_audit(
+            {
                 "command": command.id,
                 "sudo": command.sudo,
                 "remote": remote_tokens,
                 "rc": rc,
                 "outcome": outcome,
             }
-            with open(self._audit_path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except OSError:
-            pass  # auditing must never block an operation
+        )
+
+    def audit_event(self, tool: str, args: dict, outcome: str) -> None:
+        """Record a call rejected before it reached the NAS (validation/sandbox/token)."""
+        self._write_audit(
+            {"command": tool, "args": args, "rc": None, "outcome": outcome, "rejected": True}
+        )
 
     def run(self, command: Command, args: Optional[Dict] = None) -> Dict:
         args = args or {}

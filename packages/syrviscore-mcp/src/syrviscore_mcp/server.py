@@ -37,9 +37,14 @@ def get_context() -> tools.ToolContext:
 
 
 def _call(fn, **kwargs) -> dict:
+    ctx = get_context()
     try:
-        return fn(get_context(), **kwargs)
+        return fn(ctx, **kwargs)
     except McpError as e:
+        # Record rejected/attacked calls too — validation/sandbox/token failures
+        # happen before the remote runner would log anything, and they are the
+        # events a defender most wants to see (G16).
+        ctx.runner.audit_event(fn.__name__, kwargs, type(e).__name__)
         return e.to_dict()
 
 
@@ -147,10 +152,12 @@ def service_update(name: str) -> dict:
     return _call(tools.service_update, name=name)
 
 
-@mcp.tool(annotations={"openWorldHint": True})
-def service_add(git_url: str) -> dict:
-    """Add a Layer 2 service from a git URL (privileged; clones + starts it)."""
-    return _call(tools.service_add, git_url=git_url)
+@mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
+def service_add(git_url: str, confirm: str = "") -> dict:
+    """Add a Layer 2 service from a git URL (privileged; clones + RUNS new code).
+    Fails closed unless the host is in safety.git_url_allowed_hosts. Two-call:
+    first returns a plan+token; re-call with confirm=<token> to proceed."""
+    return _call(tools.service_add, git_url=git_url, confirm=confirm)
 
 
 @mcp.tool

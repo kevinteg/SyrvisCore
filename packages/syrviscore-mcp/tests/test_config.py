@@ -70,9 +70,33 @@ def test_missing_host_rejected(tmp_path, monkeypatch):
         load_config(str(_write(tmp_path, bad)))
 
 
+PROD = GOOD.replace(
+    'environment = "test"',
+    'environment = "production"\ngit_url_allowed_hosts = ["github.com"]',
+)
+
+
 def test_production_requires_token_secret(tmp_path, monkeypatch):
     monkeypatch.delenv("SYRVISCORE_MCP_TOKEN_SECRET", raising=False)
-    prod = GOOD.replace('environment = "test"', 'environment = "production"')
-    cfg = load_config(str(_write(tmp_path, prod)))
+    cfg = load_config(str(_write(tmp_path, PROD)))
     with pytest.raises(ConfigError):
         cfg.token_secret()
+
+
+def test_production_requires_git_allowlist(tmp_path):
+    prod_no_hosts = GOOD.replace('environment = "test"', 'environment = "production"')
+    with pytest.raises(ConfigError):
+        load_config(str(_write(tmp_path, prod_no_hosts)))
+
+
+def test_prod_shorthand_also_requires_git_allowlist(tmp_path):
+    # the 'prod' shorthand must be treated as production, not silently downgraded
+    prod = GOOD.replace('environment = "test"', 'environment = "prod"')
+    with pytest.raises(ConfigError):
+        load_config(str(_write(tmp_path, prod)))
+
+
+def test_unknown_environment_rejected(tmp_path):
+    bad = GOOD.replace('environment = "test"', 'environment = "prodction"')  # typo
+    with pytest.raises(ConfigError):
+        load_config(str(_write(tmp_path, bad)))

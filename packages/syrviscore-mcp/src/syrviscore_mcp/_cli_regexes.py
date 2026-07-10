@@ -16,11 +16,14 @@ Sources (kept in sync):
 
 import re
 
-# paths.VERSION_RE — validate_version also strips one optional leading 'v'.
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# paths.VERSION_RE / service_schema.NAME_RE. Compiled with re.ASCII so that
+# `\d` / the char classes never match Unicode digits or letters — the pattern
+# STRING stays identical to the source (the drift test compares .pattern), but
+# a homoglyph like "१.२.३" is rejected here even though Python's default \d
+# would accept it.
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$", re.ASCII)
 
-# service_schema.NAME_RE — a service/container/network identifier.
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.ASCII)
 
 # service_schema.RESERVED_NAMES — core-stack names a Layer 2 service may not use.
 RESERVED_NAMES = frozenset({"traefik", "portainer", "cloudflared", "proxy", "syrvis-macvlan"})

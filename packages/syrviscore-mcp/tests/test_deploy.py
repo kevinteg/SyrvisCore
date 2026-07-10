@@ -51,8 +51,8 @@ def test_sudoers_has_no_dangerous_entries():
 
 
 def _run_shim(original_command: str):
-    """Run the shim with exec neutered to 'echo ALLOW'; return (rc, output)."""
-    src = SHIM.read_text().replace("exec $cmd;;", "echo ALLOW;;")
+    """Run the shim with exec neutered to 'echo ALLOW; exit 0'; return (rc, output)."""
+    src = SHIM.read_text().replace('exec "$@"', "echo ALLOW; exit 0")
     r = subprocess.run(
         ["sh", "-c", src],
         env={"SSH_ORIGINAL_COMMAND": original_command, "PATH": "/usr/bin:/bin"},
@@ -73,6 +73,11 @@ DENY = [
     "/volume1/syrviscore/bin/syrvis status",  # missing --json -> off allowlist
     "sudo -n /volume1/syrviscore/bin/syrvis restore -- x",  # restore not exposed
     "sudo -n /volume1/syrviscore/bin/syrvis service remove -- foo --purge -y",  # purge
+    # red-team vectors (F3/F4/F5/F6): glob, double '--', extra flag/token
+    "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep 1 * -y",
+    "sudo -n /volume1/syrviscore/bin/syrvis service add -- --evil -- https://github.com/u/r.git",
+    "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep 1 --extra-flag -y",
+    "/volume1/syrviscore/bin/syrvis logs -n 5 -f -- gollum",  # extra token
 ]
 
 ALLOW = [
@@ -103,4 +108,25 @@ def test_shim_allows(cmd):
 
 def test_shim_rejects_empty_command():
     rc, out = _run_shim("")
+    assert rc != 0
+
+
+def test_shim_disables_globbing_and_has_no_bare_exec_cmd():
+    text = SHIM.read_text()
+    assert "set -f" in text  # F3: no pathname expansion
+    assert "exec $cmd" not in text  # never the unquoted form
+    assert 'exec "$@"' in text  # exec the validated argv
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        # glob chars, quotes, $ etc. are rejected by the charset whitelist
+        "/volume1/syrviscore/bin/syrvis status --json ; echo x",
+        "/volume1/syrviscore/bin/syrvis status --json*",
+        "/volume1/syrviscore/bin/syrvis status --json?",
+    ],
+)
+def test_shim_charset_whitelist(cmd):
+    rc, out = _run_shim(cmd)
     assert rc != 0

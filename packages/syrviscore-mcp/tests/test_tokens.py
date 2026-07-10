@@ -68,3 +68,30 @@ def test_wrong_secret_rejected():
     tok = tokens.mint(SECRET, "activate", {"version": "0.2.0"}, "s", "n", 1000)
     with pytest.raises(ConfirmationError):
         tokens.verify(b"other-secret", "activate", {"version": "0.2.0"}, "s", tok, 1, set())
+
+
+def test_concurrent_confirm_only_one_succeeds():
+    """F7: two threads confirming the same token — exactly one wins (locked)."""
+    import threading
+
+    tok = tokens.mint(SECRET, "uninstall", {"version": "0.1.0"}, "s", "n", 10_000)
+    used = set()
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+    results = []
+
+    def worker():
+        barrier.wait()  # maximize interleaving
+        try:
+            tokens.verify(SECRET, "uninstall", {"version": "0.1.0"}, "s", tok, 1, used, lock=lock)
+            results.append("ok")
+        except ConfirmationError:
+            results.append("rejected")
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(results) == ["ok", "rejected"]

@@ -67,7 +67,13 @@ def validate_name(name: str) -> str:
 
 
 def validate_git_url(url: str, allowed_hosts: Optional[list] = None) -> str:
-    """G4 — only https / scp-style git@ / ssh:// git URLs; optional host allowlist."""
+    """G4 — only https / scp-style git@ / ssh:// git URLs; MANDATORY host allowlist.
+
+    ``service_add`` is the one tool that clones and runs *new* attacker-supplied
+    code on the NAS, so the host allowlist fails CLOSED: an empty/unset list
+    means "disabled", never "allow any host". Configure
+    safety.git_url_allowed_hosts to enable it.
+    """
     _reject_metachars(url, "git_url")
     lowered = url.lower()
     for bad_prefix in ("file://", "http://", "ext::", "fd::", "-"):
@@ -88,11 +94,15 @@ def validate_git_url(url: str, allowed_hosts: Optional[list] = None) -> str:
             f"invalid git URL {url!r}",
             operator_hint="use https://, git@host:path, or ssh://git@host/path",
         )
-    if allowed_hosts:
-        if host not in allowed_hosts:
-            raise ValidationError(
-                f"git host {host!r} is not in the allowed list {allowed_hosts}",
-            )
+    if not allowed_hosts:
+        raise ValidationError(
+            "service_add is disabled: no safety.git_url_allowed_hosts configured",
+            operator_hint="set safety.git_url_allowed_hosts (e.g. ['github.com']) to enable service_add",
+        )
+    if host not in allowed_hosts:
+        raise ValidationError(
+            f"git host {host!r} is not in the allowed list {allowed_hosts}",
+        )
     return url
 
 

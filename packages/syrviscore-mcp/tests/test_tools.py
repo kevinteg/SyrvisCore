@@ -95,3 +95,54 @@ class TestFollowUpReads:
         out = tools.install(ctx, "0.2.0")
         assert out["active"] == "0.2.0"
         assert "install" in runner.ids()
+
+
+class TestServiceAddSecurity:
+    def _ctx_with_hosts(self, responses=None):
+        cfg = make_config(git_url_allowed_hosts=["github.com"])
+        runner = FakeRunner(cfg, responses or {})
+        ctx = tools.ToolContext(cfg=cfg, runner=runner, secret=b"s", now=lambda: 1000)
+        return ctx, runner
+
+    def test_service_add_requires_confirmation(self):
+        ctx, runner = self._ctx_with_hosts({"service_list": {"services": []}})
+        out = tools.service_add(ctx, "https://github.com/u/r.git")
+        assert out["needs_confirmation"] is True
+        assert "service_add" not in runner.ids()  # no clone/run yet
+
+    def test_service_add_with_token_runs(self):
+        ctx, runner = self._ctx_with_hosts(
+            {"service_list": {"services": []}, "service_add": {"ok": True}}
+        )
+        plan = tools.service_add(ctx, "https://github.com/u/r.git")
+        tools.service_add(ctx, "https://github.com/u/r.git", confirm=plan["confirm_token"])
+        assert "service_add" in runner.ids()
+
+    def test_service_add_disallowed_host_refused(self):
+        ctx, runner = self._ctx_with_hosts({"service_list": {"services": []}})
+        from syrviscore_mcp.errors import ValidationError
+
+        with pytest.raises(ValidationError):
+            tools.service_add(ctx, "https://evil.example.com/u/r.git")
+
+    def test_service_add_no_allowlist_fails_closed(self):
+        # default config has empty git_url_allowed_hosts -> disabled
+        ctx, runner = make_ctx({"service_list": {"services": []}})
+        from syrviscore_mcp.errors import ValidationError
+
+        with pytest.raises(ValidationError):
+            tools.service_add(ctx, "https://github.com/u/r.git")
+
+
+class TestPerProcessKey:
+    def test_token_from_one_context_fails_in_another(self):
+        # F8: each ToolContext salts the secret, so a restart voids tokens
+        ctx1, _ = make_ctx({"versions_list": VERSIONS})
+        ctx2, _ = make_ctx({"versions_list": VERSIONS})
+        assert ctx1.secret != ctx2.secret
+        plan = tools.activate(ctx1, "0.1.0")
+        token = plan["confirm_token"]
+        from syrviscore_mcp.errors import ConfirmationError
+
+        with pytest.raises(ConfirmationError):
+            tools.activate(ctx2, "0.1.0", confirm=token)

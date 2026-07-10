@@ -9,7 +9,10 @@ these with typed signatures and hints; keeping the logic here makes it all
 unit-testable without fastmcp or a NAS.
 """
 
+import hashlib
+import os
 import secrets
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
@@ -28,6 +31,14 @@ class ToolContext:
     secret: bytes
     used_nonces: set = field(default_factory=set)
     now: Callable[[], float] = time.time
+    nonce_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def __post_init__(self):
+        # Mix a per-process random salt into the configured secret so a server
+        # restart changes the effective signing key and voids every outstanding
+        # confirmation token (the invariant tokens.py documents). In-memory
+        # used_nonces alone can't survive a restart; this closes that replay gap.
+        self.secret = hashlib.blake2b(self.secret, salt=os.urandom(16), digest_size=32).digest()
 
 
 # --------------------------------------------------------------------------
@@ -79,7 +90,16 @@ def _confirm_or_plan(
             "expires_at": expiry,
             "note": "re-call this tool with confirm=<confirm_token> to proceed",
         }
-    tokens.verify(ctx.secret, tool, bound_args, state, confirm, ctx.now(), ctx.used_nonces)
+    tokens.verify(
+        ctx.secret,
+        tool,
+        bound_args,
+        state,
+        confirm,
+        ctx.now(),
+        ctx.used_nonces,
+        lock=ctx.nonce_lock,
+    )
     return None
 
 
@@ -168,8 +188,15 @@ def service_update(ctx: ToolContext, name: str) -> Dict:
     return _with_service_state(ctx, _run(ctx, "service_update", {"name": name}))
 
 
-def service_add(ctx: ToolContext, git_url: str) -> Dict:
+def service_add(ctx: ToolContext, git_url: str, confirm: str = "") -> Dict:
+    # service_add is the one tool that clones and runs NEW code on the NAS, so
+    # it fails closed on the host allowlist AND requires a confirmation token.
     validate.validate_git_url(git_url, ctx.cfg.git_url_allowed_hosts)
+    current = service_list(ctx)
+    plan = {"action": "service_add", "git_url": git_url, "existing": current.get("services")}
+    pending = _confirm_or_plan(ctx, "service_add", {"git_url": git_url}, confirm, [git_url], plan)
+    if pending:
+        return pending
     return _with_service_state(ctx, _run(ctx, "service_add", {"git_url": git_url}))
 
 

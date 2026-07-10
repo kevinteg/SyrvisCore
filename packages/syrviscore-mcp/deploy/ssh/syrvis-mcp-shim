@@ -4,92 +4,114 @@
 # Forced command for the MCP operator SSH key. Re-validates the requested
 # command independently of client-side checks (defense in depth, G13).
 
+is_version() { printf '%s' "$1" | LC_ALL=C grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'; }
+is_name()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$'; }
+is_int()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9]{1,7}$'; }
+is_giturl()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }
+
 cmd="$SSH_ORIGINAL_COMMAND"
 if [ -z "$cmd" ]; then
   echo "syrvis-mcp-shim: interactive login not permitted" >&2; exit 1
 fi
 
-# Injection boundary: reject any shell metacharacter (grep bracket class
-# treats these as literals) or control character, including newlines.
-if printf '%s' "$cmd" | LC_ALL=C grep -q '[;&|`$()<>\!]'; then
+# Character whitelist: only this safe alphabet may appear anywhere. This
+# rejects every shell metacharacter, glob (* ? [ ]), quote, $, backtick,
+# and control char in one shot — far stronger than a denylist.
+if printf '%s' "$cmd" | LC_ALL=C grep -q '[^A-Za-z0-9 ._@:/-]'; then
   echo "syrvis-mcp-shim: forbidden character" >&2; exit 1
 fi
-if printf '%s' "$cmd" | LC_ALL=C grep -q '[[:cntrl:]]'; then
-  echo "syrvis-mcp-shim: control character" >&2; exit 1
+# Reject embedded newlines (grep is line-oriented and would miss them).
+if [ "$(printf '%s' "$cmd" | wc -l | tr -d ' ')" != "0" ]; then
+  echo "syrvis-mcp-shim: forbidden newline" >&2; exit 1
 fi
 
-# If the command carries a '--' positional, its value must be exactly one
-# safe token: alnum-leading, no leading '-' (blocks e.g. git --upload-pack),
-# no spaces (blocks extra args the sudo '*' would otherwise permit).
-case "$cmd" in
-  *' -- '*)
-    val=${cmd##* -- }
-    case "$val" in
-      *" "*) echo "syrvis-mcp-shim: extra args after --" >&2; exit 1;;
-    esac
-    if ! printf '%s' "$val" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._@:/-]*$'; then
-      echo "syrvis-mcp-shim: invalid positional value" >&2; exit 1
-    fi;;
-esac
+set -f          # no pathname expansion when we word-split
+set -- $cmd     # split into argv (safe: charset whitelisted above)
 
-# Allowlist of accepted command shapes (glob * = one slot value).
-case "$cmd" in
-  '/volume1/syrviscore/bin/syrvis status --json')
-    exec $cmd;;
-  '/volume1/syrviscore/bin/syrvis verify --json')
-    exec $cmd;;
-  '/volume1/syrviscore/bin/syrvis verify --smoke --json')
-    exec $cmd;;
-  '/volume1/syrviscore/bin/syrvis service list --json')
-    exec $cmd;;
-  '/volume1/syrviscore/bin/syrvis logs -n '*' -- '*)
-    exec $cmd;;
-  '/volume1/syrviscore/bin/syrvis logs -n '*)
-    exec $cmd;;
-  '/var/packages/syrviscore/target/venv/bin/syrvisctl list --json')
-    exec $cmd;;
-  '/var/packages/syrviscore/target/venv/bin/syrvisctl check --json')
-    exec $cmd;;
-  '/var/packages/syrviscore/target/venv/bin/syrvisctl info --json')
-    exec $cmd;;
-  '/var/packages/syrviscore/target/venv/bin/syrvisctl backup list --json')
-    exec $cmd;;
-  '/var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep '*' --dry-run')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis start')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis stop')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis restart')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis verify --fix --json')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis verify --smoke --fix --json')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis service start -- '*)
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis service stop -- '*)
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis service update -- '*)
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis service add -- '*)
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- '*)
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore')
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- '*)
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y -- '*)
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y')
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl uninstall -y -- '*)
-    exec $cmd;;
-  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep '*' -y')
-    exec $cmd;;
-  'sudo -n /volume1/syrviscore/bin/syrvis service remove -y -- '*)
-    exec $cmd;;
-  *)
-    echo "syrvis-mcp-shim: command not on allowlist" >&2; exit 1;;
-esac
+# Match the argv against exactly one enumerated command shape.
+if [ $# -eq 3 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "status" ] && [ "${3}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 3 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "verify" ] && [ "${3}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "verify" ] && [ "${3}" = "--smoke" ] && [ "${4}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "service" ] && [ "${3}" = "list" ] && [ "${4}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "logs" ] && [ "${3}" = "-n" ] && is_int "${4}" && [ "${5}" = "--" ] && is_name "${6}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "logs" ] && [ "${3}" = "-n" ] && is_int "${4}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "list" ] && [ "${3}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "check" ] && [ "${3}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "info" ] && [ "${3}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "backup" ] && [ "${3}" = "list" ] && [ "${4}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 5 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "cleanup" ] && [ "${3}" = "--keep" ] && is_int "${4}" && [ "${5}" = "--dry-run" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "start" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stop" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "restart" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "verify" ] && [ "${5}" = "--fix" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "verify" ] && [ "${5}" = "--smoke" ] && [ "${6}" = "--fix" ] && [ "${7}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "start" ] && [ "${6}" = "--" ] && is_name "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "stop" ] && [ "${6}" = "--" ] && is_name "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "update" ] && [ "${6}" = "--" ] && is_name "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "add" ] && [ "${6}" = "--" ] && is_giturl "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 9 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "install" ] && [ "${5}" = "-y" ] && [ "${6}" = "--path" ] && [ "${7}" = "/volume1/syrviscore" ] && [ "${8}" = "--" ] && is_version "${9}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "install" ] && [ "${5}" = "-y" ] && [ "${6}" = "--path" ] && [ "${7}" = "/volume1/syrviscore" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "activate" ] && [ "${5}" = "--" ] && is_version "${6}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "rollback" ] && [ "${5}" = "-y" ] && [ "${6}" = "--" ] && is_version "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "rollback" ] && [ "${5}" = "-y" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "uninstall" ] && [ "${5}" = "-y" ] && [ "${6}" = "--" ] && is_version "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "cleanup" ] && [ "${5}" = "--keep" ] && is_int "${6}" && [ "${7}" = "-y" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "remove" ] && [ "${6}" = "-y" ] && [ "${7}" = "--" ] && is_name "${8}"; then
+  set -f; exec "$@"
+fi
+echo "syrvis-mcp-shim: command not on allowlist" >&2
+exit 1
