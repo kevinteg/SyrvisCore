@@ -36,46 +36,77 @@ Config lives at `~/.config/syrviscore-mcp/config.toml` (see
 export SYRVISCORE_MCP_TOKEN_SECRET="$(openssl rand -hex 32)"
 ```
 
-## Provision the NAS (one-time, needs root — do this yourself)
+## Provision the NAS (one-time, needs root)
 
-The MCP cannot bootstrap its own access; a human installs these root-owned
-artifacts. Regenerate them first if your NAS uses a volume other than
-`/volume1` (edit the paths in `src/syrviscore_mcp/deploy/gen.py`, or override):
+The MCP cannot bootstrap its own access — a human installs the root-owned
+operator account, sudoers policy, forced-command shim, and SSH key on the NAS.
+This is fully scripted: you generate a **self-contained provisioning script on
+your Mac**, copy that one file to the NAS, and run it with `sudo`. It is
+idempotent, `visudo`-validates the policy before installing it, and **backs up
+every system file it touches** first.
+
+### Why the volume matters
+
+`sudo` matches commands by their **absolute path**. The sudoers policy and shim
+therefore contain the real paths to `syrvis`/`syrvisctl` on your NAS — by
+default a `/volume1` install (`/volume1/syrviscore/bin/syrvis`,
+`/var/packages/syrviscore/target/venv/bin/syrvisctl`). If the SPK installed
+SyrvisCore on a **different volume** (check with `syrvisctl info` — e.g.
+`/volume4/syrviscore`), you must generate with `--home /volume4/syrviscore` so
+the policy matches the real command paths. Otherwise sudo denies everything.
+
+### Step 1 — generate the provisioning script (on your Mac)
 
 ```bash
-# from packages/syrviscore-mcp
-python -m syrviscore_mcp.deploy.gen sudoers > /tmp/syrviscore-mcp.sudoers
-python -m syrviscore_mcp.deploy.gen shim    > /tmp/syrvis-mcp-shim
+# from packages/syrviscore-mcp, in the 3.12 venv.
+# --home is your SYRVIS_HOME (default /volume1/syrviscore); --pubkey is the
+# operator's public key; --from restricts which network may use that key.
+ssh-keygen -t ed25519 -f ~/.ssh/syrvis_mcp_ed25519 -C syrvis-mcp   # if you don't have a key yet
+python -m syrviscore_mcp.deploy.gen provision \
+    --home /volume1/syrviscore \
+    --pubkey ~/.ssh/syrvis_mcp_ed25519.pub \
+    --from 192.168.8.0/24 \
+    > /tmp/manual_mcp_account_provision.sh
 ```
 
-1. **Create a dedicated operator user** with docker access (not `admin`, not
-   `cerebrate`, not `root`):
-   ```
-   sudo synouser --add syrvis-operator ... ; sudo synogroup --member docker syrvis-operator
-   ```
-2. **Install the sudoers policy** (validate before installing):
-   ```
-   sudo visudo -cf /tmp/syrviscore-mcp.sudoers
-   sudo install -m 0440 -o root -g root /tmp/syrviscore-mcp.sudoers /etc/sudoers.d/syrviscore-mcp
-   ```
-3. **Install the forced-command shim**:
-   ```
-   sudo install -m 0755 -o root -g root /tmp/syrvis-mcp-shim /usr/local/bin/syrvis-mcp-shim
-   ```
-4. **Install the operator SSH key** with a forced command + source restriction
-   in `~syrvis-operator/.ssh/authorized_keys` (0600):
-   ```
-   restrict,command="/usr/local/bin/syrvis-mcp-shim",from="192.168.8.0/24" ssh-ed25519 AAAA... syrvis-mcp
-   ```
-5. **Pin the host key** into `~/.config/syrviscore-mcp/known_hosts` on the Mac.
-
-Then verify the boundary from the Mac (these MUST behave as noted):
+Read the generated script — it is plain, auditable POSIX sh — then copy it over:
 
 ```bash
-ssh syrvis-nas 'id'                                   # rejected by the shim
-ssh syrvis-nas 'sudo -n /bin/sh'                      # denied by sudoers
-ssh syrvis-nas 'sudo -n .../syrvis service remove -- x --purge -y'   # denied (no purge)
-ssh syrvis-nas 'sudo -l'                              # matches the enumerated allowlist exactly
+scp -O /tmp/manual_mcp_account_provision.sh cerebrate@192.168.8.3:/tmp/
+```
+
+### Step 2 — run it on the NAS (as root)
+
+```bash
+ssh cerebrate@192.168.8.3
+sudo sh /tmp/manual_mcp_account_provision.sh --dry-run   # preview every action
+sudo sh /tmp/manual_mcp_account_provision.sh             # apply
+```
+
+It creates the `syrvis-operator` user with the correct DSM `synouser` syntax
+(`username password "full name" expired mail AppPrivilege` — SSH-key-only, a
+random unused password), ensures the `docker` group exists and adds the operator
+to it via `--memberadd` (which does **not** replace existing members), installs
+the sudoers policy (`visudo`-validated both before *and* after it lands), the
+shim, and the operator key. The key install is **additive** — it preserves any
+other keys on the account (e.g. a break-glass admin key) and just replaces its
+own line.
+
+Before changing any system file it records the **true pre-install state once**
+(under `/var/log/syrviscore-mcp-provision/original/`) and writes a
+`/var/log/syrviscore-mcp-provision/rollback.sh` that reverts *exactly* —
+restoring a file that existed, or removing one the script created. To undo
+everything: `sudo sh /var/log/syrviscore-mcp-provision/rollback.sh`. If
+`synouser`/`synogroup` aren't available on your DSM version, the script tells
+you to create the user / add the group via Control Panel and re-run.
+
+### Step 3 — pin the host key + verify (on your Mac)
+
+```bash
+ssh-keyscan -H 192.168.8.3 >> ~/.config/syrviscore-mcp/known_hosts   # then confirm the fingerprint
+ssh syrvis-nas 'id'                # rejected by the shim
+ssh syrvis-nas 'sudo -n /bin/sh'   # denied by the sudoers policy
+ssh syrvis-nas 'sudo -l'           # lists ONLY the enumerated commands
 ```
 
 ## Register with a Claude session
