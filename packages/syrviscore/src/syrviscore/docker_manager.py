@@ -178,7 +178,7 @@ class DockerManager:
         # If SHIM_IP not set, calculate from traefik_ip + 1 for backwards compatibility
         if not shim_ip:
             try:
-                parts = traefik_ip.split('.')
+                parts = traefik_ip.split(".")
                 last_octet = int(parts[3])
                 shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
             except (IndexError, ValueError):
@@ -189,6 +189,7 @@ class DockerManager:
         if not ok:
             # Log warning but don't fail - services might still work
             import sys
+
             print(f"Warning: {msg}", file=sys.stderr)
 
     def start_core_services(self) -> None:

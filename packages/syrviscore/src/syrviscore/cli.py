@@ -228,6 +228,7 @@ def service_update(name):
 # Top-level convenience commands
 # =============================================================================
 
+
 @cli.command()
 def status():
     """Show status of all services (alias for 'core status')."""
@@ -410,20 +411,20 @@ def clean(volumes, yes):
         if results.get("containers_stopped"):
             click.echo(f"  Containers stopped: {', '.join(results['containers_stopped'])}")
         else:
-            click.echo(f"  Containers stopped: (none)")
+            click.echo("  Containers stopped: (none)")
 
         # Show networks
         if results.get("networks_cleaned"):
             click.echo(f"  Networks removed:   {', '.join(results['networks_cleaned'])}")
         else:
-            click.echo(f"  Networks removed:   (none)")
+            click.echo("  Networks removed:   (none)")
 
         # Show volumes if requested
         if volumes:
             if results.get("volumes_cleaned"):
                 click.echo(f"  Volumes removed:    {', '.join(results['volumes_cleaned'])}")
             else:
-                click.echo(f"  Volumes removed:    (none)")
+                click.echo("  Volumes removed:    (none)")
 
         if results["errors"]:
             click.echo()
@@ -519,6 +520,7 @@ def reset(yes):
 # Hello / Test command
 # =============================================================================
 
+
 @cli.command()
 def hello():
     """Test command to verify installation."""
@@ -530,6 +532,7 @@ def hello():
 # =============================================================================
 # Compose command group
 # =============================================================================
+
 
 @cli.group()
 def compose():
@@ -624,13 +627,14 @@ def generate(config, output):
 # Core command group (kept for backwards compatibility)
 # =============================================================================
 
+
 @cli.group()
 def core():
     """Manage core services (Traefik, Portainer, Cloudflared)."""
     pass
 
 
-@core.command('start')
+@core.command("start")
 def core_start():
     """Start core services."""
     privilege.ensure_elevated("Starting services requires elevated privileges.")
@@ -657,7 +661,7 @@ def core_start():
         raise click.Abort()
 
 
-@core.command('stop')
+@core.command("stop")
 def core_stop():
     """Stop core services."""
     privilege.ensure_elevated("Stopping services requires elevated privileges.")
@@ -683,7 +687,7 @@ def core_stop():
         raise click.Abort()
 
 
-@core.command('restart')
+@core.command("restart")
 def core_restart():
     """Restart core services."""
     privilege.ensure_elevated("Restarting services requires elevated privileges.")
@@ -710,7 +714,7 @@ def core_restart():
         raise click.Abort()
 
 
-@core.command('status')
+@core.command("status")
 def core_status():
     """Show status of core services."""
     try:
@@ -746,7 +750,7 @@ def core_status():
         raise click.Abort()
 
 
-@core.command('logs')
+@core.command("logs")
 @click.argument("service", required=False)
 @click.option("--follow", "-f", is_flag=True, help="Follow log output")
 @click.option("--tail", "-n", default=100, help="Number of lines to show from end")
@@ -782,6 +786,7 @@ def core_logs(service, follow, tail):
 # =============================================================================
 # Config command group
 # =============================================================================
+
 
 @cli.group()
 def config():
@@ -855,10 +860,10 @@ def show():
             click.echo(f"Configuration ({env_path}):")
             click.echo("-" * 60)
             for line in env_path.read_text().splitlines():
-                if line and not line.startswith('#'):
+                if line and not line.startswith("#"):
                     # Mask sensitive values
-                    if 'TOKEN' in line or 'SECRET' in line or 'PASSWORD' in line:
-                        key = line.split('=')[0]
+                    if "TOKEN" in line or "SECRET" in line or "PASSWORD" in line:
+                        key = line.split("=")[0]
                         click.echo(f"  {key}=****")
                     else:
                         click.echo(f"  {line}")

@@ -1,7 +1,16 @@
 """
 Path management for SyrvisCore Manager.
 
-Handles discovery of SYRVIS_HOME and SPK installation directories.
+Handles discovery of SYRVIS_HOME and SPK installation directories, version
+directory containment, and the atomic ``current`` symlink switch.
+
+Design rules (v2):
+- The home directory is resolved once at the CLI boundary (``resolve_home``)
+  and passed explicitly to every function — no ambient ``os.environ`` mutation.
+- Version strings are validated (strict MAJOR.MINOR.PATCH) before they are
+  ever used as path components.
+- The ``current`` symlink is the single source of truth for the active
+  version; switching it is atomic (tmp symlink + os.replace).
 
 Directory Structure:
     /var/packages/syrviscore/target/      # SPK install (manager venv)
@@ -17,20 +26,45 @@ Directory Structure:
 """
 
 import os
+import re
+import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 
+from .errors import AmbiguousHomeError, HomeNotFoundError, InvalidVersionError
 
-class SyrvisHomeError(Exception):
-    """Raised when SYRVIS_HOME cannot be found or is invalid."""
-    pass
-
+# Backwards-compatible alias (pre-v2 code and scripts referenced this name)
+SyrvisHomeError = HomeNotFoundError
 
 # Default package name
 PACKAGE_NAME = "syrviscore"
 
 # SPK installation directory
-SPK_TARGET_DIR = f"/var/packages/{PACKAGE_NAME}/target"
+SPK_TARGET_DIR = "/var/packages/{}/target".format(PACKAGE_NAME)
+
+MANIFEST_FILENAME = ".syrviscore-manifest.json"
+
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+_VOLUME_RE = re.compile(r"^volume\d+$")
+
+
+def validate_version(version: str) -> str:
+    """Validate a version string (strict MAJOR.MINOR.PATCH).
+
+    Accepts a single leading 'v' prefix and strips it.
+
+    Raises:
+        InvalidVersionError: If the version is not N.N.N
+    """
+    if not isinstance(version, str) or not version:
+        raise InvalidVersionError("Version must be a non-empty string")
+    v = version[1:] if version.startswith("v") else version
+    if not VERSION_RE.match(v):
+        raise InvalidVersionError(
+            "Invalid version {!r}: expected MAJOR.MINOR.PATCH (e.g. 0.2.0)".format(version)
+        )
+    return v
 
 
 def get_package_volume() -> Optional[str]:
@@ -40,35 +74,30 @@ def get_package_volume() -> Optional[str]:
     Tries multiple strategies:
     1. SYNOPKG_PKGDEST environment variable (set during SPK installation)
     2. Location of the syrvisctl executable itself
+    3. Location of this module
 
     Returns:
         Volume path (e.g., "/volume4") or None if not detectable
     """
-    import sys
 
-    # Strategy 1: SYNOPKG_PKGDEST (set during SPK installation)
+    def _volume_of(path_str: str) -> Optional[str]:
+        parts = path_str.split("/")
+        if len(parts) >= 2 and _VOLUME_RE.match(parts[1]):
+            return "/" + parts[1]
+        return None
+
     pkg_dest = os.environ.get("SYNOPKG_PKGDEST", "")
     if pkg_dest:
-        parts = pkg_dest.split("/")
-        if len(parts) >= 2 and parts[1].startswith("volume"):
-            return f"/{parts[1]}"
+        vol = _volume_of(pkg_dest)
+        if vol:
+            return vol
 
-    # Strategy 2: Detect from syrvisctl executable location
-    # e.g., /volume4/@appstore/syrviscore/venv/bin/python -> /volume4
-    exe_path = sys.executable
-    if exe_path:
-        parts = exe_path.split("/")
-        if len(parts) >= 2 and parts[1].startswith("volume"):
-            return f"/{parts[1]}"
+    if sys.executable:
+        vol = _volume_of(sys.executable)
+        if vol:
+            return vol
 
-    # Strategy 3: Detect from this module's location
-    module_path = str(Path(__file__).resolve())
-    if module_path:
-        parts = module_path.split("/")
-        if len(parts) >= 2 and parts[1].startswith("volume"):
-            return f"/{parts[1]}"
-
-    return None
+    return _volume_of(str(Path(__file__).resolve()))
 
 
 def is_simulation_mode() -> bool:
@@ -93,110 +122,97 @@ def get_spk_target_dir() -> Path:
     return Path(SPK_TARGET_DIR)
 
 
-def get_manager_venv() -> Path:
-    """Get path to manager's virtual environment."""
-    return get_spk_target_dir() / "venv"
+def _volumes_root() -> Path:
+    sim_root = get_sim_root()
+    return sim_root if sim_root else Path("/")
 
 
-def get_syrvis_home() -> Path:
+def _candidate_homes() -> List[Path]:
+    """All existing installations found by scanning volumes (manifest present)."""
+    root = _volumes_root()
+    candidates = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if not _VOLUME_RE.match(entry.name):
+            continue
+        candidate = entry / PACKAGE_NAME
+        if (candidate / MANIFEST_FILENAME).exists():
+            candidates.append(candidate)
+    return candidates
+
+
+def is_installation(path: Path) -> bool:
+    """True if the path looks like an existing SyrvisCore installation."""
+    return (path / MANIFEST_FILENAME).exists()
+
+
+def resolve_home(explicit: Optional[Path] = None, create: bool = False) -> Path:
     """
-    Get the SYRVIS_HOME directory with auto-detection fallback.
+    Resolve the SYRVIS_HOME directory.
 
-    Tries multiple strategies:
-    1. SYRVIS_HOME environment variable
-    2. Package volume from SYNOPKG_PKGDEST (e.g., /volume4/syrviscore)
-    3. Search volumes 1-9 for existing installation
+    Resolution order:
+    1. ``explicit`` (e.g. from a --path option)
+    2. ``SYRVIS_HOME`` environment variable
+    3. The package volume's installation (``/volumeX/syrviscore`` with manifest)
+    4. Scan all volumes for exactly one existing installation
 
-    Returns:
-        Path object for SYRVIS_HOME directory
+    Args:
+        explicit: Explicit path from the caller (highest priority).
+        create: If True, an explicit/env path is created when missing instead
+            of being required to be an existing installation, and a default
+            path is created when nothing else resolves.
 
     Raises:
-        SyrvisHomeError: If SYRVIS_HOME cannot be determined
+        HomeNotFoundError: No installation found (and create is False).
+        AmbiguousHomeError: Multiple installations found by the volume scan.
     """
-    sim_root = get_sim_root()
+    for source, raw in (("--path", explicit), ("SYRVIS_HOME", os.environ.get("SYRVIS_HOME"))):
+        if not raw:
+            continue
+        path = Path(raw)
+        if is_installation(path):
+            return path
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        raise HomeNotFoundError(
+            "{} is set to {} but no SyrvisCore installation exists there "
+            "(missing {}).".format(source, path, MANIFEST_FILENAME)
+        )
 
-    # Strategy 1: Environment variable
-    syrvis_home = os.environ.get("SYRVIS_HOME")
-    if syrvis_home:
-        syrvis_path = Path(syrvis_home)
-        if syrvis_path.exists() and syrvis_path.is_dir():
-            return syrvis_path
-
-    # Strategy 2: Use package volume if available
     pkg_volume = get_package_volume()
     if pkg_volume:
+        sim_root = get_sim_root()
         if sim_root:
             candidate = sim_root / pkg_volume.lstrip("/") / PACKAGE_NAME
         else:
             candidate = Path(pkg_volume) / PACKAGE_NAME
-        if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
+        if is_installation(candidate):
             return candidate
 
-    # Strategy 3: Search all volumes for existing installation
-    for vol_num in range(1, 10):
-        if sim_root:
-            candidate = sim_root / f"volume{vol_num}" / PACKAGE_NAME
-        else:
-            candidate = Path(f"/volume{vol_num}/{PACKAGE_NAME}")
-        if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
-            return candidate
+    candidates = _candidate_homes()
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        raise AmbiguousHomeError(
+            "Multiple SyrvisCore installations found: {}. "
+            "Set SYRVIS_HOME or pass --path to choose one.".format(
+                ", ".join(str(c) for c in candidates)
+            )
+        )
 
-    raise SyrvisHomeError(
+    if create:
+        home = get_default_install_path()
+        home.mkdir(parents=True, exist_ok=True)
+        return home
+
+    raise HomeNotFoundError(
         "Cannot find SyrvisCore installation.\n"
         "Run 'syrvisctl install' to install a service version."
     )
-
-
-def get_syrvis_home_or_create(volume: Optional[str] = None) -> Path:
-    """
-    Get SYRVIS_HOME, creating it if it doesn't exist.
-
-    Args:
-        volume: Specific volume to use (e.g., "/volume4")
-
-    Returns:
-        Path to SYRVIS_HOME directory
-    """
-    # First check if SYRVIS_HOME env var is set - use it even if doesn't exist yet
-    syrvis_home_env = os.environ.get("SYRVIS_HOME")
-    if syrvis_home_env:
-        syrvis_home = Path(syrvis_home_env)
-        syrvis_home.mkdir(parents=True, exist_ok=True)
-        return syrvis_home
-
-    try:
-        return get_syrvis_home()
-    except SyrvisHomeError:
-        # Create new installation directory
-        sim_root = get_sim_root()
-
-        if volume:
-            base = Path(volume)
-        else:
-            # Priority: package volume > first available volume
-            pkg_volume = get_package_volume()
-            if pkg_volume:
-                base = Path(pkg_volume)
-            else:
-                # Use first available volume (with simulation support)
-                for vol_num in range(1, 10):
-                    if sim_root:
-                        candidate = sim_root / f"volume{vol_num}"
-                    else:
-                        candidate = Path(f"/volume{vol_num}")
-                    if candidate.exists():
-                        base = candidate
-                        break
-                else:
-                    # Default fallback
-                    if sim_root:
-                        base = sim_root / "volume1"
-                    else:
-                        base = Path("/volume1")
-
-        syrvis_home = base / PACKAGE_NAME
-        syrvis_home.mkdir(parents=True, exist_ok=True)
-        return syrvis_home
 
 
 def get_default_install_path() -> Path:
@@ -204,152 +220,131 @@ def get_default_install_path() -> Path:
     Get the default installation path for new installs.
 
     Uses the package volume if available, otherwise /volume1.
-
-    Returns:
-        Default path for SYRVIS_HOME (e.g., /volume4/syrviscore)
     """
     sim_root = get_sim_root()
     pkg_volume = get_package_volume()
 
-    if pkg_volume:
-        base = Path(pkg_volume)
-    else:
-        base = Path("/volume1")
+    base = Path(pkg_volume) if pkg_volume else Path("/volume1")
 
     if sim_root:
         return sim_root / base.relative_to("/") / PACKAGE_NAME
     return base / PACKAGE_NAME
 
 
-def get_versions_dir() -> Path:
+# =============================================================================
+# Home-scoped paths (all take the resolved home explicitly)
+# =============================================================================
+
+
+def versions_dir(home: Path) -> Path:
     """Get path to versions directory."""
-    return get_syrvis_home() / "versions"
+    return home / "versions"
 
 
-def get_version_dir(version: str) -> Path:
-    """Get path to a specific version directory."""
-    return get_versions_dir() / version
+def version_dir(home: Path, version: str) -> Path:
+    """Get path to a specific version directory (version is validated)."""
+    v = validate_version(version)
+    target = versions_dir(home) / v
+    if target.parent != versions_dir(home):
+        raise InvalidVersionError("Version {!r} escapes the versions directory".format(version))
+    return target
 
 
-def get_current_symlink() -> Path:
+def current_symlink(home: Path) -> Path:
     """Get path to 'current' symlink."""
-    return get_syrvis_home() / "current"
+    return home / "current"
 
 
-def get_active_version_dir() -> Optional[Path]:
-    """
-    Get path to the active version directory.
-
-    Returns:
-        Path to active version directory, or None if no version is active
-    """
-    current = get_current_symlink()
-    if current.exists() and current.is_symlink():
-        return current.resolve()
-    return None
-
-
-def get_bin_dir() -> Path:
-    """Get path to bin directory containing wrapper scripts."""
-    return get_syrvis_home() / "bin"
-
-
-def get_manifest_path() -> Path:
+def manifest_path(home: Path) -> Path:
     """Get path to installation manifest file."""
-    return get_syrvis_home() / ".syrviscore-manifest.json"
+    return home / MANIFEST_FILENAME
 
 
-def list_installed_versions() -> List[str]:
-    """List all installed versions, sorted by semantic version (newest first)."""
+def get_syrvis_profile_path(home: Path) -> Path:
+    """Get the path to the syrvis profile snippet."""
+    return home / "syrvis.profile"
+
+
+def active_version(home: Path) -> Optional[str]:
+    """Get the active version from the ``current`` symlink (source of truth)."""
+    current = current_symlink(home)
+    if not current.is_symlink():
+        return None
+    target = os.readlink(str(current))
+    name = Path(target).name
     try:
-        versions_dir = get_versions_dir()
-    except SyrvisHomeError:
-        return []
+        return validate_version(name)
+    except InvalidVersionError:
+        return None
 
-    if not versions_dir.exists():
+
+def list_installed_versions(home: Path) -> List[str]:
+    """List all installed versions, sorted by semantic version (newest first)."""
+    vdir = versions_dir(home)
+    if not vdir.exists():
         return []
 
     versions = []
-    for item in versions_dir.iterdir():
-        if item.is_dir() and not item.name.startswith('.'):
-            # Verify it has a venv (properly installed)
-            venv_path = item / "cli" / "venv"
-            if venv_path.exists():
-                versions.append(item.name)
+    for item in vdir.iterdir():
+        if not item.is_dir() or item.name.startswith("."):
+            continue
+        if not VERSION_RE.match(item.name):
+            continue
+        # Verify it has a venv (properly installed)
+        if (item / "cli" / "venv").exists():
+            versions.append(item.name)
 
-    # Sort by semantic version (newest first)
-    def version_key(v):
-        try:
-            parts = v.split('.')
-            return tuple(int(p) for p in parts)
-        except ValueError:
-            return (0, 0, 0)
-
-    return sorted(versions, key=version_key, reverse=True)
+    return sorted(versions, key=lambda v: tuple(int(p) for p in v.split(".")), reverse=True)
 
 
-def has_service_installed() -> bool:
-    """Check if any service version is installed."""
-    return len(list_installed_versions()) > 0
+def ensure_directory_structure(home: Path) -> None:
+    """Create the shared directory structure for an installation."""
+    (home / "versions").mkdir(parents=True, exist_ok=True)
+    (home / "config").mkdir(exist_ok=True)
+    (home / "config" / "traefik").mkdir(exist_ok=True)
+    (home / "data").mkdir(exist_ok=True)
+    (home / "data" / "traefik").mkdir(exist_ok=True)
+    (home / "data" / "traefik" / "config").mkdir(exist_ok=True)
+    (home / "data" / "portainer").mkdir(exist_ok=True)
+    (home / "data" / "cloudflared").mkdir(exist_ok=True)
+    (home / "bin").mkdir(exist_ok=True)
 
 
-def ensure_directory_structure(install_path: Path, version: str) -> None:
+def update_current_symlink(home: Path, version: str) -> None:
     """
-    Create the complete directory structure for a new installation.
+    Atomically point the ``current`` symlink at a version.
 
-    Args:
-        install_path: Path to SYRVIS_HOME
-        version: Version being installed
+    Uses a temporary symlink + os.replace so there is no window in which
+    ``current`` is missing, and concurrent switches cannot corrupt it.
     """
-    # Root directories
-    (install_path / "versions").mkdir(parents=True, exist_ok=True)
-    (install_path / "config").mkdir(exist_ok=True)
-    (install_path / "config" / "traefik").mkdir(exist_ok=True)
-    (install_path / "data").mkdir(exist_ok=True)
-    (install_path / "data" / "traefik").mkdir(exist_ok=True)
-    (install_path / "data" / "traefik" / "config").mkdir(exist_ok=True)
-    (install_path / "data" / "portainer").mkdir(exist_ok=True)
-    (install_path / "data" / "cloudflared").mkdir(exist_ok=True)
-    (install_path / "bin").mkdir(exist_ok=True)
+    v = validate_version(version)
+    current = current_symlink(home)
+    target = Path("versions") / v  # Relative path
 
-    # Version-specific directories
-    version_dir = install_path / "versions" / version
-    version_dir.mkdir(exist_ok=True)
-    (version_dir / "cli").mkdir(exist_ok=True)
-    (version_dir / "build").mkdir(exist_ok=True)
+    if current.exists() and not current.is_symlink():
+        raise HomeNotFoundError(
+            "{} exists but is not a symlink; refusing to replace it. "
+            "Move it aside and re-run.".format(current)
+        )
 
-
-def update_current_symlink(version: str) -> None:
-    """
-    Update the 'current' symlink to point to a version.
-
-    Args:
-        version: Version to point to
-    """
-    syrvis_home = get_syrvis_home()
-    current = syrvis_home / "current"
-    target = Path("versions") / version  # Relative path
-
-    # Remove existing symlink if present
-    if current.exists() or current.is_symlink():
-        current.unlink()
-
-    # Create new symlink
-    current.symlink_to(target)
+    tmp = home / ".current.tmp"
+    if tmp.exists() or tmp.is_symlink():
+        tmp.unlink()
+    tmp.symlink_to(target)
+    os.replace(str(tmp), str(current))
 
 
-def create_syrvis_wrapper() -> None:
+def create_syrvis_wrapper(home: Path) -> Path:
     """Create the syrvis wrapper script in bin/."""
-    syrvis_home = get_syrvis_home()
-    bin_dir = syrvis_home / "bin"
+    bin_dir = home / "bin"
     bin_dir.mkdir(exist_ok=True)
 
     wrapper_path = bin_dir / "syrvis"
-    wrapper_content = f'''#!/bin/sh
+    wrapper_content = """#!/bin/sh
 # SyrvisCore CLI Wrapper
 # Auto-generated by syrvisctl
 
-INSTALL_DIR="{syrvis_home}"
+INSTALL_DIR="{home}"
 export SYRVIS_HOME="${{INSTALL_DIR}}"
 
 CURRENT_VERSION="${{INSTALL_DIR}}/current"
@@ -360,43 +355,27 @@ else
     echo "Run 'syrvisctl install' to install a service version."
     exit 1
 fi
-'''
+""".format(
+        home=home
+    )
     wrapper_path.write_text(wrapper_content)
     wrapper_path.chmod(0o755)
+    return wrapper_path
 
 
-def create_syrvis_profile() -> Path:
+def create_syrvis_profile(home: Path) -> Path:
     """Create a profile snippet for the syrvis CLI."""
-    syrvis_home = get_syrvis_home()
-    bin_dir = syrvis_home / "bin"
+    bin_dir = home / "bin"
 
-    profile_path = syrvis_home / "syrvis.profile"
-    profile_content = f'''# SyrvisCore Service CLI PATH configuration
+    profile_path = get_syrvis_profile_path(home)
+    profile_content = """# SyrvisCore Service CLI PATH configuration
 # Source this file to add syrvis to your PATH:
-#   source {profile_path}
-export SYRVIS_HOME="{syrvis_home}"
+#   source {profile}
+export SYRVIS_HOME="{home}"
 export PATH="${{PATH}}:{bin_dir}"
-'''
+""".format(
+        profile=profile_path, home=home, bin_dir=bin_dir
+    )
     profile_path.write_text(profile_content)
     profile_path.chmod(0o644)
     return profile_path
-
-
-def get_syrvis_profile_path() -> Path:
-    """Get the path to the syrvis profile snippet."""
-    return get_syrvis_home() / "syrvis.profile"
-
-
-# =============================================================================
-# Testing Helpers
-# =============================================================================
-
-def set_syrvis_home(path: str) -> None:
-    """Set SYRVIS_HOME environment variable (for testing)."""
-    os.environ["SYRVIS_HOME"] = path
-
-
-def unset_syrvis_home() -> None:
-    """Unset SYRVIS_HOME environment variable (for testing)."""
-    if "SYRVIS_HOME" in os.environ:
-        del os.environ["SYRVIS_HOME"]

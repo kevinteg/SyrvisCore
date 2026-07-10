@@ -4,7 +4,7 @@ SyrvisCore Manager CLI - syrvisctl command.
 Provides version management for SyrvisCore service packages.
 
 Commands:
-    install [version]   - Download and install a service version
+    install [version]   - Download and install a service version (or --wheel)
     uninstall <version> - Remove a service version
     list                - List installed versions
     activate <version>  - Switch active version
@@ -14,19 +14,27 @@ Commands:
     cleanup             - Remove old versions
     backup              - Backup management commands
     restore             - Restore from backup
+
+This module is a thin presentation shell: all real work happens in the
+library modules (version_manager, backup, ...), which raise typed
+SyrvisError exceptions and never print. Every read command supports
+``--json``; every prompt is bypassable with ``-y``.
 """
 
+import functools
+import json as jsonlib
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 import click
 
+from . import backup, downloader, manifest, paths, version_manager
 from .__version__ import __version__
-from . import paths
-from . import manifest
-from . import downloader
-from . import version_manager
-from . import backup
+from .errors import SyrvisError
 
 
 @click.group()
@@ -36,246 +44,270 @@ def cli():
     pass
 
 
+def handle_errors(f):
+    """Render SyrvisError cleanly at the CLI boundary."""
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except SyrvisError as e:
+            click.echo("Error: {}".format(e), err=True)
+            sys.exit(e.exit_code)
+
+    return wrapper
+
+
+def emit_json(data) -> None:
+    click.echo(jsonlib.dumps(data, indent=2, default=str))
+
+
+# =============================================================================
+# Privilege handling
+# =============================================================================
+
+
 def check_sudo_needed(path: Path) -> bool:
     """Check if we need sudo to write to the given path."""
-    import os
-
-    # Check if path exists and is writable
     if path.exists():
-        return not os.access(path, os.W_OK)
+        return not os.access(str(path), os.W_OK)
 
-    # Check parent directory
     parent = path.parent
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
 
     if parent.exists():
-        return not os.access(parent, os.W_OK)
+        return not os.access(str(parent), os.W_OK)
 
     return True  # Assume we need sudo if we can't determine
 
 
-def reexec_with_sudo():
-    """Re-execute the current command with sudo."""
-    import os
-    import shutil
+def reexec_with_sudo(extra_args=None):
+    """Re-execute the current command with sudo.
 
+    All decisions made so far (install path, flags) must already be encoded
+    in argv/extra_args — the elevated process starts from scratch.
+    SYRVIS_HOME is passed through explicitly (sudo env_reset would drop it).
+    """
     sudo_path = shutil.which("sudo")
     if not sudo_path:
-        click.echo("Error: sudo not found", err=True)
+        click.echo("Error: sudo not found. Re-run this command as root.", err=True)
         sys.exit(1)
 
-    # Re-execute with sudo, preserving arguments
-    args = [sudo_path, sys.executable] + sys.argv
+    args = [sudo_path]
+    syrvis_home = os.environ.get("SYRVIS_HOME")
+    if syrvis_home:
+        args.append("SYRVIS_HOME={}".format(syrvis_home))
+    args += [sys.executable] + sys.argv + list(extra_args or [])
+
     click.echo("  Elevated privileges required. Re-running with sudo...")
     click.echo()
     os.execv(sudo_path, args)
 
 
-def _find_syrvis_command():
-    """
-    Find the syrvis command path.
+def ensure_privileges(path: Path, extra_args=None) -> None:
+    """Re-exec with sudo if writing to ``path`` requires it."""
+    if check_sudo_needed(path) and os.geteuid() != 0:
+        reexec_with_sudo(extra_args)
 
-    Checks:
-    1. SYRVIS_HOME/bin/syrvis (wrapper script)
-    2. SYRVIS_HOME/current/cli/venv/bin/syrvis (venv)
-    3. PATH (system-wide)
 
-    Returns:
-        Path to syrvis command or None if not found
-    """
-    import shutil
+# =============================================================================
+# Shared helpers
+# =============================================================================
 
-    try:
-        syrvis_home = paths.get_syrvis_home()
-        candidates = [
-            syrvis_home / "bin" / "syrvis",
-            syrvis_home / "current" / "cli" / "venv" / "bin" / "syrvis",
-        ]
 
-        for p in candidates:
+def _find_syrvis_command(home: Optional[Path]) -> Optional[str]:
+    """Find the syrvis command path (wrapper, venv, or PATH)."""
+    if home is not None:
+        for p in (home / "bin" / "syrvis", home / "current" / "cli" / "venv" / "bin" / "syrvis"):
             if p.exists():
                 return str(p)
-    except Exception:
-        pass
-
-    # Fallback to PATH
     return shutil.which("syrvis")
 
 
-def run_syrvis_clean():
-    """Run 'syrvis clean -y' to remove containers and networks."""
-    import subprocess
-
-    syrvis_cmd = _find_syrvis_command()
+def _run_syrvis(home: Optional[Path], *args, timeout: int = 60):
+    """Run a syrvis subcommand, returning (ok, output)."""
+    syrvis_cmd = _find_syrvis_command(home)
     if not syrvis_cmd:
         return False, "syrvis command not found"
-
     try:
         result = subprocess.run(
-            [syrvis_cmd, "clean", "-y"],
-            capture_output=True,
-            text=True,
-            timeout=60
+            [syrvis_cmd] + list(args), capture_output=True, text=True, timeout=timeout
         )
-        return True, result.stdout + result.stderr
+        return result.returncode == 0, (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired:
-        return False, "Clean operation timed out"
-    except Exception as e:
+        return False, "syrvis {} timed out".format(" ".join(args))
+    except Exception as e:  # pragma: no cover - defensive
         return False, str(e)
 
 
+def _progress_bar(downloaded: int, total: int) -> None:
+    if total <= 0:
+        return
+    percent = (downloaded / total) * 100
+    bar_len = 30
+    filled = int(bar_len * downloaded / total)
+    bar = "=" * filled + "-" * (bar_len - filled)
+    click.echo("\r      [{}] {:.0f}%".format(bar, percent), nl=False)
+    if downloaded >= total:
+        click.echo()
+
+
+# =============================================================================
+# Commands
+# =============================================================================
+
+
 @cli.command()
-@click.argument('version', required=False)
-@click.option('--force', is_flag=True, help='Force reinstall even if version exists')
-@click.option('--clean', is_flag=True, help='Clean Docker containers/networks before reinstall')
-@click.option('--path', type=click.Path(), help='Installation path (default: auto-detect)')
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation prompts')
-def install(version, force, clean, path, yes):
+@click.argument("version", required=False)
+@click.option(
+    "--wheel",
+    "wheel_file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="Install from a local wheel file instead of GitHub (dev loop)",
+)
+@click.option("--force", is_flag=True, help="Force reinstall even if version exists")
+@click.option("--clean", is_flag=True, help="Clean Docker containers/networks before reinstall")
+@click.option("--path", type=click.Path(), help="Installation path (default: auto-detect)")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompts")
+@click.option(
+    "--no-verify",
+    is_flag=True,
+    help="Allow installing releases that publish no SHA256SUMS asset",
+)
+@handle_errors
+def install(version, wheel_file, force, clean, path, yes, no_verify):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
-
-    Use --clean to remove existing Docker containers and networks before
-    reinstalling. This is recommended when reinstalling to avoid conflicts.
+    With --wheel, installs the given local wheel file instead (no network).
     """
-    import os
-
     click.echo()
     click.echo("Installing SyrvisCore service...")
     click.echo()
 
-    # Clean Docker resources if requested
-    if clean:
-        click.echo("[0/4] Cleaning Docker resources...")
+    # Determine installation path BEFORE any elevation, so the decision
+    # survives the re-exec (encoded as --path).
+    if path:
+        install_path = Path(path)
+    else:
         try:
-            success, output = run_syrvis_clean()
-            if success:
-                click.echo("      Containers and networks removed")
+            install_path = paths.resolve_home()
+            click.echo("  Using existing installation: {}".format(install_path))
+        except SyrvisError:
+            default_path = paths.get_default_install_path()
+            if yes:
+                install_path = default_path
             else:
-                click.echo(f"      Warning: Clean failed - {output}", err=True)
-                click.echo("      Continuing with install...")
-        except Exception as e:
-            click.echo(f"      Warning: Clean failed - {e}", err=True)
+                user_path = click.prompt(
+                    "  Installation path [{}]".format(default_path),
+                    default=str(default_path),
+                    show_default=False,
+                )
+                install_path = Path(user_path)
+            click.echo("  Installing to: {}".format(install_path))
+
+    extra_args = [] if path else ["--path", str(install_path)]
+    ensure_privileges(install_path, extra_args)
+
+    if clean:
+        click.echo("[0/5] Cleaning Docker resources...")
+        ok, output = _run_syrvis(install_path, "clean", "-y")
+        if ok:
+            click.echo("      Containers and networks removed")
+        else:
+            click.echo("      Warning: Clean failed - {}".format(output.strip()), err=True)
             click.echo("      Continuing with install...")
         click.echo()
 
-    # Determine installation path
-    try:
-        existing_home = paths.get_syrvis_home()
-        install_path = existing_home
-        click.echo(f"  Using existing installation: {install_path}")
-    except paths.SyrvisHomeError:
-        # New installation - prompt for path
-        default_path = paths.get_default_install_path()
+    home = paths.resolve_home(explicit=install_path, create=True)
 
-        if path:
-            install_path = Path(path)
-        elif yes:
-            install_path = default_path
-        else:
-            # Prompt with bracket format: Installation path [/volume4/syrviscore]:
-            user_path = click.prompt(
-                f"  Installation path [{default_path}]",
-                default=str(default_path),
-                show_default=False
-            )
-            install_path = Path(user_path)
-
-        click.echo(f"  Installing to: {install_path}")
-
-    # Check if we need elevated privileges
-    if check_sudo_needed(install_path):
-        if os.geteuid() != 0:
-            reexec_with_sudo()
-
-    # Set SYRVIS_HOME for this session
-    os.environ["SYRVIS_HOME"] = str(install_path)
+    if wheel_file:
+        version_manager.install_from_wheel(home, Path(wheel_file), force=force, log=click.echo)
+    else:
+        confirm = None if yes else (lambda msg: click.confirm("      " + msg, default=False))
+        result = version_manager.download_and_install(
+            home,
+            version=version,
+            force=force,
+            verify=not no_verify,
+            log=click.echo,
+            confirm_reinstall=confirm,
+            progress=_progress_bar,
+        )
+        if result["skipped"]:
+            return
 
     click.echo()
+    click.echo("Installation complete!")
+    click.echo()
 
-    if version_manager.download_and_install(version, force):
+    profile_path = paths.get_syrvis_profile_path(home)
+    if profile_path.exists():
+        click.echo("To add 'syrvis' to your PATH:")
+        click.echo("  source {}".format(profile_path))
         click.echo()
-        click.echo("Installation complete!")
-        click.echo()
 
-        # Show how to add syrvis to PATH
-        try:
-            profile_path = paths.get_syrvis_profile_path()
-            click.echo("To add 'syrvis' to your PATH:")
-            click.echo(f"  source {profile_path}")
-            click.echo()
-            click.echo("Or add to your shell profile for permanent access:")
-            click.echo(f"  echo 'source {profile_path}' >> ~/.profile")
-            click.echo()
-        except paths.SyrvisHomeError:
-            pass
-
-        click.echo("Next steps:")
-        click.echo("  1. Run 'syrvis setup' to configure the service")
-        click.echo("  2. Run 'syrvis start' to start the services")
-    else:
-        sys.exit(1)
+    click.echo("Next steps:")
+    click.echo("  1. Run 'syrvis setup' to configure the service")
+    click.echo("  2. Run 'syrvis start' to start the services")
 
 
 @cli.command()
-@click.argument('version')
-@click.option('--yes', '-y', is_flag=True, help='Skip confirmation')
+@click.argument("version")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@handle_errors
 def uninstall(version, yes):
     """Remove a service version.
 
     Cannot uninstall the currently active version.
     """
-    import os
-
     click.echo()
+    home = paths.resolve_home()
+    version = paths.validate_version(version)
 
-    # Verify version exists
-    version_dir = paths.get_version_dir(version)
+    version_dir = paths.version_dir(home, version)
     if not version_dir.exists():
-        click.echo(f"Version {version} is not installed", err=True)
+        click.echo("Version {} is not installed".format(version), err=True)
         sys.exit(1)
 
-    # Check if active
-    active = manifest.get_active_version()
+    active = manifest.get_active_version(home)
     if version == active:
-        click.echo(f"Cannot uninstall active version: {version}", err=True)
+        click.echo("Cannot uninstall active version: {}".format(version), err=True)
         click.echo("Use 'syrvisctl activate <other-version>' first", err=True)
         sys.exit(1)
 
-    # Check if we need sudo to remove the version directory
-    if check_sudo_needed(version_dir):
-        if os.geteuid() != 0:
-            reexec_with_sudo()
+    ensure_privileges(version_dir)
 
     if not yes:
-        if not click.confirm(f"Uninstall version {version}?"):
+        if not click.confirm("Uninstall version {}?".format(version)):
             click.echo("Uninstall cancelled")
             return
 
-    click.echo(f"Uninstalling {version}...")
-
-    if version_manager.uninstall_version(version):
-        click.echo(f"Version {version} uninstalled")
-    else:
-        sys.exit(1)
+    click.echo("Uninstalling {}...".format(version))
+    version_manager.uninstall_version(home, version)
+    click.echo("Version {} uninstalled".format(version))
 
 
-@cli.command('list')
-def list_versions():
+@cli.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def list_versions(as_json):
     """List installed service versions."""
+    try:
+        home = paths.resolve_home()
+        versions = paths.list_installed_versions(home)
+        active = manifest.get_active_version(home)
+    except SyrvisError:
+        versions, active = [], None
+
+    if as_json:
+        emit_json({"versions": versions, "active": active})
+        return
+
     click.echo()
     click.echo("Installed versions:")
     click.echo()
-
-    try:
-        versions = paths.list_installed_versions()
-        active = manifest.get_active_version()
-    except paths.SyrvisHomeError:
-        click.echo("  No versions installed")
-        click.echo()
-        click.echo("Run 'syrvisctl install' to install a version")
-        return
 
     if not versions:
         click.echo("  No versions installed")
@@ -285,438 +317,339 @@ def list_versions():
 
     for v in versions:
         marker = " (active)" if v == active else ""
-        click.echo(f"  {v}{marker}")
-
+        click.echo("  {}{}".format(v, marker))
     click.echo()
 
 
 @cli.command()
-@click.argument('version')
+@click.argument("version")
+@handle_errors
 def activate(version):
     """Activate a specific service version.
 
     Switches the 'current' symlink to point to the specified version.
     """
     click.echo()
+    home = paths.resolve_home()
+    version = paths.validate_version(version)
 
-    # Verify version exists
-    version_dir = paths.get_version_dir(version)
+    version_dir = paths.version_dir(home, version)
     if not version_dir.exists():
-        click.echo(f"Version {version} is not installed", err=True)
+        click.echo("Version {} is not installed".format(version), err=True)
         click.echo()
         click.echo("Installed versions:")
-        for v in paths.list_installed_versions():
-            click.echo(f"  {v}")
+        for v in paths.list_installed_versions(home):
+            click.echo("  {}".format(v))
         sys.exit(1)
 
-    # Check if already active
-    active = manifest.get_active_version()
+    active = manifest.get_active_version(home)
     if version == active:
-        click.echo(f"Version {version} is already active")
+        click.echo("Version {} is already active".format(version))
         return
 
-    # Check if we need sudo to modify the symlink
-    import os
-    current_link = paths.get_syrvis_home() / "current"
-    if check_sudo_needed(current_link):
-        if os.geteuid() != 0:
-            reexec_with_sudo()
+    ensure_privileges(paths.current_symlink(home))
 
-    click.echo(f"Activating version {version}...")
-
-    if version_manager.activate_version(version):
-        click.echo(f"Activated: {version}")
-        click.echo()
-        click.echo("You may need to restart services:")
-        click.echo("  syrvis restart")
-    else:
-        sys.exit(1)
+    click.echo("Activating version {}...".format(version))
+    version_manager.activate_version(home, version)
+    click.echo("Activated: {}".format(version))
+    click.echo()
+    click.echo("You may need to restart services:")
+    click.echo("  syrvis restart")
 
 
 @cli.command()
-@click.argument('version', required=False)
-def rollback(version):
+@click.argument("version", required=False)
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation prompts")
+@handle_errors
+def rollback(version, yes):
     """Rollback to a previous version (full restore from backup).
 
     Restores both code AND configuration from the backup archive.
-    This is a complete point-in-time restore.
-
-    If VERSION is not specified, shows available backups to choose from.
+    If VERSION is not specified, uses the most recent backed-up version.
     """
-    import os
-
-    # Check if we need sudo early (rollback modifies files)
-    try:
-        syrvis_home = paths.get_syrvis_home()
-        if check_sudo_needed(syrvis_home):
-            if os.geteuid() != 0:
-                reexec_with_sudo()
-    except paths.SyrvisHomeError:
-        pass  # No installation yet
+    home = paths.resolve_home()
+    ensure_privileges(home)
 
     click.echo()
     click.echo("SyrvisCore Rollback")
     click.echo("=" * 40)
     click.echo()
 
-    active = manifest.get_active_version()
-    click.echo(f"Current version: {active}")
+    active = manifest.get_active_version(home)
+    click.echo("Current version: {}".format(active or "(none)"))
     click.echo()
 
-    # List available backups
-    backups = backup.list_backups()
-    if not backups:
+    backups = backup.list_backups(home)
+    backup_versions = []
+    for b in backups:
+        if b["version"] != active and b["version"] not in backup_versions:
+            backup_versions.append(b["version"])
+
+    if not backup_versions:
         click.echo("No backups available for rollback")
         click.echo()
         click.echo("Backups are created automatically when upgrading.")
         sys.exit(1)
 
     click.echo("Available backups:")
-    backup_versions = []
     for b in backups:
         if b["version"] == active:
-            continue  # Skip current version
-        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
+            continue
+        suffix_str = "-{}".format(b["suffix"]) if b["suffix"] else ""
         date_str = b["created_at"][:10] if b["created_at"] else "unknown"
-        reason = b.get("reason", "unknown")
-        click.echo(f"  {b['version']}{suffix_str} ({date_str}) - {reason}")
-        if b["version"] not in backup_versions:
-            backup_versions.append(b["version"])
-
-    if not backup_versions:
-        click.echo("  (no backups for other versions)")
-        sys.exit(1)
-
+        click.echo("  {}{} ({}) - {}".format(b["version"], suffix_str, date_str, b.get("reason")))
     click.echo()
 
-    # Determine version to rollback to
     if not version:
-        # Default to most recent backup that isn't current version
-        version = backup_versions[0] if backup_versions else None
-        if not version:
-            click.echo("No version to rollback to", err=True)
-            sys.exit(1)
+        version = backup_versions[0]
+        if not yes:
+            version = click.prompt("Rollback to version", default=version)
+    version = paths.validate_version(version)
 
-        version = click.prompt(f"Rollback to version", default=version)
-
-    # Validate version has a backup
-    backup_path = backup.get_backup_for_rollback(version)
+    backup_path = backup.get_backup_for_rollback(home, version)
     if not backup_path:
-        click.echo(f"No backup found for version {version}", err=True)
+        click.echo("No backup found for version {}".format(version), err=True)
         sys.exit(1)
 
-    click.echo(f"Rollback to:     {version}")
-    click.echo(f"Using backup:    {backup_path.name}")
+    click.echo("Rollback to:     {}".format(version))
+    click.echo("Using backup:    {}".format(backup_path.name))
     click.echo()
     click.echo("This will restore both code AND configuration.")
     click.echo()
 
-    if not click.confirm("Proceed with rollback?"):
+    if not yes and not click.confirm("Proceed with rollback?"):
         click.echo("Rollback cancelled")
         return
 
     click.echo()
-    click.echo("Rolling back...")
-    click.echo()
-
     click.echo("[1/3] Stopping services...")
-    run_syrvis_stop()
+    ok, output = _run_syrvis(home, "stop")
+    if not ok:
+        click.echo("      Warning: could not stop services: {}".format(output.strip()), err=True)
 
     click.echo("[2/3] Restoring from backup...")
-    if not version_manager.rollback_to_backup(version):
-        click.echo("Rollback failed", err=True)
-        sys.exit(1)
+    version_manager.rollback_to_backup(home, version, log=lambda m: click.echo("      " + m))
 
     click.echo("[3/3] Rollback complete!")
     click.echo()
-    click.echo(f"Rolled back to version {version}")
+    click.echo("Rolled back to version {}".format(version))
     click.echo()
     click.echo("Run 'syrvis start' to start services.")
 
 
-def run_syrvis_stop():
-    """Run 'syrvis stop' to stop services."""
-    import subprocess
-
-    syrvis_cmd = _find_syrvis_command()
-    if syrvis_cmd:
-        try:
-            subprocess.run([syrvis_cmd, "stop"], capture_output=True, timeout=60)
-        except Exception:
-            pass
-
-
 @cli.command()
-def check():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def check(as_json):
     """Check for available updates on GitHub."""
+    try:
+        home = paths.resolve_home()
+        active = manifest.get_active_version(home)
+    except SyrvisError:
+        active = None
+
+    release = downloader.get_latest_release()
+    latest = downloader.get_version_from_release(release)
+    update_available = bool(active) and downloader.compare_versions(active, latest) < 0
+
+    if as_json:
+        emit_json(
+            {
+                "current": active,
+                "latest": latest,
+                "update_available": update_available,
+                "release_notes": release.get("body", ""),
+            }
+        )
+        return
+
     click.echo()
     click.echo("Checking for updates...")
     click.echo()
-
-    active = manifest.get_active_version()
-    if active:
-        click.echo(f"  Current version: {active}")
-    else:
-        click.echo("  Current version: (none installed)")
-
-    release = downloader.get_latest_release()
-    if not release:
-        click.echo("  Could not fetch release information from GitHub")
-        return
-
-    latest = downloader.get_version_from_release(release)
-    click.echo(f"  Latest version:  {latest}")
+    click.echo("  Current version: {}".format(active or "(none installed)"))
+    click.echo("  Latest version:  {}".format(latest))
     click.echo()
 
     if not active:
-        click.echo(f"  Run 'syrvisctl install' to install version {latest}")
+        click.echo("  Run 'syrvisctl install' to install version {}".format(latest))
         return
 
-    cmp = downloader.compare_versions(active, latest)
-    if cmp < 0:
-        click.echo(f"  Update available: {active} -> {latest}")
+    if update_available:
+        click.echo("  Update available: {} -> {}".format(active, latest))
         click.echo()
-
-        # Show release notes
         body = release.get("body", "")
         if body:
             click.echo("  Release notes:")
-            for line in body.split('\n')[:10]:
-                click.echo(f"    {line}")
+            for line in body.split("\n")[:10]:
+                click.echo("    {}".format(line))
             click.echo()
-
-        click.echo(f"  Run 'syrvisctl install {latest}' to update")
-    elif cmp > 0:
+        click.echo("  Run 'syrvisctl install {}' to update".format(latest))
+    elif downloader.compare_versions(active, latest) > 0:
         click.echo("  You are running a newer version than the latest release")
     else:
         click.echo("  You are running the latest version")
 
 
 @cli.command()
-def info():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def info(as_json):
     """Show installation information."""
-    click.echo()
-    click.echo("SyrvisCore Installation Info")
-    click.echo("=" * 40)
-    click.echo()
-
-    # Manager info
-    click.echo(f"Manager version: {__version__}")
-
-    # Try to get installation info
     try:
-        syrvis_home = paths.get_syrvis_home()
-        click.echo(f"Install path:    {syrvis_home}")
-
-        active = manifest.get_active_version()
-        if active:
-            click.echo(f"Active version:  {active}")
-        else:
-            click.echo("Active version:  (none)")
-
-        setup_complete = manifest.verify_setup_complete()
-        click.echo(f"Setup complete:  {'Yes' if setup_complete else 'No'}")
-
-        versions = paths.list_installed_versions()
-        click.echo(f"Versions:        {len(versions)} installed")
-
-    except paths.SyrvisHomeError:
+        home = paths.resolve_home()
+    except SyrvisError:
+        if as_json:
+            emit_json({"manager_version": __version__, "installed": False})
+            return
+        click.echo()
+        click.echo("SyrvisCore Installation Info")
+        click.echo("=" * 40)
+        click.echo()
+        click.echo("Manager version: {}".format(__version__))
         click.echo("Install path:    (not installed)")
         click.echo()
         click.echo("Run 'syrvisctl install' to install a version")
         return
 
-    # Show installed versions
+    active = manifest.get_active_version(home)
+    versions = paths.list_installed_versions(home)
+    setup_complete = manifest.verify_setup_complete(home)
+    history = manifest.get_update_history(home)
+
+    if as_json:
+        emit_json(
+            {
+                "manager_version": __version__,
+                "installed": True,
+                "home": str(home),
+                "active": active,
+                "setup_complete": setup_complete,
+                "versions": {v: manifest.get_version_info(home, v) or {} for v in versions},
+                "update_history": history[-5:],
+            }
+        )
+        return
+
+    click.echo()
+    click.echo("SyrvisCore Installation Info")
+    click.echo("=" * 40)
+    click.echo()
+    click.echo("Manager version: {}".format(__version__))
+    click.echo("Install path:    {}".format(home))
+    click.echo("Active version:  {}".format(active or "(none)"))
+    click.echo("Setup complete:  {}".format("Yes" if setup_complete else "No"))
+    click.echo("Versions:        {} installed".format(len(versions)))
+
     click.echo()
     click.echo("Installed versions:")
     for v in versions:
         marker = " (active)" if v == active else ""
-        info = manifest.get_version_info(v)
-        if info:
-            installed = info.get("installed_at", "unknown")[:10]
-            click.echo(f"  {v}{marker} - installed {installed}")
+        vinfo = manifest.get_version_info(home, v)
+        if vinfo:
+            installed = vinfo.get("installed_at", "unknown")[:10]
+            click.echo("  {}{} - installed {}".format(v, marker, installed))
         else:
-            click.echo(f"  {v}{marker}")
+            click.echo("  {}{}".format(v, marker))
 
-    # Show update history
-    history = manifest.get_update_history()
     if history:
         click.echo()
         click.echo("Recent updates:")
         for entry in history[-5:]:
-            from_v = entry.get("from", "?")
-            to_v = entry.get("to", "?")
-            update_type = entry.get("type", "update")
-            timestamp = entry.get("timestamp", "")[:10]
-            click.echo(f"  {timestamp}: {from_v} -> {to_v} ({update_type})")
+            click.echo(
+                "  {}: {} -> {} ({})".format(
+                    entry.get("timestamp", "")[:10],
+                    entry.get("from", "?"),
+                    entry.get("to", "?"),
+                    entry.get("type", "update"),
+                )
+            )
 
 
 @cli.command()
-@click.option('--keep', default=2, help='Number of versions to keep')
-@click.option('--dry-run', is_flag=True, help='Show what would be removed')
-def cleanup(keep, dry_run):
+@click.option("--keep", default=2, help="Number of versions to keep")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
+@handle_errors
+def cleanup(keep, dry_run, yes):
     """Remove old versions to free disk space.
 
     Keeps the specified number of versions (default: 2).
     Never removes the currently active version.
     """
     click.echo()
+    home = paths.resolve_home()
 
-    try:
-        versions = paths.list_installed_versions()
-        active = manifest.get_active_version()
-    except paths.SyrvisHomeError:
-        click.echo("No versions installed", err=True)
-        return
+    versions = paths.list_installed_versions(home)
+    active = manifest.get_active_version(home)
 
-    if len(versions) <= keep:
-        click.echo(f"Only {len(versions)} version(s) installed, nothing to clean up")
-        return
-
-    # Get list of versions to remove
-    to_remove = version_manager.cleanup_old_versions(keep, dry_run=True)
-
+    to_remove = version_manager.cleanup_old_versions(home, keep, dry_run=True)
     if not to_remove:
-        click.echo("No versions to remove")
+        click.echo("Only {} version(s) installed, nothing to clean up".format(len(versions)))
         return
 
-    click.echo(f"Versions to remove: {', '.join(to_remove)}")
-    click.echo(f"Versions to keep:   {keep} (including active: {active})")
+    click.echo("Versions to remove: {}".format(", ".join(to_remove)))
+    click.echo("Versions to keep:   {} (including active: {})".format(keep, active))
     click.echo()
 
     if dry_run:
         click.echo("Dry run - no changes made")
         return
 
-    if not click.confirm("Proceed with cleanup?"):
+    ensure_privileges(paths.versions_dir(home))
+
+    if not yes and not click.confirm("Proceed with cleanup?"):
         click.echo("Cleanup cancelled")
         return
 
-    removed = version_manager.cleanup_old_versions(keep, dry_run=False)
-
+    removed = version_manager.cleanup_old_versions(home, keep, dry_run=False)
     for v in removed:
-        click.echo(f"  Removed: {v}")
-
+        click.echo("  Removed: {}".format(v))
     click.echo()
     click.echo("Cleanup complete")
-
-
-@cli.command()
-@click.option('--from-legacy', is_flag=True, help='Migrate from legacy (monolithic) installation')
-@click.option('--dry-run', is_flag=True, help='Show what would be migrated')
-def migrate(from_legacy, dry_run):
-    """Migrate from a legacy installation.
-
-    This command converts old (monolithic) installations to the new
-    split-package architecture where the manager and service are separate.
-    """
-    click.echo()
-    click.echo("SyrvisCore Migration")
-    click.echo("=" * 40)
-    click.echo()
-
-    # Try to find legacy installation
-    try:
-        syrvis_home = paths.get_syrvis_home()
-    except paths.SyrvisHomeError:
-        click.echo("No existing installation found")
-        click.echo("Run 'syrvisctl install' for a fresh installation")
-        return
-
-    # Check manifest schema version
-    try:
-        mf = manifest.get_manifest()
-        schema_version = mf.get("schema_version", 1)
-    except FileNotFoundError:
-        click.echo("No manifest found - not a valid installation")
-        sys.exit(1)
-
-    if schema_version >= 3:
-        click.echo("Installation is already using the new architecture")
-        click.echo(f"Schema version: {schema_version}")
-        return
-
-    click.echo(f"Found legacy installation (schema v{schema_version})")
-    click.echo(f"Install path: {syrvis_home}")
-    click.echo()
-
-    # Check for existing version directory
-    current_link = syrvis_home / "current"
-    if current_link.exists() and current_link.is_symlink():
-        current_version = mf.get("active_version", "unknown")
-        click.echo(f"Active version: {current_version}")
-
-        # Check if venv exists in version directory
-        version_venv = syrvis_home / "versions" / current_version / "cli" / "venv"
-        if version_venv.exists():
-            click.echo("Version structure already exists")
-
-            if dry_run:
-                click.echo()
-                click.echo("Dry run - would update manifest to schema v3")
-                return
-
-            # Just update the manifest
-            click.echo()
-            click.echo("Updating manifest to schema v3...")
-            mf["schema_version"] = 3
-            manifest.save_manifest(mf)
-            click.echo("Migration complete!")
-            return
-
-    click.echo()
-    click.echo("Migration would:")
-    click.echo("  1. Update manifest to schema v3")
-    click.echo("  2. Preserve existing version directories")
-    click.echo("  3. Keep config/ and data/ directories intact")
-    click.echo()
-
-    if dry_run:
-        click.echo("Dry run - no changes made")
-        return
-
-    if not click.confirm("Proceed with migration?"):
-        click.echo("Migration cancelled")
-        return
-
-    # Perform migration
-    click.echo()
-    click.echo("Migrating...")
-
-    # Update manifest schema
-    mf["schema_version"] = 3
-    manifest.save_manifest(mf)
-    click.echo("  Updated manifest schema")
-
-    # Create syrvis wrapper if it doesn't exist
-    paths.create_syrvis_wrapper()
-    click.echo("  Created syrvis wrapper script")
-
-    click.echo()
-    click.echo("Migration complete!")
-    click.echo()
-    click.echo("Your existing installation has been migrated.")
-    click.echo("You can now use 'syrvisctl' to manage versions.")
 
 
 # =============================================================================
 # Backup Commands
 # =============================================================================
 
-@cli.group('backup')
+
+@cli.group("backup")
 def backup_group():
     """Backup management commands."""
     pass
 
 
-@backup_group.command('list')
-def backup_list():
+@backup_group.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def backup_list(as_json):
     """List available backups."""
+    home = paths.resolve_home()
+    backups = backup.list_backups(home)
+
+    if as_json:
+        emit_json(
+            {
+                "backups": [
+                    {
+                        "filename": b["filename"],
+                        "version": b["version"],
+                        "suffix": b["suffix"],
+                        "size": b["size"],
+                        "created_at": b["created_at"],
+                        "reason": b["reason"],
+                        "path": str(b["path"]),
+                    }
+                    for b in backups
+                ]
+            }
+        )
+        return
+
     click.echo()
     click.echo("Available backups:")
     click.echo()
 
-    backups = backup.list_backups()
     if not backups:
         click.echo("  No backups found")
         click.echo()
@@ -724,29 +657,33 @@ def backup_list():
         click.echo("or manually with 'syrvisctl backup create'.")
         return
 
-    click.echo(f"  {'Version':<12} {'Date':<12} {'Size':<10} {'Reason':<12}")
-    click.echo(f"  {'-'*12} {'-'*12} {'-'*10} {'-'*12}")
+    click.echo("  {:<12} {:<12} {:<10} {:<12}".format("Version", "Date", "Size", "Reason"))
+    click.echo("  {} {} {} {}".format("-" * 12, "-" * 12, "-" * 10, "-" * 12))
 
     for b in backups:
-        suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
-        version_str = f"{b['version']}{suffix_str}"
+        suffix_str = "-{}".format(b["suffix"]) if b["suffix"] else ""
+        version_str = "{}{}".format(b["version"], suffix_str)
         date_str = b["created_at"][:10] if b["created_at"] else "unknown"
-        size_mb = b["size"] / (1024 * 1024)
-        size_str = f"{size_mb:.1f} MB"
-        reason = b.get("reason", "unknown")
-        click.echo(f"  {version_str:<12} {date_str:<12} {size_str:<10} {reason:<12}")
+        size_str = "{:.1f} MB".format(b["size"] / (1024 * 1024))
+        click.echo(
+            "  {:<12} {:<12} {:<10} {:<12}".format(
+                version_str, date_str, size_str, b.get("reason") or "unknown"
+            )
+        )
 
     click.echo()
-    try:
-        click.echo(f"Location: {backup.get_backups_dir()}")
-    except paths.SyrvisHomeError:
-        pass
+    click.echo("Location: {}".format(backup.get_backups_dir(home)))
 
 
-@backup_group.command('create')
-@click.option('--output', '-o', type=click.Path(), help='Output path for backup file')
-@click.option('--reason', type=click.Choice(['manual', 'post-setup']), default='manual',
-              help='Reason for backup (affects naming)')
+@backup_group.command("create")
+@click.option("--output", "-o", type=click.Path(), help="Output path for backup file")
+@click.option(
+    "--reason",
+    type=click.Choice(["manual", "post-setup"]),
+    default="manual",
+    help="Reason for backup (affects naming)",
+)
+@handle_errors
 def backup_create(output, reason):
     """Create a manual backup of the current state.
 
@@ -757,55 +694,52 @@ def backup_create(output, reason):
     click.echo("Creating backup...")
     click.echo()
 
-    active = manifest.get_active_version()
+    home = paths.resolve_home()
+    active = manifest.get_active_version(home)
     if not active:
         click.echo("No active version to backup", err=True)
         sys.exit(1)
 
-    click.echo(f"  Version: {active}")
+    click.echo("  Version: {}".format(active))
 
-    try:
-        if reason == "post-setup":
-            # Post-setup backups use -N suffix
-            backup_path = backup.create_post_setup_backup(active)
-        else:
-            # Manual backups go to specified output or default location
-            output_path = Path(output) if output else None
-            backup_path = backup.create_backup(
-                output_path=output_path,
-                version=active,
-                reason="manual",
-            )
-        click.echo(f"  Output:  {backup_path}")
-        click.echo()
+    if reason == "post-setup":
+        backup_path = backup.create_post_setup_backup(home, active)
+    else:
+        backup_path = backup.create_backup(
+            home,
+            output_path=Path(output) if output else None,
+            version=active,
+            reason="manual",
+        )
 
-        size_mb = backup_path.stat().st_size / (1024 * 1024)
-        click.echo(f"Backup complete: {backup_path.name} ({size_mb:.1f} MB)")
+    click.echo("  Output:  {}".format(backup_path))
+    click.echo()
 
-    except Exception as e:
-        click.echo(f"Backup failed: {e}", err=True)
-        sys.exit(1)
+    size_mb = backup_path.stat().st_size / (1024 * 1024)
+    click.echo("Backup complete: {} ({:.1f} MB)".format(backup_path.name, size_mb))
 
 
-@backup_group.command('cleanup')
-@click.option('--keep', default=3, help='Number of versions to keep backups for')
-@click.option('--dry-run', is_flag=True, help='Show what would be deleted')
-def backup_cleanup(keep, dry_run):
+@backup_group.command("cleanup")
+@click.option("--keep", default=3, help="Number of versions to keep backups for")
+@click.option("--dry-run", is_flag=True, help="Show what would be deleted")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
+@handle_errors
+def backup_cleanup(keep, dry_run, yes):
     """Remove old backups to free disk space.
 
     Keeps all backups for the N most recent versions (default: 3).
     """
     click.echo()
+    home = paths.resolve_home()
 
-    to_delete = backup.cleanup_old_backups(keep_versions=keep, dry_run=True)
-
+    to_delete = backup.cleanup_old_backups(home, keep_versions=keep, dry_run=True)
     if not to_delete:
-        click.echo(f"No backups to remove (keeping {keep} versions)")
+        click.echo("No backups to remove (keeping {} versions)".format(keep))
         return
 
-    click.echo(f"Backups to remove ({len(to_delete)}):")
+    click.echo("Backups to remove ({}):".format(len(to_delete)))
     for path in to_delete:
-        click.echo(f"  {path.name}")
+        click.echo("  {}".format(path.name))
 
     if dry_run:
         click.echo()
@@ -813,19 +747,20 @@ def backup_cleanup(keep, dry_run):
         return
 
     click.echo()
-    if not click.confirm("Proceed with cleanup?"):
+    if not yes and not click.confirm("Proceed with cleanup?"):
         click.echo("Cleanup cancelled")
         return
 
-    deleted = backup.cleanup_old_backups(keep_versions=keep, dry_run=False)
+    deleted = backup.cleanup_old_backups(home, keep_versions=keep, dry_run=False)
     click.echo()
-    click.echo(f"Removed {len(deleted)} backup(s)")
+    click.echo("Removed {} backup(s)".format(len(deleted)))
 
 
 @cli.command()
-@click.argument('backup_file', required=False, type=click.Path(exists=True))
-@click.option('--path', type=click.Path(), help='Installation path')
-@click.option('-y', '--yes', is_flag=True, help='Skip confirmation')
+@click.argument("backup_file", required=False, type=click.Path(exists=True))
+@click.option("--path", type=click.Path(), help="Installation path")
+@click.option("-y", "--yes", is_flag=True, help="Skip confirmation")
+@handle_errors
 def restore(backup_file, path, yes):
     """Restore from a backup archive.
 
@@ -834,123 +769,96 @@ def restore(backup_file, path, yes):
 
     If BACKUP_FILE is not specified, shows available backups to choose from.
     """
-    import os
-
-    # Check if we need sudo early (restore creates/modifies files)
-    install_path = Path(path) if path else None
-    if install_path and check_sudo_needed(install_path):
-        if os.geteuid() != 0:
-            reexec_with_sudo()
-
     click.echo()
     click.echo("SyrvisCore Restore")
     click.echo("=" * 40)
     click.echo()
 
-    # If no backup file specified, try to list available backups
     if not backup_file:
         try:
-            backups = backup.list_backups()
-            if backups:
-                click.echo("Available backups:")
-                click.echo()
-                for i, b in enumerate(backups, 1):
-                    suffix_str = f"-{b['suffix']}" if b['suffix'] else ""
-                    date_str = b["created_at"][:10] if b["created_at"] else "unknown"
-                    click.echo(f"  {i}. {b['version']}{suffix_str} ({date_str}) - {b['path']}")
-                click.echo()
+            home = paths.resolve_home()
+            backups = backup.list_backups(home)
+        except SyrvisError:
+            backups = []
 
-                choice = click.prompt("Select backup (number)", type=int, default=1)
-                if 1 <= choice <= len(backups):
-                    backup_file = str(backups[choice - 1]["path"])
-                else:
-                    click.echo("Invalid selection", err=True)
-                    sys.exit(1)
-            else:
-                click.echo("No backups found in default location")
-                click.echo()
-                click.echo("Specify a backup file path:")
-                click.echo("  syrvisctl restore /path/to/backup.tar.gz")
-                sys.exit(1)
-        except paths.SyrvisHomeError:
-            click.echo("No existing installation found")
+        if not backups:
+            click.echo("No backups found in default location")
             click.echo()
             click.echo("Specify a backup file path:")
             click.echo("  syrvisctl restore /path/to/backup.tar.gz")
             sys.exit(1)
 
+        click.echo("Available backups:")
+        click.echo()
+        for i, b in enumerate(backups, 1):
+            suffix_str = "-{}".format(b["suffix"]) if b["suffix"] else ""
+            date_str = b["created_at"][:10] if b["created_at"] else "unknown"
+            click.echo(
+                "  {}. {}{} ({}) - {}".format(i, b["version"], suffix_str, date_str, b["path"])
+            )
+        click.echo()
+
+        choice = 1 if yes else click.prompt("Select backup (number)", type=int, default=1)
+        if not 1 <= choice <= len(backups):
+            click.echo("Invalid selection", err=True)
+            sys.exit(1)
+        backup_file = str(backups[choice - 1]["path"])
+
     backup_path = Path(backup_file)
-    click.echo(f"Backup file: {backup_path}")
+    click.echo("Backup file: {}".format(backup_path))
 
-    # Read backup metadata
-    import tarfile
-    import json
-
-    try:
-        with tarfile.open(backup_path, "r:gz") as tar:
-            meta_file = tar.extractfile("backup-metadata.json")
-            if meta_file:
-                metadata = json.loads(meta_file.read().decode())
-            else:
-                click.echo("Backup file missing metadata", err=True)
-                sys.exit(1)
-    except Exception as e:
-        click.echo(f"Could not read backup: {e}", err=True)
-        sys.exit(1)
-
+    metadata = backup.read_backup_metadata(backup_path)
     version = metadata.get("version", "unknown")
-    created_at = metadata.get("created_at", "unknown")[:10]
+    created_at = (metadata.get("created_at") or "unknown")[:10]
     original_path = metadata.get("syrvis_home", "/volume1/syrviscore")
 
-    click.echo(f"Version:     {version}")
-    click.echo(f"Created:     {created_at}")
-    click.echo(f"Original:    {original_path}")
+    click.echo("Version:     {}".format(version))
+    click.echo("Created:     {}".format(created_at))
+    click.echo("Original:    {}".format(original_path))
     click.echo()
 
-    # Determine install path
     if path:
         install_path = Path(path)
     else:
         install_path = Path(original_path)
         if not yes:
-            user_path = click.prompt(f"Install path [{install_path}]",
-                                     default=str(install_path), show_default=False)
+            user_path = click.prompt(
+                "Install path [{}]".format(install_path),
+                default=str(install_path),
+                show_default=False,
+            )
             install_path = Path(user_path)
 
-    click.echo(f"Restore to:  {install_path}")
+    click.echo("Restore to:  {}".format(install_path))
     click.echo()
 
+    if not yes and not click.confirm("Proceed with restore?"):
+        click.echo("Restore cancelled")
+        return
+
+    # Elevation happens only after every decision is encoded in flags
+    extra_args = []
+    if not path:
+        extra_args += ["--path", str(install_path)]
     if not yes:
-        if not click.confirm("Proceed with restore?"):
-            click.echo("Restore cancelled")
-            return
+        extra_args += ["-y"]
+    ensure_privileges(install_path, extra_args)
 
     click.echo()
     click.echo("Restoring...")
     click.echo()
 
-    try:
-        click.echo("[1/3] Extracting backup...")
-        backup.restore_from_backup(backup_path, install_path)
+    click.echo("[1/2] Extracting backup...")
+    backup.restore_from_backup(backup_path, install_path, log=lambda m: click.echo("      " + m))
 
-        click.echo("[2/3] Creating wrapper scripts...")
-        import os
-        os.environ["SYRVIS_HOME"] = str(install_path)
-        paths.create_syrvis_wrapper()
-        paths.create_syrvis_profile()
-
-        click.echo("[3/3] Restore complete!")
-        click.echo()
-        click.echo(f"Restored version {version} to {install_path}")
-        click.echo()
-        click.echo("Next steps:")
-        click.echo(f"  1. Source the profile: source {install_path}/syrvis.profile")
-        click.echo("  2. Run diagnostics: syrvis doctor")
-        click.echo("  3. Start services: syrvis start")
-
-    except Exception as e:
-        click.echo(f"Restore failed: {e}", err=True)
-        sys.exit(1)
+    click.echo("[2/2] Restore complete!")
+    click.echo()
+    click.echo("Restored version {} to {}".format(version, install_path))
+    click.echo()
+    click.echo("Next steps:")
+    click.echo("  1. Source the profile: source {}/syrvis.profile".format(install_path))
+    click.echo("  2. Run diagnostics: syrvis doctor")
+    click.echo("  3. Start services: syrvis start")
 
 
 def main():

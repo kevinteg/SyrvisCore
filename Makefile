@@ -1,7 +1,7 @@
 # Makefile for SyrvisCore
 # Compatible with local development and GitHub Actions
 
-.PHONY: all help clean test lint format build-wheel build-spk validate install dev-install check version
+.PHONY: all help clean test lint format build-manager build-service build-spk validate install dev-install check version
 
 # Colors for output (disabled in CI)
 ifdef CI
@@ -20,7 +20,9 @@ endif
 
 # Project paths
 PROJECT_ROOT := $(shell pwd)
-SRC_DIR := src
+MANAGER_DIR := packages/syrviscore-manager
+SERVICE_DIR := packages/syrviscore
+SRC_DIRS := $(MANAGER_DIR)/src $(SERVICE_DIR)/src
 TESTS_DIR := tests
 DIST_DIR := dist
 BUILD_DIR := build
@@ -28,7 +30,8 @@ BUILD_TOOLS := build-tools
 SPK_DIR := spk
 
 # Version detection
-VERSION := $(shell grep '^__version__' src/syrviscore/__version__.py | cut -d'"' -f2)
+VERSION := $(shell grep '^__version__' $(SERVICE_DIR)/src/syrviscore/__version__.py | cut -d'"' -f2)
+MANAGER_VERSION := $(shell grep '^__version__' $(MANAGER_DIR)/src/syrviscore_manager/__version__.py | cut -d'"' -f2)
 WHEEL_NAME := syrviscore-$(VERSION)-py3-none-any.whl
 SPK_NAME := syrviscore-$(VERSION)-noarch.spk
 
@@ -54,16 +57,17 @@ help: ## Display this help message
 		/^[a-zA-Z_-]+:.*?##/ { printf "  $(BLUE)%-15s$(NC) %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n$(YELLOW)%s$(NC)\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
-version: ## Show current version
-	@echo "$(GREEN)$(VERSION)$(NC)"
+version: ## Show current versions
+	@echo "service: $(GREEN)$(VERSION)$(NC)  manager: $(GREEN)$(MANAGER_VERSION)$(NC)"
 
 ##@ Development
 
-dev-install: ## Install package in editable mode with dev dependencies
-	@echo "$(BLUE)[INFO]$(NC) Installing syrviscore in development mode..."
-	$(PIP) install -e ".[dev]"
+dev-install: ## Install both packages in editable mode with dev dependencies
+	@echo "$(BLUE)[INFO]$(NC) Installing syrviscore-manager and syrviscore in development mode..."
+	$(PIP) install -e "$(MANAGER_DIR)[dev]"
+	$(PIP) install -e "$(SERVICE_DIR)[dev]"
 	@echo "$(GREEN)[SUCCESS]$(NC) Development environment ready"
-	@echo "Run 'syrvis --version' to verify installation"
+	@echo "Run 'syrvisctl --version' and 'syrvis --version' to verify installation"
 
 check: lint test ## Run all checks (lint + test)
 	@echo "$(GREEN)[SUCCESS]$(NC) All checks passed!"
@@ -72,17 +76,17 @@ check: lint test ## Run all checks (lint + test)
 
 lint: ## Run ruff linter
 	@echo "$(BLUE)[INFO]$(NC) Running ruff linter..."
-	$(RUFF) check $(SRC_DIR) $(TESTS_DIR)
+	$(RUFF) check $(SRC_DIRS) $(TESTS_DIR)
 	@echo "$(GREEN)[SUCCESS]$(NC) Linting passed"
 
 format: ## Format code with black
 	@echo "$(BLUE)[INFO]$(NC) Formatting code with black..."
-	$(BLACK) $(SRC_DIR) $(TESTS_DIR)
+	$(BLACK) $(SRC_DIRS) $(TESTS_DIR)
 	@echo "$(GREEN)[SUCCESS]$(NC) Code formatted"
 
 format-check: ## Check code formatting without making changes
 	@echo "$(BLUE)[INFO]$(NC) Checking code formatting..."
-	$(BLACK) --check $(SRC_DIR) $(TESTS_DIR)
+	$(BLACK) --check $(SRC_DIRS) $(TESTS_DIR)
 
 ##@ Testing
 
@@ -93,7 +97,7 @@ test: ## Run tests with pytest
 
 test-cov: ## Run tests with coverage report
 	@echo "$(BLUE)[INFO]$(NC) Running tests with coverage..."
-	$(PYTEST) $(TESTS_DIR) --cov=$(SRC_DIR) --cov-report=term-missing --cov-report=html
+	$(PYTEST) $(TESTS_DIR) --cov=syrviscore --cov=syrviscore_manager --cov-report=term-missing --cov-report=html
 	@echo "$(GREEN)[SUCCESS]$(NC) Coverage report generated in htmlcov/"
 
 ##@ Build
@@ -107,23 +111,22 @@ clean: ## Remove build artifacts and cache files
 	rm -rf htmlcov/
 	rm -rf .coverage
 	rm -rf .ruff_cache/
-	rm -rf src/*.egg-info
+	rm -rf $(MANAGER_DIR)/src/*.egg-info $(SERVICE_DIR)/src/*.egg-info
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
 	@echo "$(GREEN)[SUCCESS]$(NC) Build artifacts cleaned"
 
-build-wheel: clean ## Build Python wheel package
-	@echo "$(BLUE)[INFO]$(NC) Building Python wheel..."
-	chmod +x $(BUILD_TOOLS)/build-python-package.sh
-	./$(BUILD_TOOLS)/build-python-package.sh
-	@if [ -f "$(DIST_DIR)/$(WHEEL_NAME)" ]; then \
-		echo "$(GREEN)[SUCCESS]$(NC) Wheel built: $(WHEEL_NAME)"; \
-	else \
-		echo "$(RED)[ERROR]$(NC) Wheel build failed"; \
-		exit 1; \
-	fi
+build-manager: ## Build manager wheel (+ bundled dependency wheels)
+	@echo "$(BLUE)[INFO]$(NC) Building manager wheel..."
+	chmod +x $(BUILD_TOOLS)/build-manager.sh
+	./$(BUILD_TOOLS)/build-manager.sh
 
-build-spk: build-wheel ## Build complete SPK package (includes wheel build)
+build-service: ## Build service wheel
+	@echo "$(BLUE)[INFO]$(NC) Building service wheel..."
+	chmod +x $(BUILD_TOOLS)/build-service.sh
+	./$(BUILD_TOOLS)/build-service.sh
+
+build-spk: build-manager ## Build SPK package (manager only)
 	@echo "$(BLUE)[INFO]$(NC) Building SPK package..."
 	chmod +x $(BUILD_TOOLS)/build-spk.sh
 	./$(BUILD_TOOLS)/build-spk.sh
@@ -195,11 +198,11 @@ select-docker-versions: ## Interactively select Docker image versions
 
 ##@ CI/CD
 
-ci-install-deps: ## Install dependencies for CI (minimal, no dev tools)
+ci-install-deps: ## Install dependencies for CI
 	@echo "$(BLUE)[INFO]$(NC) Installing CI dependencies..."
 	$(PIP) install --upgrade pip
-	$(PIP) install build
-	$(PIP) install -e .
+	$(PIP) install -e "$(MANAGER_DIR)[dev]"
+	$(PIP) install -e "$(SERVICE_DIR)[dev]"
 
 ci-build: ## CI build target (lint, test, build-spk)
 	@echo "$(BLUE)[INFO]$(NC) Running CI build pipeline..."

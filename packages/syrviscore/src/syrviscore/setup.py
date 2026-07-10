@@ -15,7 +15,6 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple
 
 from . import privileged_ops
 from . import paths
@@ -64,8 +63,7 @@ def get_default_network_settings() -> dict:
 
         # Try to get gateway and interface from default route
         result = subprocess.run(
-            ["ip", "route", "show", "default"],
-            capture_output=True, text=True, timeout=5
+            ["ip", "route", "show", "default"], capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and "via" in result.stdout:
             parts = result.stdout.split()
@@ -87,21 +85,25 @@ def get_default_network_settings() -> dict:
                 if idx + 1 < len(parts):
                     route_iface = parts[idx + 1]
                     # Prefer ovs_eth0 for macvlan, but use route interface for IP detection
-                    defaults["interface"] = "ovs_eth0" if Path("/sys/class/net/ovs_eth0").exists() else route_iface
+                    defaults["interface"] = (
+                        "ovs_eth0" if Path("/sys/class/net/ovs_eth0").exists() else route_iface
+                    )
 
         # Try to detect NAS IP from the interface
         result = subprocess.run(
             ["ip", "-4", "addr", "show", defaults["interface"]],
-            capture_output=True, text=True, timeout=5
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
-            for line in result.stdout.split('\n'):
-                if 'inet ' in line:
+            for line in result.stdout.split("\n"):
+                if "inet " in line:
                     # Extract IP from "inet 192.168.8.3/24 ..."
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         ip_cidr = parts[1]
-                        nas_ip = ip_cidr.split('/')[0]
+                        nas_ip = ip_cidr.split("/")[0]
                         defaults["nas_ip"] = nas_ip
                         break
 
@@ -124,9 +126,9 @@ def get_default_network_settings() -> dict:
 def get_timezone() -> str:
     """Get system timezone from /etc/TZ or default to UTC."""
     try:
-        return Path('/etc/TZ').read_text().strip()
+        return Path("/etc/TZ").read_text().strip()
     except Exception:
-        return 'UTC'
+        return "UTC"
 
 
 def load_existing_config() -> dict:
@@ -141,33 +143,33 @@ def load_existing_config() -> dict:
             return existing
 
         env_content = env_path.read_text()
-        for line in env_content.split('\n'):
+        for line in env_content.split("\n"):
             line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip()
 
                 # Map .env keys to config keys
                 key_map = {
-                    'DOMAIN': 'domain',
-                    'ACME_EMAIL': 'email',
-                    'NETWORK_INTERFACE': 'interface',
-                    'NETWORK_SUBNET': 'subnet',
-                    'NETWORK_GATEWAY': 'gateway',
-                    'TRAEFIK_IP': 'traefik_ip',
-                    'SHIM_IP': 'shim_ip',
-                    'NAS_IP': 'nas_ip',
-                    'CLOUDFLARE_TUNNEL_TOKEN': 'cloudflare_token',
-                    'SYNOLOGY_DSM_ENABLED': 'synology_dsm',
-                    'SYNOLOGY_PHOTOS_ENABLED': 'synology_photos',
+                    "DOMAIN": "domain",
+                    "ACME_EMAIL": "email",
+                    "NETWORK_INTERFACE": "interface",
+                    "NETWORK_SUBNET": "subnet",
+                    "NETWORK_GATEWAY": "gateway",
+                    "TRAEFIK_IP": "traefik_ip",
+                    "SHIM_IP": "shim_ip",
+                    "NAS_IP": "nas_ip",
+                    "CLOUDFLARE_TUNNEL_TOKEN": "cloudflare_token",
+                    "SYNOLOGY_DSM_ENABLED": "synology_dsm",
+                    "SYNOLOGY_PHOTOS_ENABLED": "synology_photos",
                 }
 
                 if key in key_map and value:
                     config_key = key_map[key]
                     # Convert boolean strings
-                    if key.startswith('SYNOLOGY_'):
-                        existing[config_key] = value.lower() in ('true', '1', 'yes')
+                    if key.startswith("SYNOLOGY_"):
+                        existing[config_key] = value.lower() in ("true", "1", "yes")
                     else:
                         existing[config_key] = value
     except Exception:
@@ -190,35 +192,25 @@ def prompt_configuration(defaults: dict) -> dict:
     config = {}
 
     # Domain and email
-    config["domain"] = click.prompt(
-        "  Domain name",
-        default=defaults.get("domain", "example.com")
-    )
+    config["domain"] = click.prompt("  Domain name", default=defaults.get("domain", "example.com"))
     # For email, prefer existing value, else derive from domain
     default_email = defaults.get("email") or f"admin@{config['domain']}"
-    config["email"] = click.prompt(
-        "  Email for Let's Encrypt",
-        default=default_email
-    )
+    config["email"] = click.prompt("  Email for Let's Encrypt", default=default_email)
 
     click.echo()
     click.echo("  Network Configuration (for macvlan):")
 
     config["interface"] = click.prompt(
-        "    Network interface",
-        default=defaults.get("interface", "eth0")
+        "    Network interface", default=defaults.get("interface", "eth0")
     )
     config["subnet"] = click.prompt(
-        "    Network subnet (CIDR)",
-        default=defaults.get("subnet", "192.168.1.0/24")
+        "    Network subnet (CIDR)", default=defaults.get("subnet", "192.168.1.0/24")
     )
     config["gateway"] = click.prompt(
-        "    Gateway IP",
-        default=defaults.get("gateway", "192.168.1.1")
+        "    Gateway IP", default=defaults.get("gateway", "192.168.1.1")
     )
     config["traefik_ip"] = click.prompt(
-        "    Traefik IP (dedicated macvlan IP)",
-        default=defaults.get("traefik_ip", "192.168.1.100")
+        "    Traefik IP (dedicated macvlan IP)", default=defaults.get("traefik_ip", "192.168.1.100")
     )
 
     # For shim IP: prefer existing value, else calculate from traefik_ip + 1
@@ -226,18 +218,16 @@ def prompt_configuration(defaults: dict) -> dict:
         default_shim = defaults["shim_ip"]
     else:
         try:
-            parts = config["traefik_ip"].split('.')
+            parts = config["traefik_ip"].split(".")
             default_shim = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
         except (IndexError, ValueError):
             default_shim = ""
 
     config["shim_ip"] = click.prompt(
-        "    Shim IP (for host-to-container comm)",
-        default=default_shim
+        "    Shim IP (for host-to-container comm)", default=default_shim
     )
     config["nas_ip"] = click.prompt(
-        "    NAS IP (for Synology services)",
-        default=defaults.get("nas_ip", "")
+        "    NAS IP (for Synology services)", default=defaults.get("nas_ip", "")
     )
 
     # Synology Services - use existing values as defaults
@@ -245,25 +235,22 @@ def prompt_configuration(defaults: dict) -> dict:
     click.echo("  Synology Services (proxy through Traefik with Let's Encrypt):")
     config["synology_dsm"] = click.confirm(
         "    Enable DSM Portal (dsm.{domain})?".format(domain=config["domain"]),
-        default=defaults.get("synology_dsm", True)
+        default=defaults.get("synology_dsm", True),
     )
     config["synology_photos"] = click.confirm(
         "    Enable Photos (photos.{domain})?".format(domain=config["domain"]),
-        default=defaults.get("synology_photos", False)
+        default=defaults.get("synology_photos", False),
     )
 
     click.echo()
     # For Cloudflare: default to enabled if token already configured
     has_existing_token = bool(defaults.get("cloudflare_token"))
-    enable_cloudflare = click.confirm(
-        "  Enable Cloudflare Tunnel?",
-        default=has_existing_token
-    )
+    enable_cloudflare = click.confirm("  Enable Cloudflare Tunnel?", default=has_existing_token)
     if enable_cloudflare:
         config["cloudflare_token"] = click.prompt(
             "    Cloudflare Tunnel token",
             default=defaults.get("cloudflare_token", ""),
-            hide_input=True
+            hide_input=True,
         )
     else:
         config["cloudflare_token"] = ""
@@ -278,8 +265,7 @@ def prompt_configuration(defaults: dict) -> dict:
 
     if has_portainer_password:
         change_password = click.confirm(
-            "    Portainer admin password already set. Change it?",
-            default=False
+            "    Portainer admin password already set. Change it?", default=False
         )
         if change_password:
             config["portainer_password"] = _prompt_password("    New Portainer admin password")
@@ -294,11 +280,7 @@ def prompt_configuration(defaults: dict) -> dict:
 def _prompt_password(prompt: str) -> str:
     """Prompt for a password with confirmation."""
     while True:
-        password = click.prompt(
-            prompt,
-            hide_input=True,
-            confirmation_prompt=True
-        )
+        password = click.prompt(prompt, hide_input=True, confirmation_prompt=True)
         if len(password) < 8:
             click.echo("    Password must be at least 8 characters", err=True)
             continue
@@ -318,26 +300,28 @@ def display_configuration(config: dict) -> None:
     click.echo(f"  Traefik IP:   {config['traefik_ip']}")
     click.echo(f"  Shim IP:      {config.get('shim_ip', 'not set')}")
     click.echo(f"  NAS IP:       {config.get('nas_ip', 'not set')}")
-    click.echo(f"  Cloudflare:   {'configured' if config.get('cloudflare_token') else 'not configured'}")
+    click.echo(
+        f"  Cloudflare:   {'configured' if config.get('cloudflare_token') else 'not configured'}"
+    )
 
     # Portainer password status
-    if config.get('portainer_password'):
-        click.echo(f"  Portainer:    password will be set")
-    elif config.get('portainer_password') is None:
-        click.echo(f"  Portainer:    password unchanged")
+    if config.get("portainer_password"):
+        click.echo("  Portainer:    password will be set")
+    elif config.get("portainer_password") is None:
+        click.echo("  Portainer:    password unchanged")
     else:
-        click.echo(f"  Portainer:    password not configured")
+        click.echo("  Portainer:    password not configured")
 
     # Synology services
     synology_services = []
-    if config.get('synology_dsm'):
+    if config.get("synology_dsm"):
         synology_services.append(f"dsm.{config['domain']}")
-    if config.get('synology_photos'):
+    if config.get("synology_photos"):
         synology_services.append(f"photos.{config['domain']}")
     if synology_services:
         click.echo(f"  Synology:     {', '.join(synology_services)}")
     else:
-        click.echo(f"  Synology:     none enabled")
+        click.echo("  Synology:     none enabled")
     click.echo()
 
 
@@ -471,6 +455,7 @@ TZ={tz}
     if os.getuid() == 0:
         try:
             import pwd
+
             user_info = pwd.getpwnam(username)
             os.chown(env_path, user_info.pw_uid, user_info.pw_gid)
         except Exception:
@@ -490,7 +475,7 @@ def create_portainer_password_file(config: dict, install_dir: Path, username: st
     Returns:
         True if file was created/updated, False if skipped
     """
-    password = config.get('portainer_password')
+    password = config.get("portainer_password")
 
     # None means keep existing, empty string means not configured
     if password is None:
@@ -515,6 +500,7 @@ def create_portainer_password_file(config: dict, install_dir: Path, username: st
         if os.getuid() == 0:
             try:
                 import pwd
+
                 user_info = pwd.getpwnam(username)
                 os.chown(password_file, user_info.pw_uid, user_info.pw_gid)
             except Exception:
@@ -539,12 +525,9 @@ def generate_docker_compose(install_dir: Path) -> bool:
         output_path = paths.get_docker_compose_path()
 
         if not config_yaml.exists():
-            click.echo(f"      Using default Docker image versions")
+            click.echo("      Using default Docker image versions")
 
-        generate_compose_from_config(
-            config_path=str(config_yaml),
-            output_path=str(output_path)
-        )
+        generate_compose_from_config(config_path=str(config_yaml), output_path=str(output_path))
         return True
     except Exception as e:
         click.echo(f"      Warning: Failed to generate docker-compose.yaml: {e}")
@@ -567,8 +550,8 @@ def ensure_data_directories() -> None:
         data_dir / "portainer",
         data_dir / "cloudflared",
         # Layer 2 service directories
-        syrvis_home / "services",   # Service definitions (cloned repos)
-        syrvis_home / "compose",    # Generated compose files
+        syrvis_home / "services",  # Service definitions (cloned repos)
+        syrvis_home / "compose",  # Generated compose files
     ]
 
     for directory in directories:
@@ -641,6 +624,7 @@ def get_service_status() -> dict:
     """Get status of running services."""
     try:
         from .docker_manager import DockerManager
+
         manager = DockerManager()
         return manager.get_container_status()
     except Exception:
@@ -648,11 +632,11 @@ def get_service_status() -> dict:
 
 
 @click.command()
-@click.option('--non-interactive', is_flag=True, help='Use defaults without prompting')
-@click.option('--skip-start', is_flag=True, help='Skip starting services after setup')
-@click.option('--domain', help='Domain name (e.g., example.com)')
-@click.option('--email', help='Email for Let\'s Encrypt certificates')
-@click.option('--traefik-ip', help='Traefik IP address (e.g., 192.168.1.100)')
+@click.option("--non-interactive", is_flag=True, help="Use defaults without prompting")
+@click.option("--skip-start", is_flag=True, help="Skip starting services after setup")
+@click.option("--domain", help="Domain name (e.g., example.com)")
+@click.option("--email", help="Email for Let's Encrypt certificates")
+@click.option("--traefik-ip", help="Traefik IP address (e.g., 192.168.1.100)")
 def setup(non_interactive, skip_start, domain, email, traefik_ip):
     """
     Complete SyrvisCore setup (initial install or reconfiguration).
@@ -702,7 +686,11 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     if needs_elevation:
         click.echo("      Privileges: user (elevation needed)")
     else:
-        click.echo("      Privileges: root" if not ops.is_simulation else "      Privileges: user (simulation)")
+        click.echo(
+            "      Privileges: root"
+            if not ops.is_simulation
+            else "      Privileges: user (simulation)"
+        )
 
     # Step 2: Handle privilege elevation
     click.echo()
@@ -746,7 +734,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     # Check if already setup
     try:
         manifest = paths.get_manifest()
-        if manifest.get('setup_complete', False):
+        if manifest.get("setup_complete", False):
             click.echo("      Status: Setup already completed")
             if not click.confirm("      Re-run setup?", default=False):
                 click.echo("      Setup cancelled.")
@@ -774,7 +762,8 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
         # Use provided options or existing/discovered defaults
         config = {
             "domain": domain or defaults.get("domain", "example.com"),
-            "email": email or defaults.get("email", f"admin@{domain or defaults.get('domain', 'example.com')}"),
+            "email": email
+            or defaults.get("email", f"admin@{domain or defaults.get('domain', 'example.com')}"),
             "interface": defaults.get("interface", "eth0"),
             "subnet": defaults.get("subnet", "192.168.1.0/24"),
             "gateway": defaults.get("gateway", "192.168.1.1"),
@@ -825,21 +814,23 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
 
     # Update manifest
     try:
-        paths.update_manifest({
-            'setup_complete': True,
-            'setup_completed_at': datetime.now().isoformat(),
-            'setup_user': username,
-            'config': {
-                'domain': config['domain'],
-                'traefik_ip': config['traefik_ip'],
-            },
-            'privileged_setup': {
-                'docker_group_created': True,
-                'user_added_to_docker': username,
-                'global_symlink': '/usr/local/bin/syrvis',
-                'startup_script': f'{install_dir}/bin/syrvis-startup.sh',
+        paths.update_manifest(
+            {
+                "setup_complete": True,
+                "setup_completed_at": datetime.now().isoformat(),
+                "setup_user": username,
+                "config": {
+                    "domain": config["domain"],
+                    "traefik_ip": config["traefik_ip"],
+                },
+                "privileged_setup": {
+                    "docker_group_created": True,
+                    "user_added_to_docker": username,
+                    "global_symlink": "/usr/local/bin/syrvis",
+                    "startup_script": f"{install_dir}/bin/syrvis-startup.sh",
+                },
             }
-        })
+        )
         click.echo("      Updated: manifest")
     except Exception as e:
         click.echo(f"      Warning: Failed to update manifest: {e}")
@@ -872,14 +863,14 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
     click.echo("=" * 60)
     click.echo()
     click.echo("Access your services:")
-    if config.get('synology_dsm'):
+    if config.get("synology_dsm"):
         click.echo(f"  DSM:       https://dsm.{config['domain']}")
     click.echo(f"  Traefik:   https://traefik.{config['domain']}")
     click.echo(f"  Portainer: https://portainer.{config['domain']}")
-    if config.get('synology_photos'):
+    if config.get("synology_photos"):
         click.echo(f"  Photos:    https://photos.{config['domain']}")
     click.echo()
-    if config.get('synology_dsm'):
+    if config.get("synology_dsm"):
         click.echo("DSM access note:")
         click.echo(f"  Primary:   https://dsm.{config['domain']} (via Traefik)")
         click.echo(f"  Backup:    https://{config.get('nas_ip', 'NAS_IP')}:5001 (direct)")
@@ -892,5 +883,5 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
 
     # Remind about logout if group was changed
     click.echo("Note: If this is your first setup, logout and login")
-    click.echo(f"      for docker group membership to take effect.")
+    click.echo("      for docker group membership to take effect.")
     click.echo()

@@ -229,7 +229,9 @@ class ComposeGenerator:
         password_file = Path(os.environ.get("SYRVIS_HOME", "")) / "config" / ".portainer-password"
         if password_file.exists():
             service["command"] = "--admin-password-file /run/secrets/portainer-password"
-            service["volumes"].append("../config/.portainer-password:/run/secrets/portainer-password:ro")
+            service["volumes"].append(
+                "../config/.portainer-password:/run/secrets/portainer-password:ro"
+            )
 
         return service
 

@@ -21,11 +21,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
-from .__version__ import __version__
-
 
 class SyrvisHomeError(Exception):
     """Raised when SYRVIS_HOME is not set or invalid."""
+
     pass
 
 
@@ -37,6 +36,7 @@ MANIFEST_SCHEMA_VERSION = 3
 # =============================================================================
 # Simulation Mode Support
 # =============================================================================
+
 
 def is_simulation_mode() -> bool:
     """Check if running in DSM simulation mode."""
@@ -107,6 +107,7 @@ def get_syrvis_home() -> Path:
 # Versioned Directory Structure (v2)
 # =============================================================================
 
+
 def get_versions_dir() -> Path:
     """Get path to versions directory."""
     return get_syrvis_home() / "versions"
@@ -153,13 +154,13 @@ def list_installed_versions() -> List[str]:
 
     versions = []
     for item in versions_dir.iterdir():
-        if item.is_dir() and not item.name.startswith('.'):
+        if item.is_dir() and not item.name.startswith("."):
             versions.append(item.name)
 
     # Sort by semantic version (simple approach)
     def version_key(v):
         try:
-            parts = v.split('.')
+            parts = v.split(".")
             return tuple(int(p) for p in parts)
         except ValueError:
             return (0, 0, 0)
@@ -179,6 +180,7 @@ def get_active_version() -> Optional[str]:
 # =============================================================================
 # Config Directory (shared across versions)
 # =============================================================================
+
 
 def get_config_dir() -> Path:
     """Get path to shared config directory."""
@@ -209,6 +211,7 @@ def get_traefik_config_dir() -> Path:
 # Data Directory (persistent across versions)
 # =============================================================================
 
+
 def get_data_dir() -> Path:
     """Get path to persistent data directory."""
     return get_syrvis_home() / "data"
@@ -232,6 +235,7 @@ def get_cloudflared_data_dir() -> Path:
 # =============================================================================
 # Version-Specific Paths
 # =============================================================================
+
 
 def get_version_venv_path(version: Optional[str] = None) -> Path:
     """Get path to Python venv for a specific version."""
@@ -268,6 +272,7 @@ def get_core_path() -> Path:
 # =============================================================================
 # Manifest Management
 # =============================================================================
+
 
 def get_manifest_path() -> Path:
     """Get path to installation manifest file."""
@@ -381,7 +386,7 @@ def verify_setup_complete() -> bool:
     """
     try:
         manifest = get_manifest()
-        return manifest.get('setup_complete', False)
+        return manifest.get("setup_complete", False)
     except Exception:
         return False
 
@@ -394,14 +399,16 @@ def add_version_to_manifest(version: str, status: str = "available") -> None:
         version: Version string (e.g., "0.1.0")
         status: Version status ("available", "active", "deprecated")
     """
-    update_manifest({
-        "versions": {
-            version: {
-                "installed_at": datetime.now().isoformat(),
-                "status": status,
+    update_manifest(
+        {
+            "versions": {
+                version: {
+                    "installed_at": datetime.now().isoformat(),
+                    "status": status,
+                }
             }
         }
-    })
+    )
 
 
 def set_active_version(version: str) -> None:
@@ -442,6 +449,7 @@ def set_active_version(version: str) -> None:
 # =============================================================================
 # Directory Creation Helpers
 # =============================================================================
+
 
 def ensure_directory_structure(install_path: Path, version: str) -> None:
     """
@@ -492,6 +500,7 @@ def update_current_symlink(version: str) -> None:
 # Validation Helpers
 # =============================================================================
 
+
 def validate_docker_compose_exists() -> None:
     """
     Validate that docker-compose.yaml exists.
@@ -512,6 +521,7 @@ def validate_docker_compose_exists() -> None:
 # =============================================================================
 # Testing Helpers
 # =============================================================================
+
 
 def set_syrvis_home(path: str) -> None:
     """

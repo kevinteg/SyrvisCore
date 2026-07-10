@@ -109,12 +109,14 @@ class TestComposeGenerator:
         assert generator.build_config is not None
         assert "docker_images" in generator.build_config
 
-    def test_load_config_file_not_found(self):
-        """Test loading non-existent config file."""
+    def test_load_config_file_not_found_uses_defaults(self):
+        """Test loading non-existent config file falls back to built-in defaults."""
         generator = ComposeGenerator("nonexistent.yaml")
 
-        with pytest.raises(FileNotFoundError, match="Config file not found"):
-            generator.load_config()
+        loaded_config = generator.load_config()
+
+        assert "docker_images" in loaded_config
+        assert "traefik" in loaded_config["docker_images"]
 
     def test_load_config_invalid_yaml(self, tmp_path):
         """Test loading invalid YAML file."""
@@ -149,14 +151,13 @@ class TestComposeGenerator:
         assert service["image"] == "library/traefik:v3.0.0"
         assert service["container_name"] == "traefik"
         assert service["restart"] == "unless-stopped"
-        # Check standard ports (not 8080/8443)
-        assert "80:80" in service["ports"]
-        assert "443:443" in service["ports"]
+        # No port bindings - traefik has its own IP via macvlan
+        assert "ports" not in service
         # Check macvlan network with static IP
         assert "syrvis-macvlan" in service["networks"]
         assert service["networks"]["syrvis-macvlan"]["ipv4_address"] == "192.168.0.100"
-        assert len(service["volumes"]) == 5
-        assert "traefik.enable=true" in service["labels"]
+        assert "proxy" in service["networks"]
+        assert "/var/run/docker.sock:/var/run/docker.sock:ro" in service["volumes"]
 
     def test_generate_portainer_service(self, temp_config_file):
         """Test Portainer service generation."""

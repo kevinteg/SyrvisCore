@@ -118,11 +118,24 @@ class TestDynamicConfig:
 
         assert "http" in parsed
         assert "routers" in parsed["http"]
-        assert "services" in parsed["http"]
         assert "middlewares" in parsed["http"]
 
+    def test_dynamic_config_synology_services_with_backend_ip(self):
+        """Test that enabled Synology backend services appear when SHIM_IP is set."""
+        env = {
+            "DOMAIN": "mydomain.com",
+            "SHIM_IP": "192.168.0.101",
+            "SYNOLOGY_PHOTOS_ENABLED": "true",
+        }
+        with patch.dict(os.environ, env):
+            config = generate_traefik_dynamic_config()
+            parsed = yaml.safe_load(config)
+
+            assert "services" in parsed["http"]
+            assert "synology-photos" in parsed["http"]["routers"]
+
     def test_dynamic_config_dashboard_router(self):
-        """Test dashboard router configuration."""
+        """Test dashboard router configuration (split HTTP/HTTPS routers)."""
         with patch.dict(os.environ, {"DOMAIN": "mydomain.com"}):
             config = generate_traefik_dynamic_config()
             parsed = yaml.safe_load(config)
@@ -130,7 +143,14 @@ class TestDynamicConfig:
             dashboard = parsed["http"]["routers"]["dashboard"]
             assert dashboard["rule"] == "Host(`traefik.mydomain.com`)"
             assert dashboard["service"] == "api@internal"
-            assert "websecure" in dashboard["entryPoints"]
+            assert "web" in dashboard["entryPoints"]
+            assert "https-redirect" in dashboard["middlewares"]
+
+            secure = parsed["http"]["routers"]["dashboard-secure"]
+            assert secure["rule"] == "Host(`traefik.mydomain.com`)"
+            assert secure["service"] == "api@internal"
+            assert "websecure" in secure["entryPoints"]
+            assert secure["tls"]["certResolver"] == "letsencrypt"
 
     def test_dynamic_config_uses_domain_env(self):
         """Test that DOMAIN environment variable is used."""

@@ -157,26 +157,28 @@ def generate_synology_routers_config(domain: str, nas_ip: str) -> str:
 
     for key, config in enabled_services.items():
         subdomain = config["subdomain"]
-        lines.extend([
-            f"",
-            f"    # {config['description']} (HTTP -> HTTPS redirect)",
-            f"    synology-{key}:",
-            f"      rule: \"Host(`{subdomain}.{domain}`)\"",
-            f"      service: synology-{key}",
-            f"      entryPoints:",
-            f"        - web",
-            f"      middlewares:",
-            f"        - https-redirect",
-            f"",
-            f"    # {config['description']} (HTTPS with Let's Encrypt)",
-            f"    synology-{key}-secure:",
-            f"      rule: \"Host(`{subdomain}.{domain}`)\"",
-            f"      service: synology-{key}",
-            f"      entryPoints:",
-            f"        - websecure",
-            f"      tls:",
-            f"        certResolver: letsencrypt",
-        ])
+        lines.extend(
+            [
+                "",
+                f"    # {config['description']} (HTTP -> HTTPS redirect)",
+                f"    synology-{key}:",
+                f'      rule: "Host(`{subdomain}.{domain}`)"',
+                f"      service: synology-{key}",
+                "      entryPoints:",
+                "        - web",
+                "      middlewares:",
+                "        - https-redirect",
+                "",
+                f"    # {config['description']} (HTTPS with Let's Encrypt)",
+                f"    synology-{key}-secure:",
+                f'      rule: "Host(`{subdomain}.{domain}`)"',
+                f"      service: synology-{key}",
+                "      entryPoints:",
+                "        - websecure",
+                "      tls:",
+                "        certResolver: letsencrypt",
+            ]
+        )
 
     return "\n".join(lines)
 
@@ -206,21 +208,25 @@ def generate_synology_services_config(nas_ip: str) -> str:
     for key, config in enabled_services.items():
         protocol = config["protocol"]
         port = config["port"]
-        lines.extend([
-            f"    synology-{key}:",
-            f"      loadBalancer:",
-            f"        servers:",
-            f"          - url: \"{protocol}://{nas_ip}:{port}\"",
-            f"        serversTransport: insecure-skip-verify@file",
-        ])
+        lines.extend(
+            [
+                f"    synology-{key}:",
+                "      loadBalancer:",
+                "        servers:",
+                f'          - url: "{protocol}://{nas_ip}:{port}"',
+                "        serversTransport: insecure-skip-verify@file",
+            ]
+        )
 
     # Add serversTransport for self-signed certs on Synology
-    lines.extend([
-        "",
-        "  serversTransports:",
-        "    insecure-skip-verify:",
-        "      insecureSkipVerify: true",
-    ])
+    lines.extend(
+        [
+            "",
+            "  serversTransports:",
+            "    insecure-skip-verify:",
+            "      insecureSkipVerify: true",
+        ]
+    )
 
     return "\n".join(lines)
 
@@ -330,9 +336,7 @@ class ServiceTraefikConfig:
         """Ensure the dynamic config directory exists."""
         self.config_dir.mkdir(parents=True, exist_ok=True)
 
-    def generate_config(
-        self, service: "ServiceDefinition", domain: str
-    ) -> Dict[str, Any]:
+    def generate_config(self, service: "ServiceDefinition", domain: str) -> Dict[str, Any]:
         """Generate Traefik configuration for a service.
 
         Args:
@@ -373,9 +377,7 @@ class ServiceTraefikConfig:
                     name: {
                         "loadBalancer": {
                             "servers": [
-                                {
-                                    "url": f"http://{service.container_name}:{service.traefik.port}"
-                                }
+                                {"url": f"http://{service.container_name}:{service.traefik.port}"}
                             ]
                         }
                     }

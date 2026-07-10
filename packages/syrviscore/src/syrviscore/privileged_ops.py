@@ -16,12 +16,14 @@ from typing import Tuple, Optional
 
 class PrivilegedOpsError(Exception):
     """Error during privileged operation."""
+
     pass
 
 
 # =============================================================================
 # System Operations Interface
 # =============================================================================
+
 
 class SystemOperations(ABC):
     """
@@ -104,7 +106,9 @@ class SystemOperations(ABC):
         pass
 
     @abstractmethod
-    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+    def ensure_macvlan_shim(
+        self, interface: str, traefik_ip: str, shim_ip: str
+    ) -> Tuple[bool, str]:
         """
         Create macvlan shim interface to allow host-to-container communication.
 
@@ -126,6 +130,7 @@ class SystemOperations(ABC):
 # DSM Operations (Production)
 # =============================================================================
 
+
 class DsmOperations(SystemOperations):
     """
     Real DSM operations for Synology NAS environment.
@@ -143,8 +148,8 @@ class DsmOperations(SystemOperations):
 
     def get_target_user(self) -> str:
         """Get the user who invoked sudo."""
-        user = os.environ.get('SUDO_USER') or os.environ.get('USER')
-        if user == 'root' or not user:
+        user = os.environ.get("SUDO_USER") or os.environ.get("USER")
+        if user == "root" or not user:
             raise PrivilegedOpsError(
                 "Cannot determine target user.\n"
                 "Don't run as root directly. Use sudo from your user account:\n"
@@ -160,12 +165,9 @@ class DsmOperations(SystemOperations):
         """Check if Docker package is installed on Synology."""
         try:
             result = subprocess.run(
-                ['synopkg', 'status', 'Docker'],
-                capture_output=True,
-                text=True,
-                timeout=5
+                ["synopkg", "status", "Docker"], capture_output=True, text=True, timeout=5
             )
-            if result.returncode == 0 and 'running' in result.stdout.lower():
+            if result.returncode == 0 and "running" in result.stdout.lower():
                 return True, "Docker is installed and running"
             elif result.returncode == 0:
                 return False, "Docker is installed but not running"
@@ -176,7 +178,7 @@ class DsmOperations(SystemOperations):
 
     def verify_docker_socket_exists(self) -> Tuple[bool, str]:
         """Check if Docker socket exists."""
-        socket_path = Path('/var/run/docker.sock')
+        socket_path = Path("/var/run/docker.sock")
         if socket_path.exists():
             return True, f"Docker socket exists: {socket_path}"
         return False, "Docker socket not found at /var/run/docker.sock"
@@ -184,7 +186,7 @@ class DsmOperations(SystemOperations):
     def _get_docker_group_info(self) -> Tuple[bool, Optional[int]]:
         """Check if docker group exists and return its GID."""
         try:
-            docker_group = grp.getgrnam('docker')
+            docker_group = grp.getgrnam("docker")
             return True, docker_group.gr_gid
         except KeyError:
             return False, None
@@ -197,10 +199,7 @@ class DsmOperations(SystemOperations):
 
         try:
             result = subprocess.run(
-                ['synogroup', '--add', 'docker'],
-                capture_output=True,
-                text=True,
-                timeout=10
+                ["synogroup", "--add", "docker"], capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
                 exists, gid = self._get_docker_group_info()
@@ -223,15 +222,15 @@ class DsmOperations(SystemOperations):
 
     def ensure_user_in_docker_group(self, username: str) -> Tuple[bool, str]:
         """Add user to docker group."""
-        if self._is_user_in_group(username, 'docker'):
+        if self._is_user_in_group(username, "docker"):
             return True, f"User '{username}' already in docker group"
 
         try:
             result = subprocess.run(
-                ['synogroup', '--member', 'docker', username],
+                ["synogroup", "--member", "docker", username],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
             if result.returncode == 0:
                 return True, f"User '{username}' added to docker group (logout required)"
@@ -242,7 +241,7 @@ class DsmOperations(SystemOperations):
 
     def _get_docker_socket_permissions(self) -> Tuple[str, str, str]:
         """Get Docker socket owner, group, and permissions."""
-        socket_path = Path('/var/run/docker.sock')
+        socket_path = Path("/var/run/docker.sock")
         if not socket_path.exists():
             return "missing", "missing", "000"
 
@@ -254,13 +253,13 @@ class DsmOperations(SystemOperations):
 
     def ensure_docker_socket_permissions(self) -> Tuple[bool, str]:
         """Set Docker socket to root:docker 660."""
-        socket_path = Path('/var/run/docker.sock')
+        socket_path = Path("/var/run/docker.sock")
         if not socket_path.exists():
             return False, "Docker socket not found"
 
         owner, group, perms = self._get_docker_socket_permissions()
 
-        if group == 'docker' and perms == '660':
+        if group == "docker" and perms == "660":
             return True, f"Docker socket permissions already correct ({owner}:{group} {perms})"
 
         try:
@@ -278,8 +277,8 @@ class DsmOperations(SystemOperations):
 
     def ensure_global_symlink(self, install_dir: Path) -> Tuple[bool, str]:
         """Create /usr/local/bin/syrvis symlink."""
-        symlink_path = Path('/usr/local/bin/syrvis')
-        target = (install_dir / 'bin' / 'syrvis').resolve()
+        symlink_path = Path("/usr/local/bin/syrvis")
+        target = (install_dir / "bin" / "syrvis").resolve()
 
         if not target.exists():
             return False, f"Target script not found: {target}"
@@ -305,8 +304,8 @@ class DsmOperations(SystemOperations):
 
     def ensure_startup_script(self, install_dir: Path, username: str) -> Tuple[bool, str]:
         """Create startup script for Task Scheduler."""
-        startup_script_path = install_dir / 'bin' / 'syrvis-startup.sh'
-        env_path = install_dir / 'config' / '.env'
+        startup_script_path = install_dir / "bin" / "syrvis-startup.sh"
+        env_path = install_dir / "config" / ".env"
 
         script_content = f"""#!/bin/bash
 # SyrvisCore startup script
@@ -359,9 +358,9 @@ exit 0
 
     def ensure_boot_script(self, install_dir: Path) -> Tuple[bool, str]:
         """Create boot script in /usr/local/etc/rc.d/ to run startup script on boot."""
-        rc_d_path = Path('/usr/local/etc/rc.d')
-        boot_script_path = rc_d_path / 'S99syrviscore.sh'
-        startup_script = install_dir / 'bin' / 'syrvis-startup.sh'
+        rc_d_path = Path("/usr/local/etc/rc.d")
+        boot_script_path = rc_d_path / "S99syrviscore.sh"
+        startup_script = install_dir / "bin" / "syrvis-startup.sh"
 
         script_content = f"""#!/bin/sh
 # SyrvisCore boot script
@@ -406,21 +405,16 @@ exit 0
     def verify_docker_accessible(self, username: Optional[str] = None) -> Tuple[bool, str]:
         """Test if Docker daemon is accessible."""
         try:
-            result = subprocess.run(
-                ['docker', 'info'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 return True, "Docker daemon accessible"
 
             if username:
                 result = subprocess.run(
-                    ['su', '-', username, '-c', 'docker info'],
+                    ["su", "-", username, "-c", "docker info"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
                 )
                 if result.returncode == 0:
                     return True, f"Docker daemon accessible for user '{username}'"
@@ -431,7 +425,9 @@ exit 0
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             return False, f"Cannot test Docker access: {e}"
 
-    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+    def ensure_macvlan_shim(
+        self, interface: str, traefik_ip: str, shim_ip: str
+    ) -> Tuple[bool, str]:
         """
         Create macvlan shim interface to allow host-to-container communication.
 
@@ -443,71 +439,76 @@ exit 0
         try:
             # Check if shim interface already exists
             result = subprocess.run(
-                ['ip', 'link', 'show', shim_name],
-                capture_output=True,
-                text=True,
-                timeout=5
+                ["ip", "link", "show", shim_name], capture_output=True, text=True, timeout=5
             )
 
             if result.returncode == 0:
                 # Interface exists, check if route to traefik_ip exists
                 route_result = subprocess.run(
-                    ['ip', 'route', 'show', f'{traefik_ip}/32'],
+                    ["ip", "route", "show", f"{traefik_ip}/32"],
                     capture_output=True,
                     text=True,
-                    timeout=5
+                    timeout=5,
                 )
                 if traefik_ip in route_result.stdout:
                     return True, f"Macvlan shim already configured ({shim_name})"
 
                 # Add route if missing
                 subprocess.run(
-                    ['ip', 'route', 'add', f'{traefik_ip}/32', 'dev', shim_name],
+                    ["ip", "route", "add", f"{traefik_ip}/32", "dev", shim_name],
                     capture_output=True,
-                    timeout=5
+                    timeout=5,
                 )
                 return True, f"Macvlan shim route added for {traefik_ip}"
 
             # Create the shim interface
             # Step 1: Create macvlan interface
             result = subprocess.run(
-                ['ip', 'link', 'add', shim_name, 'link', interface, 'type', 'macvlan', 'mode', 'bridge'],
+                [
+                    "ip",
+                    "link",
+                    "add",
+                    shim_name,
+                    "link",
+                    interface,
+                    "type",
+                    "macvlan",
+                    "mode",
+                    "bridge",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
             )
             if result.returncode != 0:
                 return False, f"Failed to create shim interface: {result.stderr}"
 
             # Step 2: Assign IP address to shim
             result = subprocess.run(
-                ['ip', 'addr', 'add', f'{shim_ip}/32', 'dev', shim_name],
+                ["ip", "addr", "add", f"{shim_ip}/32", "dev", shim_name],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.returncode != 0:
                 # Cleanup on failure
-                subprocess.run(['ip', 'link', 'del', shim_name], capture_output=True, timeout=5)
+                subprocess.run(["ip", "link", "del", shim_name], capture_output=True, timeout=5)
                 return False, f"Failed to assign IP to shim: {result.stderr}"
 
             # Step 3: Bring interface up
             result = subprocess.run(
-                ['ip', 'link', 'set', shim_name, 'up'],
-                capture_output=True,
-                text=True,
-                timeout=5
+                ["ip", "link", "set", shim_name, "up"], capture_output=True, text=True, timeout=5
             )
             if result.returncode != 0:
-                subprocess.run(['ip', 'link', 'del', shim_name], capture_output=True, timeout=5)
+                subprocess.run(["ip", "link", "del", shim_name], capture_output=True, timeout=5)
                 return False, f"Failed to bring up shim interface: {result.stderr}"
 
             # Step 4: Add route to Traefik IP
             result = subprocess.run(
-                ['ip', 'route', 'add', f'{traefik_ip}/32', 'dev', shim_name],
+                ["ip", "route", "add", f"{traefik_ip}/32", "dev", shim_name],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
             )
             if result.returncode != 0:
                 # Route might already exist, not a fatal error
@@ -524,6 +525,7 @@ exit 0
 # =============================================================================
 # Simulation Operations (Testing)
 # =============================================================================
+
 
 class SimulationOperations(SystemOperations):
     """
@@ -549,7 +551,7 @@ class SimulationOperations(SystemOperations):
 
     def get_target_user(self) -> str:
         """In simulation, use current user."""
-        return os.environ.get('USER', 'simuser')
+        return os.environ.get("USER", "simuser")
 
     def needs_privilege_elevation(self) -> bool:
         """Simulation never needs elevation."""
@@ -559,10 +561,7 @@ class SimulationOperations(SystemOperations):
         """Check if Docker is available on host."""
         try:
             result = subprocess.run(
-                ['docker', '--version'],
-                capture_output=True,
-                text=True,
-                timeout=5
+                ["docker", "--version"], capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
                 return True, "Docker available (host)"
@@ -572,14 +571,14 @@ class SimulationOperations(SystemOperations):
 
     def verify_docker_socket_exists(self) -> Tuple[bool, str]:
         """Check Docker socket on host."""
-        if Path('/var/run/docker.sock').exists():
+        if Path("/var/run/docker.sock").exists():
             return True, "Docker socket exists (host)"
         return True, "Docker socket check skipped"
 
     def ensure_docker_group(self) -> Tuple[bool, str]:
         """Skip docker group creation in simulation."""
         try:
-            docker_group = grp.getgrnam('docker')
+            docker_group = grp.getgrnam("docker")
             return True, f"Docker group exists (GID: {docker_group.gr_gid})"
         except KeyError:
             return True, "Docker group check skipped"
@@ -595,7 +594,7 @@ class SimulationOperations(SystemOperations):
     def ensure_global_symlink(self, install_dir: Path) -> Tuple[bool, str]:
         """Create symlink in simulation root."""
         symlink_path = self._sim_root / "usr" / "local" / "bin" / "syrvis"
-        target = (install_dir / 'bin' / 'syrvis').resolve()
+        target = (install_dir / "bin" / "syrvis").resolve()
 
         if not target.exists():
             return False, f"Target script not found: {target}"
@@ -620,7 +619,7 @@ class SimulationOperations(SystemOperations):
 
     def ensure_startup_script(self, install_dir: Path, username: str) -> Tuple[bool, str]:
         """Create startup script (same as DSM, just for testing)."""
-        startup_script_path = install_dir / 'bin' / 'syrvis-startup.sh'
+        startup_script_path = install_dir / "bin" / "syrvis-startup.sh"
 
         script_content = f"""#!/bin/bash
 # SyrvisCore startup script (simulation)
@@ -640,9 +639,9 @@ exit 0
 
     def ensure_boot_script(self, install_dir: Path) -> Tuple[bool, str]:
         """Create boot script in simulation rc.d directory."""
-        rc_d_path = self._sim_root / 'usr' / 'local' / 'etc' / 'rc.d'
-        boot_script_path = rc_d_path / 'S99syrviscore.sh'
-        startup_script = install_dir / 'bin' / 'syrvis-startup.sh'
+        rc_d_path = self._sim_root / "usr" / "local" / "etc" / "rc.d"
+        boot_script_path = rc_d_path / "S99syrviscore.sh"
+        startup_script = install_dir / "bin" / "syrvis-startup.sh"
 
         script_content = f"""#!/bin/sh
 # SyrvisCore boot script (simulation)
@@ -670,19 +669,16 @@ exit 0
     def verify_docker_accessible(self, username: Optional[str] = None) -> Tuple[bool, str]:
         """Check Docker on host."""
         try:
-            result = subprocess.run(
-                ['docker', 'info'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            result = subprocess.run(["docker", "info"], capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 return True, "Docker daemon accessible (host)"
             return True, "Docker access check skipped"
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return True, "Docker access check skipped"
 
-    def ensure_macvlan_shim(self, interface: str, traefik_ip: str, shim_ip: str) -> Tuple[bool, str]:
+    def ensure_macvlan_shim(
+        self, interface: str, traefik_ip: str, shim_ip: str
+    ) -> Tuple[bool, str]:
         """Skip macvlan shim in simulation (not needed on macOS/Linux desktop)."""
         return True, "Macvlan shim skipped (simulation mode)"
 
@@ -711,9 +707,7 @@ def get_system_operations() -> SystemOperations:
         if os.environ.get("DSM_SIM_ACTIVE") == "1":
             sim_root = os.environ.get("DSM_SIM_ROOT", "")
             if not sim_root:
-                raise PrivilegedOpsError(
-                    "DSM_SIM_ACTIVE=1 but DSM_SIM_ROOT not set"
-                )
+                raise PrivilegedOpsError("DSM_SIM_ACTIVE=1 but DSM_SIM_ROOT not set")
             _operations_instance = SimulationOperations(Path(sim_root))
         else:
             _operations_instance = DsmOperations()
@@ -730,6 +724,7 @@ def reset_operations_instance() -> None:
 # =============================================================================
 # Convenience Functions (backward compatibility)
 # =============================================================================
+
 
 def get_target_user() -> str:
     """Get the target user for installation."""
@@ -790,6 +785,7 @@ def ensure_boot_script(install_dir: Path) -> Tuple[bool, str]:
 # Read-only diagnostic functions (don't need SystemOperations)
 # =============================================================================
 
+
 def get_docker_group_info() -> Tuple[bool, Optional[int]]:
     """Check if docker group exists and get its GID.
 
@@ -797,8 +793,9 @@ def get_docker_group_info() -> Tuple[bool, Optional[int]]:
         Tuple of (exists, gid) - gid is None if group doesn't exist
     """
     import grp
+
     try:
-        group_info = grp.getgrnam('docker')
+        group_info = grp.getgrnam("docker")
         return True, group_info.gr_gid
     except KeyError:
         return False, None
@@ -816,6 +813,7 @@ def is_user_in_group(username: str, group: str) -> bool:
     """
     import grp
     import pwd
+
     try:
         group_info = grp.getgrnam(group)
         # Check if user is in the group's member list

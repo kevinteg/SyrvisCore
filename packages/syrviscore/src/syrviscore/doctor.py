@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import List
 
 from . import privileged_ops
-from . import paths
 from .validators import (
     CheckResult,
     ValidationReport,
@@ -27,6 +26,7 @@ from .validators import (
 # =============================================================================
 # Output Formatting
 # =============================================================================
+
 
 def print_section(title: str):
     """Print a section header."""
@@ -60,6 +60,7 @@ def print_report(report: ValidationReport, verbose: bool = False):
 # DNS & Certificate Checks (uses validators module)
 # =============================================================================
 
+
 def run_dns_checks(endpoints: List[dict], verbose: bool = False) -> List[str]:
     """Run DNS validation for all endpoints."""
     print_section("DNS Resolution")
@@ -78,7 +79,9 @@ def run_dns_checks(endpoints: List[dict], verbose: bool = False) -> List[str]:
             if dns_result.get("split_horizon_ok"):
                 click.echo(f"  ✓ {domain}")
                 if verbose or not dns_result.get("consistent"):
-                    click.echo(f"     Local: {local['ip']} | Public: {public['ip']} (split-horizon OK)")
+                    click.echo(
+                        f"     Local: {local['ip']} | Public: {public['ip']} (split-horizon OK)"
+                    )
             elif dns_result.get("consistent"):
                 if expected_ip and local["ip"] == expected_ip:
                     click.echo(f"  ✓ {domain}")
@@ -91,7 +94,9 @@ def run_dns_checks(endpoints: List[dict], verbose: bool = False) -> List[str]:
                     click.echo(f"  ✓ {domain} → {local['ip']}")
             elif expected_ip and local["ip"] != expected_ip:
                 click.echo(f"  ⚠ {domain}: Local DNS incorrect")
-                click.echo(f"     Local: {local['ip']} (expected {expected_ip}) | Public: {public['ip']}")
+                click.echo(
+                    f"     Local: {local['ip']} (expected {expected_ip}) | Public: {public['ip']}"
+                )
                 issues.append(f"{domain}: local ({local['ip']}) should be {expected_ip}")
             else:
                 click.echo(f"  ✓ {domain}")
@@ -227,6 +232,7 @@ def run_endpoint_health_checks(endpoints: List[dict]) -> None:
 # Fix Actions
 # =============================================================================
 
+
 def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> int:
     """Apply automatic fixes for fixable issues."""
     print_section("Attempting Fixes")
@@ -243,7 +249,7 @@ def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> 
                 fixed_count += 1
 
         elif action and action.startswith("user_group:"):
-            user = action.split(':', 1)[1]
+            user = action.split(":", 1)[1]
             click.echo(f"Adding {user} to docker group...")
             success, msg = privileged_ops.ensure_user_in_docker_group(user)
             click.echo(f"  {'✓' if success else '✗'} {msg}")
@@ -265,7 +271,7 @@ def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> 
                 fixed_count += 1
 
         elif action and action.startswith("startup:") and install_dir:
-            user = action.split(':', 1)[1]
+            user = action.split(":", 1)[1]
             click.echo("Creating startup script...")
             success, msg = privileged_ops.ensure_startup_script(install_dir, user)
             click.echo(f"  {'✓' if success else '✗'} {msg}")
@@ -279,10 +285,13 @@ def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> 
 # Main Doctor Command
 # =============================================================================
 
+
 @click.command()
-@click.option('--fix', is_flag=True, help='Attempt to fix issues (requires root)')
-@click.option('--verbose', '-v', is_flag=True, help='Show detailed information')
-@click.option('--network', '-n', is_flag=True, help='Run network checks only (DNS, certs, endpoints)')
+@click.option("--fix", is_flag=True, help="Attempt to fix issues (requires root)")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
+@click.option(
+    "--network", "-n", is_flag=True, help="Run network checks only (DNS, certs, endpoints)"
+)
 def doctor(fix, verbose, network):
     """Verify SyrvisCore installation and diagnose issues."""
 
@@ -336,7 +345,7 @@ def doctor(fix, verbose, network):
             fixable_checks.extend(system_report.fixable_issues)
 
     # Macvlan checks
-    if config_validator.get_value('TRAEFIK_IP'):
+    if config_validator.get_value("TRAEFIK_IP"):
         network_report = NetworkValidator(config_validator).validate()
         print_report(network_report, verbose)
         all_issues.extend([c.message for c in network_report.issues])
@@ -358,7 +367,7 @@ def doctor(fix, verbose, network):
         all_issues.extend(backend_issues)
 
         # File sharing
-        nas_ip = config_validator.get_value('NAS_IP')
+        nas_ip = config_validator.get_value("NAS_IP")
         run_file_sharing_checks(nas_ip)
 
         # HTTP endpoints

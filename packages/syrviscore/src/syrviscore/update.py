@@ -12,13 +12,10 @@ This module provides:
 
 import click
 import sys
-import os
-import json
 import shutil
 import tempfile
 import subprocess
 from pathlib import Path
-from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 import requests
@@ -41,7 +38,7 @@ def get_latest_release() -> Optional[Dict[str, Any]]:
         response = requests.get(
             f"{GITHUB_API_URL}/latest",
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code == 200:
             return response.json()
@@ -56,7 +53,7 @@ def get_release_by_tag(tag: str) -> Optional[Dict[str, Any]]:
         response = requests.get(
             f"{GITHUB_API_URL}/tags/{tag}",
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code == 200:
             return response.json()
@@ -72,7 +69,7 @@ def list_releases(limit: int = 10) -> List[Dict[str, Any]]:
             GITHUB_API_URL,
             params={"per_page": limit},
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=10,
         )
         if response.status_code == 200:
             return response.json()
@@ -84,9 +81,9 @@ def list_releases(limit: int = 10) -> List[Dict[str, Any]]:
 def parse_version(version_str: str) -> Tuple[int, ...]:
     """Parse version string into comparable tuple."""
     # Remove 'v' prefix if present
-    v = version_str.lstrip('v')
+    v = version_str.lstrip("v")
     try:
-        return tuple(int(p) for p in v.split('.'))
+        return tuple(int(p) for p in v.split("."))
     except ValueError:
         return (0, 0, 0)
 
@@ -116,10 +113,10 @@ def download_file(url: str, dest: Path, show_progress: bool = True) -> bool:
         response = requests.get(url, stream=True, timeout=60)
         response.raise_for_status()
 
-        total_size = int(response.headers.get('content-length', 0))
+        total_size = int(response.headers.get("content-length", 0))
         downloaded = 0
 
-        with open(dest, 'wb') as f:
+        with open(dest, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
@@ -128,7 +125,7 @@ def download_file(url: str, dest: Path, show_progress: bool = True) -> bool:
                         percent = (downloaded / total_size) * 100
                         bar_len = 30
                         filled = int(bar_len * downloaded / total_size)
-                        bar = '=' * filled + '-' * (bar_len - filled)
+                        bar = "=" * filled + "-" * (bar_len - filled)
                         click.echo(f"\r      [{bar}] {percent:.0f}%", nl=False)
 
         if show_progress:
@@ -147,8 +144,7 @@ def extract_spk(spk_path: Path, dest_dir: Path) -> bool:
 
         # SPK is a tar file
         result = subprocess.run(
-            ["tar", "-xf", str(spk_path), "-C", str(dest_dir)],
-            capture_output=True, text=True
+            ["tar", "-xf", str(spk_path), "-C", str(dest_dir)], capture_output=True, text=True
         )
 
         if result.returncode != 0:
@@ -182,10 +178,7 @@ def install_version(version: str, spk_path: Path) -> bool:
             if package_tgz.exists():
                 pkg_dir = tmp_path / "package"
                 pkg_dir.mkdir()
-                subprocess.run(
-                    ["tar", "-xzf", str(package_tgz), "-C", str(pkg_dir)],
-                    check=True
-                )
+                subprocess.run(["tar", "-xzf", str(package_tgz), "-C", str(pkg_dir)], check=True)
 
                 # Copy wheel file if present
                 for whl in pkg_dir.glob("*.whl"):
@@ -199,18 +192,12 @@ def install_version(version: str, spk_path: Path) -> bool:
             # Create venv and install
             venv_path = version_dir / "cli" / "venv"
             if not venv_path.exists():
-                subprocess.run(
-                    [sys.executable, "-m", "venv", str(venv_path)],
-                    check=True
-                )
+                subprocess.run([sys.executable, "-m", "venv", str(venv_path)], check=True)
 
             # Install wheel into venv
             pip_path = venv_path / "bin" / "pip"
             for whl in (version_dir / "cli").glob("*.whl"):
-                subprocess.run(
-                    [str(pip_path), "install", "--quiet", str(whl)],
-                    check=True
-                )
+                subprocess.run([str(pip_path), "install", "--quiet", str(whl)], check=True)
 
             # Save SPK for future reference
             spk_dest = version_dir / f"syrviscore-{version}.spk"
@@ -251,6 +238,7 @@ def stop_services() -> bool:
     """Stop running services."""
     try:
         from .docker_manager import DockerManager
+
         manager = DockerManager()
         manager.stop_core_services()
         return True
@@ -262,6 +250,7 @@ def start_services() -> bool:
     """Start services."""
     try:
         from .docker_manager import DockerManager
+
         manager = DockerManager()
         manager.start_core_services()
         return True
@@ -272,6 +261,7 @@ def start_services() -> bool:
 # =============================================================================
 # CLI Commands
 # =============================================================================
+
 
 @click.group()
 def update():
@@ -294,7 +284,7 @@ def check():
         click.echo("  Could not fetch release information from GitHub")
         return
 
-    latest = release.get("tag_name", "").lstrip('v')
+    latest = release.get("tag_name", "").lstrip("v")
     click.echo(f"  Latest version:  {latest}")
     click.echo()
 
@@ -304,7 +294,7 @@ def check():
         click.echo()
         click.echo("  Release notes:")
         body = release.get("body", "No release notes")
-        for line in body.split('\n')[:10]:
+        for line in body.split("\n")[:10]:
             click.echo(f"    {line}")
         click.echo()
         click.echo(f"  Run 'syrvis update install {latest}' to update")
@@ -315,7 +305,7 @@ def check():
 
 
 @update.command()
-@click.argument('version', required=False)
+@click.argument("version", required=False)
 def download(version):
     """Download an update without installing."""
     click.echo()
@@ -326,9 +316,9 @@ def download(version):
         if not release:
             click.echo("Could not fetch release information", err=True)
             sys.exit(1)
-        version = release.get("tag_name", "").lstrip('v')
+        version = release.get("tag_name", "").lstrip("v")
     else:
-        version = version.lstrip('v')
+        version = version.lstrip("v")
         tag = f"v{version}"
         release = get_release_by_tag(tag)
         if not release:
@@ -344,7 +334,7 @@ def download(version):
 
     # Download to versions directory
     try:
-        syrvis_home = paths.get_syrvis_home()
+        paths.get_syrvis_home()
     except paths.SyrvisHomeError:
         click.echo("SyrvisCore not installed", err=True)
         sys.exit(1)
@@ -364,8 +354,8 @@ def download(version):
 
 
 @update.command()
-@click.argument('version', required=False)
-@click.option('--force', is_flag=True, help='Force reinstall even if version exists')
+@click.argument("version", required=False)
+@click.option("--force", is_flag=True, help="Force reinstall even if version exists")
 def install(version, force):
     """Download and install an update."""
     click.echo()
@@ -377,9 +367,9 @@ def install(version, force):
         if not release:
             click.echo("      Could not fetch release information", err=True)
             sys.exit(1)
-        version = release.get("tag_name", "").lstrip('v')
+        version = release.get("tag_name", "").lstrip("v")
     else:
-        version = version.lstrip('v')
+        version = version.lstrip("v")
         tag = f"v{version}"
         click.echo(f"[1/5] Fetching release {tag}...")
         release = get_release_by_tag(tag)
@@ -527,7 +517,7 @@ def rollback():
     click.echo(f"Rolled back to version {previous}")
 
 
-@update.command('list')
+@update.command("list")
 def list_versions():
     """List installed versions."""
     click.echo()
@@ -554,8 +544,8 @@ def list_versions():
 
 
 @update.command()
-@click.option('--keep', default=DEFAULT_VERSIONS_TO_KEEP, help='Number of versions to keep')
-@click.option('--dry-run', is_flag=True, help='Show what would be removed')
+@click.option("--keep", default=DEFAULT_VERSIONS_TO_KEEP, help="Number of versions to keep")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed")
 def cleanup(keep, dry_run):
     """Remove old versions to free disk space."""
     click.echo()

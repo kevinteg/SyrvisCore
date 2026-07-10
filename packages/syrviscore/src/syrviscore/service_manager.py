@@ -126,7 +126,7 @@ class ServiceManager:
                 return False, msg
         else:
             # Future: registry lookup
-            return False, f"Registry lookup not yet implemented. Use a git URL instead."
+            return False, "Registry lookup not yet implemented. Use a git URL instead."
 
         # Load service definition
         try:
@@ -157,7 +157,7 @@ class ServiceManager:
         # Generate Traefik config
         try:
             domain = get_domain_from_env()
-            traefik_path = self.traefik_config.write_config(service, domain)
+            self.traefik_config.write_config(service, domain)
         except ValueError as e:
             return False, f"Failed to configure Traefik: {e}"
 
@@ -351,21 +351,25 @@ class ServiceManager:
                     except ValueError:
                         pass
 
-                services.append({
-                    "name": service.name,
-                    "version": service.version,
-                    "status": status,
-                    "url": url,
-                    "description": service.description,
-                })
+                services.append(
+                    {
+                        "name": service.name,
+                        "version": service.version,
+                        "status": status,
+                        "url": url,
+                        "description": service.description,
+                    }
+                )
             except Exception:
-                services.append({
-                    "name": service_dir.name,
-                    "version": "unknown",
-                    "status": "error",
-                    "url": "",
-                    "description": "Failed to load service definition",
-                })
+                services.append(
+                    {
+                        "name": service_dir.name,
+                        "version": "unknown",
+                        "status": "error",
+                        "url": "",
+                        "description": "Failed to load service definition",
+                    }
+                )
 
         return services
 

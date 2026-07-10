@@ -21,7 +21,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 
 from . import paths
 from . import privileged_ops
@@ -31,9 +31,11 @@ from . import privileged_ops
 # Result Types
 # =============================================================================
 
+
 @dataclass
 class CheckResult:
     """Result of a validation check."""
+
     name: str
     passed: bool
     message: str
@@ -45,6 +47,7 @@ class CheckResult:
 @dataclass
 class ValidationReport:
     """Collection of check results."""
+
     category: str
     checks: List[CheckResult] = field(default_factory=list)
 
@@ -68,6 +71,7 @@ class ValidationReport:
 # DNS Validation
 # =============================================================================
 
+
 def dns_lookup(hostname: str, resolver: str = None) -> Tuple[bool, str]:
     """
     Perform DNS lookup for a hostname.
@@ -83,15 +87,14 @@ def dns_lookup(hostname: str, resolver: str = None) -> Tuple[bool, str]:
         if resolver:
             # Use nslookup for specific resolver
             result = subprocess.run(
-                ["nslookup", hostname, resolver],
-                capture_output=True, text=True, timeout=10
+                ["nslookup", hostname, resolver], capture_output=True, text=True, timeout=10
             )
             if result.returncode == 0:
                 # Parse nslookup output for Address line
-                for line in result.stdout.split('\n'):
-                    if 'Address:' in line and resolver not in line:
-                        ip = line.split('Address:')[1].strip().split('#')[0].strip()
-                        if ip and not ip.startswith('127.'):
+                for line in result.stdout.split("\n"):
+                    if "Address:" in line and resolver not in line:
+                        ip = line.split("Address:")[1].strip().split("#")[0].strip()
+                        if ip and not ip.startswith("127."):
                             return True, ip
                 return False, "NXDOMAIN"
             return False, "Lookup failed"
@@ -136,7 +139,9 @@ def validate_dns(domain: str, expected_ip: str = None) -> Dict:
         # Split-horizon is valid: local matches expected AND public resolves (to anything)
         result["split_horizon_ok"] = result["local_correct"] and public_ok
         # Overall correctness: either consistent match OR valid split-horizon
-        result["correct"] = (result["consistent"] and local_ip == expected_ip) or result["split_horizon_ok"]
+        result["correct"] = (result["consistent"] and local_ip == expected_ip) or result[
+            "split_horizon_ok"
+        ]
 
     return result
 
@@ -144,6 +149,7 @@ def validate_dns(domain: str, expected_ip: str = None) -> Dict:
 # =============================================================================
 # Certificate Validation
 # =============================================================================
+
 
 def check_certificate(hostname: str, port: int = 443) -> Dict:
     """
@@ -176,36 +182,49 @@ def check_certificate(hostname: str, port: int = 443) -> Dict:
 
                 # Parse certificate using openssl
                 proc = subprocess.run(
-                    ["openssl", "x509", "-inform", "DER", "-noout",
-                     "-issuer", "-subject", "-dates"],
+                    [
+                        "openssl",
+                        "x509",
+                        "-inform",
+                        "DER",
+                        "-noout",
+                        "-issuer",
+                        "-subject",
+                        "-dates",
+                    ],
                     input=cert,
                     capture_output=True,
-                    timeout=10
+                    timeout=10,
                 )
 
                 if proc.returncode == 0:
                     output = proc.stdout.decode()
 
-                    for line in output.split('\n'):
-                        if line.startswith('issuer='):
-                            result["issuer"] = line.split('=', 1)[1].strip()
-                        elif line.startswith('subject='):
-                            result["subject"] = line.split('=', 1)[1].strip()
-                        elif line.startswith('notAfter='):
-                            date_str = line.split('=', 1)[1].strip()
+                    for line in output.split("\n"):
+                        if line.startswith("issuer="):
+                            result["issuer"] = line.split("=", 1)[1].strip()
+                        elif line.startswith("subject="):
+                            result["subject"] = line.split("=", 1)[1].strip()
+                        elif line.startswith("notAfter="):
+                            date_str = line.split("=", 1)[1].strip()
                             try:
                                 # Parse date like "Mar 26 17:28:22 2026 GMT"
                                 expires = datetime.strptime(date_str, "%b %d %H:%M:%S %Y %Z")
                                 result["expires"] = expires.isoformat()
                                 result["days_remaining"] = (expires - datetime.utcnow()).days
-                            except:
+                            except Exception:
                                 result["expires"] = date_str
 
                     # Determine certificate type
                     issuer = result.get("issuer", "")
                     subject = result.get("subject", "")
 
-                    if "Let's Encrypt" in issuer or "R3" in issuer or "R10" in issuer or "R11" in issuer:
+                    if (
+                        "Let's Encrypt" in issuer
+                        or "R3" in issuer
+                        or "R10" in issuer
+                        or "R11" in issuer
+                    ):
                         result["is_letsencrypt"] = True
                         result["valid"] = True
                     elif "TRAEFIK DEFAULT CERT" in issuer or "TRAEFIK DEFAULT CERT" in subject:
@@ -234,6 +253,7 @@ def check_certificate(hostname: str, port: int = 443) -> Dict:
 # Endpoint Health Checks
 # =============================================================================
 
+
 def check_http_endpoint(url: str, timeout: int = 10) -> Dict:
     """
     Check if an HTTP endpoint is reachable and responding.
@@ -249,13 +269,25 @@ def check_http_endpoint(url: str, timeout: int = 10) -> Dict:
     try:
         # Use curl for more reliable HTTP checking
         proc = subprocess.run(
-            ["curl", "-sI", "-o", "/dev/null", "-w", "%{http_code}|%{redirect_url}",
-             "-k", "--connect-timeout", str(timeout), url],
-            capture_output=True, text=True, timeout=timeout + 5
+            [
+                "curl",
+                "-sI",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}|%{redirect_url}",
+                "-k",
+                "--connect-timeout",
+                str(timeout),
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout + 5,
         )
 
         if proc.returncode == 0:
-            parts = proc.stdout.strip().split('|')
+            parts = proc.stdout.strip().split("|")
             status = int(parts[0]) if parts[0].isdigit() else 0
             redirect = parts[1] if len(parts) > 1 and parts[1] else None
 
@@ -283,7 +315,7 @@ def check_tcp_port(host: str, port: int, timeout: int = 5) -> Dict:
     }
 
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
+        with socket.create_connection((host, port), timeout=timeout):
             result["reachable"] = True
     except socket.timeout:
         result["error"] = "Connection timeout"
@@ -298,6 +330,7 @@ def check_tcp_port(host: str, port: int, timeout: int = 5) -> Dict:
 # =============================================================================
 # Environment Parsing
 # =============================================================================
+
 
 def parse_env_file(env_path: Path) -> Dict[str, str]:
     """
@@ -315,10 +348,10 @@ def parse_env_file(env_path: Path) -> Dict[str, str]:
         return env_vars
 
     try:
-        for line in env_path.read_text().split('\n'):
+        for line in env_path.read_text().split("\n"):
             line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                key, value = line.split('=', 1)
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
                 env_vars[key.strip()] = value.strip()
     except Exception:
         pass
@@ -329,6 +362,7 @@ def parse_env_file(env_path: Path) -> Dict[str, str]:
 # =============================================================================
 # Installation Validation
 # =============================================================================
+
 
 class InstallationValidator:
     """Validates SyrvisCore installation state."""
@@ -360,25 +394,19 @@ class InstallationValidator:
     def check_syrvis_home(self) -> CheckResult:
         """Check if SYRVIS_HOME is found."""
         if self.syrvis_home:
-            return CheckResult(
-                name="SYRVIS_HOME",
-                passed=True,
-                message=str(self.syrvis_home)
-            )
+            return CheckResult(name="SYRVIS_HOME", passed=True, message=str(self.syrvis_home))
         return CheckResult(
             name="SYRVIS_HOME",
             passed=False,
             message="Not found",
-            details="Run syrvisctl install to set up the service"
+            details="Run syrvisctl install to set up the service",
         )
 
     def check_manifest(self) -> CheckResult:
         """Check if manifest exists and is valid."""
         if not self.syrvis_home:
             return CheckResult(
-                name="Manifest",
-                passed=False,
-                message="Cannot check - SYRVIS_HOME not found"
+                name="Manifest", passed=False, message="Cannot check - SYRVIS_HOME not found"
             )
 
         manifest_path = self.syrvis_home / ".syrviscore-manifest.json"
@@ -388,7 +416,7 @@ class InstallationValidator:
                 name="Manifest",
                 passed=False,
                 message="Missing",
-                details=f"Expected at {manifest_path}"
+                details=f"Expected at {manifest_path}",
             )
 
         try:
@@ -397,7 +425,7 @@ class InstallationValidator:
                 name="Manifest",
                 passed=True,
                 message="Valid",
-                details=f"Schema v{manifest.get('schema_version', 'unknown')}"
+                details=f"Schema v{manifest.get('schema_version', 'unknown')}",
             )
         except PermissionError:
             return CheckResult(
@@ -406,46 +434,31 @@ class InstallationValidator:
                 message="Permission denied",
                 details=f"Run: sudo chmod 644 {manifest_path}",
                 fixable=True,
-                fix_action="manifest_perms"
+                fix_action="manifest_perms",
             )
         except Exception as e:
-            return CheckResult(
-                name="Manifest",
-                passed=False,
-                message=f"Error: {e}"
-            )
+            return CheckResult(name="Manifest", passed=False, message=f"Error: {e}")
 
     def check_setup_complete(self) -> CheckResult:
         """Check if setup has been completed."""
         if not self.manifest:
             return CheckResult(
-                name="Setup",
-                passed=False,
-                message="Cannot check - manifest not available"
+                name="Setup", passed=False, message="Cannot check - manifest not available"
             )
 
-        if self.manifest.get('setup_complete', False):
-            setup_date = self.manifest.get('setup_date', 'unknown')
-            return CheckResult(
-                name="Setup",
-                passed=True,
-                message=f"Completed ({setup_date})"
-            )
+        if self.manifest.get("setup_complete", False):
+            setup_date = self.manifest.get("setup_date", "unknown")
+            return CheckResult(name="Setup", passed=True, message=f"Completed ({setup_date})")
 
         return CheckResult(
-            name="Setup",
-            passed=False,
-            message="Not completed",
-            details="Run: syrvis setup"
+            name="Setup", passed=False, message="Not completed", details="Run: syrvis setup"
         )
 
     def check_venv(self) -> CheckResult:
         """Check if Python venv exists."""
         if not self.syrvis_home:
             return CheckResult(
-                name="Python venv",
-                passed=False,
-                message="Cannot check - SYRVIS_HOME not found"
+                name="Python venv", passed=False, message="Cannot check - SYRVIS_HOME not found"
             )
 
         # Check versioned structure: install_dir/current/cli/venv
@@ -463,17 +476,10 @@ class InstallationValidator:
         for venv_path in venv_paths:
             if venv_path.exists():
                 return CheckResult(
-                    name="Python venv",
-                    passed=True,
-                    message="Exists",
-                    details=str(venv_path)
+                    name="Python venv", passed=True, message="Exists", details=str(venv_path)
                 )
 
-        return CheckResult(
-            name="Python venv",
-            passed=False,
-            message="Not found"
-        )
+        return CheckResult(name="Python venv", passed=False, message="Not found")
 
     def validate(self) -> ValidationReport:
         """Run all installation checks."""
@@ -492,31 +498,26 @@ class InstallationValidator:
 # Docker Validation
 # =============================================================================
 
+
 class DockerValidator:
     """Validates Docker access and configuration."""
 
     def __init__(self, username: str = None):
-        self.username = username or os.environ.get(
-            'USER', os.environ.get('SUDO_USER', 'unknown')
-        )
+        self.username = username or os.environ.get("USER", os.environ.get("SUDO_USER", "unknown"))
 
     def check_docker_group(self) -> CheckResult:
         """Check if docker group exists."""
         exists, gid = privileged_ops.get_docker_group_info()
 
         if exists:
-            return CheckResult(
-                name="Docker group",
-                passed=True,
-                message=f"Exists (GID: {gid})"
-            )
+            return CheckResult(name="Docker group", passed=True, message=f"Exists (GID: {gid})")
 
         return CheckResult(
             name="Docker group",
             passed=False,
             message="Missing",
             fixable=True,
-            fix_action="docker_group"
+            fix_action="docker_group",
         )
 
     def check_user_in_group(self) -> CheckResult:
@@ -525,25 +526,19 @@ class DockerValidator:
 
         if not exists:
             return CheckResult(
-                name="User in docker group",
-                passed=False,
-                message="Docker group doesn't exist"
+                name="User in docker group", passed=False, message="Docker group doesn't exist"
             )
 
-        if self.username == 'unknown':
+        if self.username == "unknown":
             return CheckResult(
-                name="User in docker group",
-                passed=False,
-                message="Cannot determine username"
+                name="User in docker group", passed=False, message="Cannot determine username"
             )
 
-        in_group = privileged_ops.is_user_in_group(self.username, 'docker')
+        in_group = privileged_ops.is_user_in_group(self.username, "docker")
 
         if in_group:
             return CheckResult(
-                name="User in docker group",
-                passed=True,
-                message=f"'{self.username}' is member"
+                name="User in docker group", passed=True, message=f"'{self.username}' is member"
             )
 
         return CheckResult(
@@ -551,7 +546,7 @@ class DockerValidator:
             passed=False,
             message=f"'{self.username}' not in group",
             fixable=True,
-            fix_action=f"user_group:{self.username}"
+            fix_action=f"user_group:{self.username}",
         )
 
     def check_socket_exists(self) -> CheckResult:
@@ -559,17 +554,13 @@ class DockerValidator:
         exists, msg = privileged_ops.verify_docker_socket_exists()
 
         if exists:
-            return CheckResult(
-                name="Docker socket",
-                passed=True,
-                message="Exists"
-            )
+            return CheckResult(name="Docker socket", passed=True, message="Exists")
 
         return CheckResult(
             name="Docker socket",
             passed=False,
             message="Missing",
-            details="Is Docker installed and running?"
+            details="Is Docker installed and running?",
         )
 
     def check_socket_permissions(self) -> CheckResult:
@@ -578,18 +569,14 @@ class DockerValidator:
 
         if not exists:
             return CheckResult(
-                name="Socket permissions",
-                passed=False,
-                message="Socket doesn't exist"
+                name="Socket permissions", passed=False, message="Socket doesn't exist"
             )
 
         owner, group, perms = privileged_ops.get_docker_socket_permissions()
 
-        if group == 'docker' and perms == '660':
+        if group == "docker" and perms == "660":
             return CheckResult(
-                name="Socket permissions",
-                passed=True,
-                message=f"{owner}:{group} {perms}"
+                name="Socket permissions", passed=True, message=f"{owner}:{group} {perms}"
             )
 
         return CheckResult(
@@ -598,32 +585,23 @@ class DockerValidator:
             message=f"{owner}:{group} {perms}",
             details="Expected: root:docker 660",
             fixable=True,
-            fix_action="socket_perms"
+            fix_action="socket_perms",
         )
 
     def check_daemon_accessible(self) -> CheckResult:
         """Check if Docker daemon is accessible."""
         is_root = os.getuid() == 0
-        ok, msg = privileged_ops.verify_docker_accessible(
-            self.username if not is_root else None
-        )
+        ok, msg = privileged_ops.verify_docker_accessible(self.username if not is_root else None)
 
         if ok:
-            return CheckResult(
-                name="Docker daemon",
-                passed=True,
-                message="Accessible"
-            )
+            return CheckResult(name="Docker daemon", passed=True, message="Accessible")
 
         details = None
         if "logout" in msg.lower():
             details = "Logout/login required for group changes"
 
         return CheckResult(
-            name="Docker daemon",
-            passed=False,
-            message="Not accessible",
-            details=details
+            name="Docker daemon", passed=False, message="Not accessible", details=details
         )
 
     def validate(self) -> ValidationReport:
@@ -641,15 +619,16 @@ class DockerValidator:
 # Configuration Validation
 # =============================================================================
 
+
 class ConfigurationValidator:
     """Validates SyrvisCore configuration."""
 
     REQUIRED_VARS = [
-        'DOMAIN',
-        'ACME_EMAIL',
-        'NETWORK_SUBNET',
-        'NETWORK_GATEWAY',
-        'TRAEFIK_IP',
+        "DOMAIN",
+        "ACME_EMAIL",
+        "NETWORK_SUBNET",
+        "NETWORK_GATEWAY",
+        "TRAEFIK_IP",
     ]
 
     def __init__(self):
@@ -679,26 +658,17 @@ class ConfigurationValidator:
     def check_env_exists(self) -> CheckResult:
         """Check if .env file exists."""
         if self.env_path and self.env_path.exists():
-            return CheckResult(
-                name=".env file",
-                passed=True,
-                message="Exists"
-            )
+            return CheckResult(name=".env file", passed=True, message="Exists")
 
         return CheckResult(
-            name=".env file",
-            passed=False,
-            message="Missing",
-            details="Run: syrvis setup"
+            name=".env file", passed=False, message="Missing", details="Run: syrvis setup"
         )
 
     def check_required_vars(self) -> CheckResult:
         """Check if all required variables are set."""
         if not self.env_vars:
             return CheckResult(
-                name="Required config",
-                passed=False,
-                message="Cannot check - .env not available"
+                name="Required config", passed=False, message="Cannot check - .env not available"
             )
 
         missing = []
@@ -707,17 +677,13 @@ class ConfigurationValidator:
                 missing.append(var)
 
         if not missing:
-            return CheckResult(
-                name="Required config",
-                passed=True,
-                message="All values set"
-            )
+            return CheckResult(name="Required config", passed=True, message="All values set")
 
         return CheckResult(
             name="Required config",
             passed=False,
             message=f"Missing: {', '.join(missing)}",
-            details=f"Edit {self.env_path}"
+            details=f"Edit {self.env_path}",
         )
 
     def get_value(self, key: str, default: str = "") -> str:
@@ -739,6 +705,7 @@ class ConfigurationValidator:
 # Network Validation
 # =============================================================================
 
+
 class NetworkValidator:
     """Validates network configuration (macvlan, shim, routes)."""
 
@@ -748,17 +715,17 @@ class NetworkValidator:
     @property
     def traefik_ip(self) -> str:
         """Get Traefik IP from config."""
-        return self.config.get_value('TRAEFIK_IP', '')
+        return self.config.get_value("TRAEFIK_IP", "")
 
     @property
     def shim_ip(self) -> str:
         """Get or calculate shim IP."""
-        shim_ip = self.config.get_value('SHIM_IP', '')
+        shim_ip = self.config.get_value("SHIM_IP", "")
 
         if not shim_ip and self.traefik_ip:
             # Calculate from traefik_ip + 1
             try:
-                parts = self.traefik_ip.split('.')
+                parts = self.traefik_ip.split(".")
                 shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{int(parts[3]) + 1}"
             except (IndexError, ValueError):
                 pass
@@ -769,127 +736,93 @@ class NetworkValidator:
         """Check if macvlan shim interface exists."""
         if not self.traefik_ip:
             return CheckResult(
-                name="Shim interface",
-                passed=False,
-                message="Skipped - TRAEFIK_IP not configured"
+                name="Shim interface", passed=False, message="Skipped - TRAEFIK_IP not configured"
             )
 
         try:
             result = subprocess.run(
-                ["ip", "link", "show", "syrvis-shim"],
-                capture_output=True, text=True, timeout=5
+                ["ip", "link", "show", "syrvis-shim"], capture_output=True, text=True, timeout=5
             )
 
             if result.returncode == 0:
-                return CheckResult(
-                    name="Shim interface",
-                    passed=True,
-                    message="syrvis-shim exists"
-                )
+                return CheckResult(name="Shim interface", passed=True, message="syrvis-shim exists")
 
             return CheckResult(
                 name="Shim interface",
                 passed=False,
                 message="syrvis-shim missing",
-                details="Run: syrvis start"
+                details="Run: syrvis start",
             )
 
         except FileNotFoundError:
             return CheckResult(
-                name="Shim interface",
-                passed=False,
-                message="Skipped - 'ip' command not available"
+                name="Shim interface", passed=False, message="Skipped - 'ip' command not available"
             )
         except subprocess.TimeoutExpired:
-            return CheckResult(
-                name="Shim interface",
-                passed=False,
-                message="Check timed out"
-            )
+            return CheckResult(name="Shim interface", passed=False, message="Check timed out")
 
     def check_shim_ip(self) -> CheckResult:
         """Check if shim interface has correct IP."""
         if not self.shim_ip:
             return CheckResult(
-                name="Shim IP",
-                passed=False,
-                message="Skipped - shim IP not configured"
+                name="Shim IP", passed=False, message="Skipped - shim IP not configured"
             )
 
         try:
             result = subprocess.run(
-                ["ip", "addr", "show", "syrvis-shim"],
-                capture_output=True, text=True, timeout=5
+                ["ip", "addr", "show", "syrvis-shim"], capture_output=True, text=True, timeout=5
             )
 
             if result.returncode == 0 and self.shim_ip in result.stdout:
-                return CheckResult(
-                    name="Shim IP",
-                    passed=True,
-                    message=self.shim_ip
-                )
+                return CheckResult(name="Shim IP", passed=True, message=self.shim_ip)
 
             return CheckResult(
                 name="Shim IP",
                 passed=False,
                 message=f"Expected {self.shim_ip}",
-                details="Run: syrvis start"
+                details="Run: syrvis start",
             )
 
         except FileNotFoundError:
             return CheckResult(
-                name="Shim IP",
-                passed=False,
-                message="Skipped - 'ip' command not available"
+                name="Shim IP", passed=False, message="Skipped - 'ip' command not available"
             )
         except subprocess.TimeoutExpired:
-            return CheckResult(
-                name="Shim IP",
-                passed=False,
-                message="Check timed out"
-            )
+            return CheckResult(name="Shim IP", passed=False, message="Check timed out")
 
     def check_route(self) -> CheckResult:
         """Check if route to Traefik exists."""
         if not self.traefik_ip:
             return CheckResult(
-                name="Route to Traefik",
-                passed=False,
-                message="Skipped - TRAEFIK_IP not configured"
+                name="Route to Traefik", passed=False, message="Skipped - TRAEFIK_IP not configured"
             )
 
         try:
             result = subprocess.run(
                 ["ip", "route", "show", f"{self.traefik_ip}/32"],
-                capture_output=True, text=True, timeout=5
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
 
             if result.returncode == 0 and "syrvis-shim" in result.stdout:
-                return CheckResult(
-                    name="Route to Traefik",
-                    passed=True,
-                    message=self.traefik_ip
-                )
+                return CheckResult(name="Route to Traefik", passed=True, message=self.traefik_ip)
 
             return CheckResult(
                 name="Route to Traefik",
                 passed=False,
                 message="Missing",
-                details="Run: syrvis start"
+                details="Run: syrvis start",
             )
 
         except FileNotFoundError:
             return CheckResult(
                 name="Route to Traefik",
                 passed=False,
-                message="Skipped - 'ip' command not available"
+                message="Skipped - 'ip' command not available",
             )
         except subprocess.TimeoutExpired:
-            return CheckResult(
-                name="Route to Traefik",
-                passed=False,
-                message="Check timed out"
-            )
+            return CheckResult(name="Route to Traefik", passed=False, message="Check timed out")
 
     def validate(self) -> ValidationReport:
         """Run all network checks."""
@@ -907,6 +840,7 @@ class NetworkValidator:
 # Endpoint Discovery
 # =============================================================================
 
+
 def get_configured_endpoints(config: ConfigurationValidator = None) -> List[Dict]:
     """
     Get list of configured endpoints from .env file.
@@ -923,34 +857,38 @@ def get_configured_endpoints(config: ConfigurationValidator = None) -> List[Dict
     config = config or ConfigurationValidator()
     endpoints = []
 
-    domain = config.get_value('DOMAIN')
-    traefik_ip = config.get_value('TRAEFIK_IP')
-    nas_ip = config.get_value('NAS_IP')
+    domain = config.get_value("DOMAIN")
+    traefik_ip = config.get_value("TRAEFIK_IP")
+    nas_ip = config.get_value("NAS_IP")
 
     if not domain:
         return endpoints
 
     # Core services (always present)
-    endpoints.append({
-        "name": "Traefik Dashboard",
-        "subdomain": "traefik",
-        "domain": f"traefik.{domain}",
-        "expected_ip": traefik_ip,
-        "backend_host": None,
-        "backend_port": None,
-        # Traefik API returns 405 for HEAD requests - this is expected
-        "expected_status": [200, 401, 405],
-    })
+    endpoints.append(
+        {
+            "name": "Traefik Dashboard",
+            "subdomain": "traefik",
+            "domain": f"traefik.{domain}",
+            "expected_ip": traefik_ip,
+            "backend_host": None,
+            "backend_port": None,
+            # Traefik API returns 405 for HEAD requests - this is expected
+            "expected_status": [200, 401, 405],
+        }
+    )
 
-    endpoints.append({
-        "name": "Portainer",
-        "subdomain": "portainer",
-        "domain": f"portainer.{domain}",
-        "expected_ip": traefik_ip,
-        "backend_host": None,
-        "backend_port": None,
-        "expected_status": [200, 301, 302, 303, 307, 308],
-    })
+    endpoints.append(
+        {
+            "name": "Portainer",
+            "subdomain": "portainer",
+            "domain": f"portainer.{domain}",
+            "expected_ip": traefik_ip,
+            "backend_host": None,
+            "backend_port": None,
+            "expected_status": [200, 301, 302, 303, 307, 308],
+        }
+    )
 
     # Synology services
     synology_services = {
@@ -962,16 +900,18 @@ def get_configured_endpoints(config: ConfigurationValidator = None) -> List[Dict
     }
 
     for env_key, (name, subdomain, port, expected_status) in synology_services.items():
-        if config.get_value(env_key, '').lower() in ('true', '1', 'yes'):
-            endpoints.append({
-                "name": name,
-                "subdomain": subdomain,
-                "domain": f"{subdomain}.{domain}",
-                "expected_ip": traefik_ip,
-                "backend_host": nas_ip,
-                "backend_port": port,
-                "expected_status": expected_status,
-            })
+        if config.get_value(env_key, "").lower() in ("true", "1", "yes"):
+            endpoints.append(
+                {
+                    "name": name,
+                    "subdomain": subdomain,
+                    "domain": f"{subdomain}.{domain}",
+                    "expected_ip": traefik_ip,
+                    "backend_host": nas_ip,
+                    "backend_port": port,
+                    "expected_status": expected_status,
+                }
+            )
 
     return endpoints
 
@@ -980,25 +920,22 @@ def get_configured_endpoints(config: ConfigurationValidator = None) -> List[Dict
 # System Integration Validation
 # =============================================================================
 
+
 class SystemValidator:
     """Validates system integration (symlinks, startup scripts)."""
 
     def __init__(self, install_dir: Path = None, username: str = None):
         self.install_dir = install_dir
-        self.username = username or os.environ.get(
-            'USER', os.environ.get('SUDO_USER', 'unknown')
-        )
+        self.username = username or os.environ.get("USER", os.environ.get("SUDO_USER", "unknown"))
 
     def check_global_command(self) -> CheckResult:
         """Check if global syrvis command exists."""
-        symlink_path = Path('/usr/local/bin/syrvis')
+        symlink_path = Path("/usr/local/bin/syrvis")
 
         if symlink_path.exists() and symlink_path.is_symlink():
             target = os.readlink(str(symlink_path))
             return CheckResult(
-                name="Global command",
-                passed=True,
-                message=f"{symlink_path} → {target}"
+                name="Global command", passed=True, message=f"{symlink_path} → {target}"
             )
 
         return CheckResult(
@@ -1006,33 +943,27 @@ class SystemValidator:
             passed=False,
             message="syrvis not in PATH",
             fixable=True,
-            fix_action="symlink"
+            fix_action="symlink",
         )
 
     def check_startup_script(self) -> CheckResult:
         """Check if startup script exists."""
         if not self.install_dir:
             return CheckResult(
-                name="Startup script",
-                passed=False,
-                message="Cannot check - install dir unknown"
+                name="Startup script", passed=False, message="Cannot check - install dir unknown"
             )
 
         startup_script = self.install_dir / "bin" / "syrvis-startup.sh"
 
         if startup_script.exists():
-            return CheckResult(
-                name="Startup script",
-                passed=True,
-                message=str(startup_script)
-            )
+            return CheckResult(name="Startup script", passed=True, message=str(startup_script))
 
         return CheckResult(
             name="Startup script",
             passed=False,
             message="Missing",
             fixable=True,
-            fix_action=f"startup:{self.username}"
+            fix_action=f"startup:{self.username}",
         )
 
     def check_boot_script(self) -> CheckResult:
@@ -1044,7 +975,7 @@ class SystemValidator:
                 name="Boot script",
                 passed=True,
                 message=str(boot_script),
-                details="Ensures macvlan shim is created on reboot"
+                details="Ensures macvlan shim is created on reboot",
             )
 
         return CheckResult(
@@ -1053,7 +984,7 @@ class SystemValidator:
             message="Missing - services won't auto-start after reboot",
             details="Run: sudo syrvis setup",
             fixable=True,
-            fix_action="boot_script"
+            fix_action="boot_script",
         )
 
     def validate(self) -> ValidationReport:
@@ -1071,6 +1002,7 @@ class SystemValidator:
 # =============================================================================
 # Convenience Functions
 # =============================================================================
+
 
 def validate_installation() -> ValidationReport:
     """Quick validation of installation state."""
