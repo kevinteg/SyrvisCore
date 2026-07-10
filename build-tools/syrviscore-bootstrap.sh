@@ -127,7 +127,9 @@ if [ -z "$HOME_DIR" ]; then
     die "pass --home DIR to choose the install location (e.g. --home /volume4/syrviscore)"
 fi
 log "SYRVIS_HOME: $HOME_DIR"
-BEFORE_ACTIVE=$("$SC" info --json 2>/dev/null | sed -n 's/.*"active_version": *"\([^"]*\)".*/\1/p')
+# NB: `syrvisctl info --json` emits the key "active" (the manifest FILE uses
+# "active_version"; the CLI output does not). Parse the CLI's key.
+BEFORE_ACTIVE=$("$SC" info --json 2>/dev/null | sed -n 's/.*"active": *"\([^"]*\)".*/\1/p')
 [ -n "$BEFORE_ACTIVE" ] && log "Currently active service version: $BEFORE_ACTIVE"
 
 # --- 2. safety backup (only if we're going to clean up) --------------------
@@ -143,17 +145,21 @@ fi
 
 # --- 3. install the service from the local wheel ---------------------------
 STEP="install service $TARGET_VER"
-log "Installing service $TARGET_VER from the local wheel (offline)"
-INSTALL_CMD="'$SC' install --wheel '$WHEEL' --path '$HOME_DIR' --force -y"
-[ -n "$CONFIG" ] && INSTALL_CMD="$INSTALL_CMD --config '$CONFIG'"
-run "$INSTALL_CMD"
+if [ "$BEFORE_ACTIVE" = "$TARGET_VER" ] && [ "$(readlink "$HOME_DIR/current" 2>/dev/null)" = "versions/$TARGET_VER" ]; then
+    log "Service $TARGET_VER already installed and active — skipping install (idempotent re-run)"
+else
+    log "Installing service $TARGET_VER from the local wheel (offline)"
+    INSTALL_CMD="'$SC' install --wheel '$WHEEL' --path '$HOME_DIR' --force -y"
+    [ -n "$CONFIG" ] && INSTALL_CMD="$INSTALL_CMD --config '$CONFIG'"
+    run "$INSTALL_CMD"
+fi
 
 # --- 4. verify -------------------------------------------------------------
 STEP="verify install"
 if [ "$DRYRUN" = 1 ]; then
     log "(dry-run) would verify: current -> $TARGET_VER, syrvis --version, status --json"
 else
-    ACTIVE=$("$SC" info --json 2>/dev/null | sed -n 's/.*"active_version": *"\([^"]*\)".*/\1/p')
+    ACTIVE=$("$SC" info --json 2>/dev/null | sed -n 's/.*"active": *"\([^"]*\)".*/\1/p')
     [ "$ACTIVE" = "$TARGET_VER" ] || die "active version is '$ACTIVE', expected '$TARGET_VER' after install"
     [ -L "$HOME_DIR/current" ] || die "current symlink missing under $HOME_DIR"
     SYRVIS_BIN="$HOME_DIR/bin/syrvis"
