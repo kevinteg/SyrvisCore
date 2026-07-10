@@ -155,15 +155,22 @@ pytest tests/test_cli.py -v
 
 ```bash
 syrvisctl install [version]   # Download and install service from GitHub
+syrvisctl install --wheel F   # Install from a local wheel (dev loop, no network)
 syrvisctl uninstall <version> # Remove a service version
-syrvisctl list                # List installed versions
+syrvisctl list [--json]       # List installed versions
 syrvisctl activate <version>  # Switch active version
-syrvisctl rollback            # Rollback to previous version
-syrvisctl check               # Check for updates
-syrvisctl info                # Show installation info
+syrvisctl rollback [version]  # Rollback to previous version (full restore)
+syrvisctl check [--json]      # Check for updates
+syrvisctl info [--json]       # Show installation info
 syrvisctl cleanup [--keep N]  # Remove old versions
-syrvisctl migrate             # Migrate from legacy installation
+syrvisctl backup <cmd>        # Backup management (list/create/cleanup)
+syrvisctl restore [file]      # Restore from backup (disaster recovery)
 ```
+
+All prompts are bypassable with `-y`; read commands support `--json`
+(the contract the MCP server layer builds on). Library modules raise typed
+`SyrvisError` exceptions and never print — `cli.py` is a thin shell.
+See `docs/v2-design.md` for the v2 architecture and phase plan.
 
 ### syrvis (Service)
 
