@@ -52,6 +52,9 @@ mkdir -p "$STAGE_DIR/wheels"
 
 cp "$SCRIPT_DIR/bootstrap.sh" "$STAGE_DIR/bootstrap.sh"
 chmod 755 "$STAGE_DIR/bootstrap.sh"
+# Production one-pass installer/upgrader (run with sudo; drives synopkg + syrvisctl)
+cp "$SCRIPT_DIR/syrviscore-bootstrap.sh" "$STAGE_DIR/syrviscore-bootstrap.sh"
+chmod 755 "$STAGE_DIR/syrviscore-bootstrap.sh"
 cp "$DEPS_DIR"/*.whl "$STAGE_DIR/wheels/"
 cp "$SERVICE_WHEEL" "$STAGE_DIR/"
 

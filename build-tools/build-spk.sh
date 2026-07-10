@@ -164,9 +164,16 @@ done
 log_success "Package contents verified ($BUNDLED_WHEELS wheels bundled for offline install)"
 
 # Create package.tgz
+# COPYFILE_DISABLE + --no-mac-metadata (bsdtar/macOS) keep AppleDouble ._* and
+# the com.apple.provenance xattr out of the archive — otherwise they leak into
+# /var/packages/syrviscore/target on the NAS as junk (._. , ._wheels, ...).
 log_info "Creating package.tgz"
 cd "$BUILD_DIR/package"
-tar -czf ../package.tgz .
+if tar --version 2>/dev/null | grep -q "GNU tar"; then
+    tar -czf ../package.tgz .
+else
+    COPYFILE_DISABLE=1 tar --no-mac-metadata -czf ../package.tgz .
+fi
 cd "$PROJECT_ROOT"
 
 if [ ! -f "$BUILD_DIR/package.tgz" ]; then
