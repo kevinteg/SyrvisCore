@@ -7,8 +7,8 @@ description: "Open source home automation"
 author: "SyrvisCore"
 homepage: "https://www.home-assistant.io/"
 
-# Docker image - using stable release
-image: ghcr.io/home-assistant/home-assistant:stable
+# Docker image - pin a specific version (floating tags like :latest are rejected)
+image: ghcr.io/home-assistant/home-assistant:2024.12.5
 container_name: homeassistant
 
 # Traefik routing
@@ -21,9 +21,11 @@ traefik:
 restart: unless-stopped
 
 # Volume mounts
+# Host paths must be relative (resolved under $SYRVIS_HOME/data/homeassistant/).
+# Absolute host bind mounts (e.g. /etc/localtime) are rejected by the service
+# schema; the TZ env var below sets the timezone instead.
 volumes:
   - "config:/config:rw"
-  - "/etc/localtime:/etc/localtime:ro"
 
 # Environment variables
 environment:

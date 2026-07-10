@@ -18,6 +18,7 @@ from datetime import datetime
 
 from . import privileged_ops
 from . import paths
+from . import privilege
 from .__version__ import __version__
 
 
@@ -28,15 +29,11 @@ def _get_ops() -> privileged_ops.SystemOperations:
 
 
 def self_elevate() -> None:
-    """Re-execute this command with sudo."""
-    click.echo("\nSome operations require root privileges.")
-
-    # Build the command to re-execute
-    python_path = sys.executable
-    script_args = sys.argv
-
-    # Use sudo to re-execute
-    os.execvp("sudo", ["sudo", python_path] + script_args)
+    """Re-execute this command with sudo (preserving SYRVIS_HOME)."""
+    # Single implementation lives in privilege.self_elevate — it forwards
+    # SYRVIS_HOME across the sudo boundary, which env_reset would otherwise
+    # strip.
+    privilege.self_elevate("Some operations require root privileges.")
 
 
 def get_default_network_settings() -> dict:
@@ -281,8 +278,10 @@ def _prompt_password(prompt: str) -> str:
     """Prompt for a password with confirmation."""
     while True:
         password = click.prompt(prompt, hide_input=True, confirmation_prompt=True)
-        if len(password) < 8:
-            click.echo("    Password must be at least 8 characters", err=True)
+        # Portainer CE 2.x rejects admin passwords shorter than 12 chars at
+        # first-run init, so enforce that here rather than failing later.
+        if len(password) < 12:
+            click.echo("    Password must be at least 12 characters", err=True)
             continue
         return password
 

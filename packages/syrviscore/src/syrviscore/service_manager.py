@@ -13,8 +13,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
-from .service_schema import ServiceDefinition, load_service_definition
+from . import paths
+from .service_schema import (
+    ServiceDefinition,
+    ServiceValidationError,
+    load_service_definition,
+    validate_service_name,
+)
 from .traefik_config import ServiceTraefikConfig, get_domain_from_env
+
+# The compose command to shell out to. Core services and Layer 2 services now
+# use the same one (the audit found them split between v1 and v2).
+COMPOSE_CMD = ["docker", "compose"]
 
 
 class ServiceManager:
@@ -24,20 +34,61 @@ class ServiceManager:
         """Initialize the service manager.
 
         Args:
-            syrvis_home: Path to SYRVIS_HOME. Defaults to $SYRVIS_HOME env var.
+            syrvis_home: Path to SYRVIS_HOME. Defaults to the resolved home
+                (env var, then volume auto-detection) — sudo elevation strips
+                SYRVIS_HOME, so a bare env lookup is not enough.
         """
         if syrvis_home:
-            self.syrvis_home = syrvis_home
+            self.syrvis_home = Path(syrvis_home)
         else:
-            home = os.environ.get("SYRVIS_HOME", "")
-            if not home:
-                raise ValueError("SYRVIS_HOME environment variable not set")
-            self.syrvis_home = Path(home)
+            self.syrvis_home = paths.get_syrvis_home()
 
         self.services_dir = self.syrvis_home / "services"
         self.compose_dir = self.syrvis_home / "compose"
         self.data_dir = self.syrvis_home / "data"
-        self.traefik_config = ServiceTraefikConfig()
+        # Derive the Traefik dynamic-config dir from the resolved home so the
+        # manager works under sudo (which strips SYRVIS_HOME) and in tests.
+        self.traefik_config = ServiceTraefikConfig(
+            config_dir=self.syrvis_home / "data" / "traefik" / "config" / "dynamic"
+        )
+
+    def _service_paths(self, name: str) -> Dict[str, Path]:
+        """Return the derived paths for a service, containment-checked.
+
+        Even though names are validated at parse time, we re-validate here and
+        assert every derived path stays within its parent — defense in depth
+        against a name that reaches this layer unvalidated.
+        """
+        validate_service_name(name, "service name")
+        base_dirs = {
+            "service": self.services_dir,
+            "data": self.data_dir,
+            "compose_dir": self.compose_dir,
+        }
+        result = {
+            "service": self.services_dir / name,
+            "data": self.data_dir / name,
+            "compose": self.compose_dir / "{}.yaml".format(name),
+        }
+        # Containment assertions: every derived path's parent must be exactly
+        # the intended base directory.
+        for key, base in base_dirs.items():
+            target = result["compose"] if key == "compose_dir" else result[key]
+            base_real = os.path.realpath(str(base))
+            if key == "compose_dir":
+                parent_real = os.path.realpath(str(target.parent))
+            else:
+                parent_real = os.path.dirname(os.path.realpath(str(target)))
+            if parent_real != base_real:
+                where = "compose" if key == "compose_dir" else key
+                raise ServiceValidationError(
+                    "Service {!r} escapes the {} directory".format(name, where)
+                )
+        return result
+
+    def _project_name(self, name: str) -> str:
+        """Compose project name for a service (isolates each service)."""
+        return "syrvis-{}".format(name)
 
     def _ensure_directories(self) -> None:
         """Ensure required directories exist."""
@@ -96,8 +147,11 @@ class ServiceManager:
             except (ValueError, FileNotFoundError) as e:
                 return False, f"Invalid service definition: {e}", None
 
-            # Check if already installed
-            target_dir = self.services_dir / service.name
+            # Check if already installed (containment-checked target)
+            try:
+                target_dir = self._service_paths(service.name)["service"]
+            except ServiceValidationError as e:
+                return False, str(e), None
             if target_dir.exists():
                 return False, f"Service '{service.name}' is already installed", None
 
@@ -138,37 +192,52 @@ class ServiceManager:
                 shutil.rmtree(service_path)
             return False, f"Failed to load service: {e}"
 
-        # Create data directories
-        service_data_dir = self.data_dir / service.name
-        service_data_dir.mkdir(parents=True, exist_ok=True)
-
-        # Copy config templates
-        if service.config_templates:
-            for template in service.config_templates:
-                src = service_path / template.source
-                dest = service_data_dir / template.dest
-                if src.exists():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest)
-
-        # Generate compose file
-        compose_path = self._generate_compose_file(service)
-
-        # Generate Traefik config
+        # From here on, roll back every artifact if any step fails, so a
+        # failed add never leaves partial state that blocks a retry.
         try:
-            domain = get_domain_from_env()
-            self.traefik_config.write_config(service, domain)
-        except ValueError as e:
-            return False, f"Failed to configure Traefik: {e}"
+            service_data_dir = self.data_dir / service.name
+            service_data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Start service if requested
-        if start:
-            success, msg = self._start_service(service.name, compose_path)
-            if not success:
-                return False, f"Service installed but failed to start: {msg}"
-            return True, f"Service '{service.name}' added and started"
+            if service.config_templates:
+                for template in service.config_templates:
+                    src = service_path / template.source
+                    dest = service_data_dir / template.dest
+                    if src.exists():
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dest)
 
-        return True, f"Service '{service.name}' added (not started)"
+            compose_path = self._generate_compose_file(service)
+
+            try:
+                domain = get_domain_from_env()
+                self.traefik_config.write_config(service, domain)
+            except ValueError as e:
+                raise RuntimeError(f"Failed to configure Traefik: {e}")
+
+            if start:
+                success, msg = self._start_service(service.name, compose_path)
+                if not success:
+                    raise RuntimeError(f"failed to start: {msg}")
+                return True, f"Service '{service.name}' added and started"
+
+            return True, f"Service '{service.name}' added (not started)"
+        except Exception as e:
+            self._rollback_add(service.name)
+            return False, f"Service '{service.name}' not added ({e})"
+
+    def _rollback_add(self, name: str) -> None:
+        """Remove every artifact created for a service (best-effort)."""
+        try:
+            p = self._service_paths(name)
+        except ServiceValidationError:
+            return
+        if p["compose"].exists():
+            self._stop_service(name, p["compose"])
+            p["compose"].unlink()
+        self.traefik_config.remove_config(name)
+        for path in (p["service"], p["data"]):
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
 
     def _generate_compose_file(self, service: ServiceDefinition) -> Path:
         """Generate docker-compose file for a service.
@@ -179,14 +248,17 @@ class ServiceManager:
         Returns:
             Path to generated compose file
         """
+        # No top-level `version:` key — it is deprecated in Compose v2 and
+        # emits a warning on every invocation.
         compose = {
-            "version": "3.8",
             "services": {
                 service.name: {
                     "image": service.image,
                     "container_name": service.container_name,
                     "restart": service.restart,
                     "networks": service.networks,
+                    # Third-party services never get extra privileges.
+                    "security_opt": ["no-new-privileges:true"],
                 }
             },
             "networks": {
@@ -198,91 +270,69 @@ class ServiceManager:
 
         svc = compose["services"][service.name]
 
-        # Add environment if specified
         if service.environment:
             svc["environment"] = service.environment
 
-        # Process volumes - convert relative paths to absolute
+        # Volumes were validated by the schema (no absolute host paths, no
+        # '..', no docker.sock). Every host source resolves under this
+        # service's own data directory; we re-check containment here.
         if service.volumes:
+            data_root = os.path.realpath(str(self.data_dir / service.name))
             processed_volumes = []
             for vol in service.volumes:
                 parts = vol.split(":")
-                if len(parts) >= 2:
-                    host_path = parts[0]
-                    container_path = parts[1]
-                    mode = parts[2] if len(parts) > 2 else "rw"
+                host_path, container_path = parts[0], parts[1]
+                mode = parts[2] if len(parts) > 2 else "rw"
 
-                    # If host path is relative, make it absolute to data dir
-                    if not host_path.startswith("/") and not host_path.startswith("$"):
-                        host_path = str(self.data_dir / service.name / host_path)
-
-                    processed_volumes.append(f"{host_path}:{container_path}:{mode}")
-                else:
-                    # Named volume or other format - pass through
-                    processed_volumes.append(vol)
+                resolved = os.path.realpath(os.path.join(data_root, host_path))
+                if resolved != data_root and not resolved.startswith(data_root + os.sep):
+                    raise ServiceValidationError(
+                        "Volume host path {!r} escapes the service data directory".format(vol)
+                    )
+                processed_volumes.append(f"{resolved}:{container_path}:{mode}")
 
             svc["volumes"] = processed_volumes
 
-        # Add depends_on
         if service.depends_on:
             svc["depends_on"] = service.depends_on
 
-        # Write compose file
-        compose_path = self.compose_dir / f"{service.name}.yaml"
+        compose_path = self._service_paths(service.name)["compose"]
         with open(compose_path, "w") as f:
             yaml.dump(compose, f, default_flow_style=False, sort_keys=False)
 
         return compose_path
 
-    def _start_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
-        """Start a service using docker compose.
-
-        Args:
-            name: Service name
-            compose_path: Path to compose file
-
-        Returns:
-            Tuple of (success, message)
-        """
+    def _compose(self, name: str, compose_path: Path, *args: str, timeout: int) -> Tuple[bool, str]:
+        """Run a docker compose command scoped to this service's project."""
+        cmd = (
+            COMPOSE_CMD
+            + [
+                "-p",
+                self._project_name(name),
+                "-f",
+                str(compose_path),
+            ]
+            + list(args)
+        )
         try:
-            result = subprocess.run(
-                ["docker", "compose", "-f", str(compose_path), "up", "-d"],
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
-                return False, result.stderr
-            return True, "Started"
+                return False, result.stderr.strip()
+            return True, result.stdout.strip()
         except subprocess.TimeoutExpired:
-            return False, "Docker compose timed out"
+            return False, "docker compose {} timed out".format(args[0] if args else "")
         except FileNotFoundError:
             return False, "Docker is not installed"
+
+    def _start_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
+        """Start a service using docker compose."""
+        ok, msg = self._compose(name, compose_path, "up", "-d", timeout=120)
+        return (True, "Started") if ok else (False, msg)
 
     def _stop_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
-        """Stop a service using docker compose.
-
-        Args:
-            name: Service name
-            compose_path: Path to compose file
-
-        Returns:
-            Tuple of (success, message)
-        """
-        try:
-            result = subprocess.run(
-                ["docker", "compose", "-f", str(compose_path), "down"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                return False, result.stderr
-            return True, "Stopped"
-        except subprocess.TimeoutExpired:
-            return False, "Docker compose timed out"
-        except FileNotFoundError:
-            return False, "Docker is not installed"
+        """Stop a service using docker compose."""
+        ok, msg = self._compose(name, compose_path, "down", timeout=60)
+        return (True, "Stopped") if ok else (False, msg)
 
     def remove(self, name: str, purge: bool = False) -> Tuple[bool, str]:
         """Remove an installed service.
@@ -294,8 +344,12 @@ class ServiceManager:
         Returns:
             Tuple of (success, message)
         """
-        service_dir = self.services_dir / name
-        compose_path = self.compose_dir / f"{name}.yaml"
+        try:
+            p = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+
+        service_dir, compose_path, data_dir = p["service"], p["compose"], p["data"]
 
         if not service_dir.exists() and not compose_path.exists():
             return False, f"Service '{name}' is not installed"
@@ -314,7 +368,6 @@ class ServiceManager:
 
         # Remove data if purging
         if purge:
-            data_dir = self.data_dir / name
             if data_dir.exists():
                 shutil.rmtree(data_dir)
             return True, f"Service '{name}' removed (data purged)"
@@ -404,7 +457,10 @@ class ServiceManager:
         Returns:
             Tuple of (success, message)
         """
-        compose_path = self.compose_dir / f"{name}.yaml"
+        try:
+            compose_path = self._service_paths(name)["compose"]
+        except ServiceValidationError as e:
+            return False, str(e)
         if not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
@@ -419,7 +475,10 @@ class ServiceManager:
         Returns:
             Tuple of (success, message)
         """
-        compose_path = self.compose_dir / f"{name}.yaml"
+        try:
+            compose_path = self._service_paths(name)["compose"]
+        except ServiceValidationError as e:
+            return False, str(e)
         if not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
@@ -434,7 +493,11 @@ class ServiceManager:
         Returns:
             Tuple of (success, message)
         """
-        service_dir = self.services_dir / name
+        try:
+            p = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        service_dir = p["service"]
         if not service_dir.exists():
             return False, f"Service '{name}' is not installed"
 
@@ -481,13 +544,9 @@ class ServiceManager:
 
         # Restart if image changed
         if current.image != updated.image or current_version != updated.version:
-            compose_path = self.compose_dir / f"{name}.yaml"
-            # Pull new image
-            subprocess.run(
-                ["docker", "compose", "-f", str(compose_path), "pull"],
-                capture_output=True,
-                timeout=120,
-            )
+            compose_path = p["compose"]
+            # Pull new image (scoped to this service's compose project)
+            self._compose(name, compose_path, "pull", timeout=120)
             # Restart
             self._stop_service(name, compose_path)
             self._start_service(name, compose_path)

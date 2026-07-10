@@ -781,6 +781,32 @@ def ensure_boot_script(install_dir: Path) -> Tuple[bool, str]:
     return get_system_operations().ensure_boot_script(install_dir)
 
 
+def ensure_manifest_permissions(install_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Ensure the installation manifest is world-readable (0644).
+
+    The manifest carries no secrets; a restrictive mode only breaks the
+    unprivileged CLI's ability to read installation state, so 0644 is correct.
+    """
+    from . import paths as _paths
+
+    if install_dir is not None:
+        manifest_path = Path(install_dir) / ".syrviscore-manifest.json"
+    else:
+        try:
+            manifest_path = _paths.get_manifest_path()
+        except Exception as e:
+            return False, f"Could not locate manifest: {e}"
+
+    if not manifest_path.exists():
+        return False, f"Manifest not found: {manifest_path}"
+
+    try:
+        manifest_path.chmod(0o644)
+        return True, f"Manifest permissions set to 0644: {manifest_path}"
+    except (OSError, PermissionError) as e:
+        return False, f"Failed to set manifest permissions: {e}"
+
+
 # =============================================================================
 # Read-only diagnostic functions (don't need SystemOperations)
 # =============================================================================

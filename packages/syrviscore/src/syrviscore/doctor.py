@@ -278,6 +278,26 @@ def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> 
             if success:
                 fixed_count += 1
 
+        elif action == "boot_script" and install_dir:
+            click.echo("Creating boot hook...")
+            success, msg = privileged_ops.ensure_boot_script(install_dir)
+            click.echo(f"  {'✓' if success else '✗'} {msg}")
+            if success:
+                fixed_count += 1
+
+        elif action == "manifest_perms":
+            click.echo("Fixing manifest permissions...")
+            success, msg = privileged_ops.ensure_manifest_permissions(install_dir)
+            click.echo(f"  {'✓' if success else '✗'} {msg}")
+            if success:
+                fixed_count += 1
+
+        else:
+            # A fixer was advertised (fixable=True) but not wired up here.
+            # Surface it instead of silently counting it unfixed — that
+            # discrepancy is exactly the audit's H3 finding.
+            click.echo(f"  ✗ No automatic fix wired up for '{action}'", err=True)
+
     return fixed_count
 
 

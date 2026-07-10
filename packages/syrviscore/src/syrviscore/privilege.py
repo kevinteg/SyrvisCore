@@ -53,20 +53,38 @@ def needs_elevation_for_path(path) -> bool:
 def self_elevate(reason: str = "This operation requires elevated privileges.") -> None:
     """Re-execute the current command with sudo.
 
+    sudo's default env_reset strips SYRVIS_HOME, and re-execing sys.argv[0]
+    (the venv console script) bypasses the bin/syrvis wrapper that sets it —
+    so a naive re-exec leaves the elevated process unable to find its home.
+    We pass SYRVIS_HOME through explicitly, resolving it first if unset.
+
     Args:
         reason: Message to display before elevating
     """
     sudo_path = shutil.which("sudo")
     if not sudo_path:
-        click.echo("Error: sudo not found", err=True)
+        click.echo("Error: sudo not found. Re-run this command with sudo.", err=True)
         sys.exit(1)
+
+    # Resolve SYRVIS_HOME now, while we still can, and forward it across the
+    # privilege boundary.
+    syrvis_home = os.environ.get("SYRVIS_HOME")
+    if not syrvis_home:
+        try:
+            from . import paths
+
+            syrvis_home = str(paths.get_syrvis_home())
+        except Exception:
+            syrvis_home = None
 
     click.echo(f"\n{reason}")
     click.echo("Re-running with sudo...")
     click.echo()
 
-    # Re-execute with sudo, preserving arguments
-    args = [sudo_path, sys.executable] + sys.argv
+    args = [sudo_path]
+    if syrvis_home:
+        args.append(f"SYRVIS_HOME={syrvis_home}")
+    args += [sys.executable] + sys.argv
     os.execv(sudo_path, args)
 
 
