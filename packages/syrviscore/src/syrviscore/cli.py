@@ -14,6 +14,7 @@ from syrviscore.traefik_config import (
 from syrviscore.setup import setup
 from syrviscore.doctor import doctor
 from syrviscore.update import update
+from syrviscore.verify import verify
 from syrviscore import privilege
 
 
@@ -28,6 +29,7 @@ def cli():
 cli.add_command(setup)
 cli.add_command(doctor)
 cli.add_command(update)
+cli.add_command(verify)
 
 
 # =============================================================================

@@ -447,7 +447,11 @@ class InstallationValidator:
             )
 
         if self.manifest.get("setup_complete", False):
-            setup_date = self.manifest.get("setup_date", "unknown")
+            # setup.py writes `setup_completed_at`; fall back to the legacy
+            # `setup_date` key for manifests written by older versions.
+            setup_date = self.manifest.get(
+                "setup_completed_at", self.manifest.get("setup_date", "unknown")
+            )
             return CheckResult(name="Setup", passed=True, message=f"Completed ({setup_date})")
 
         return CheckResult(
