@@ -321,9 +321,12 @@ fi
 # Ensure user is in docker group
 /usr/syno/sbin/synogroup --member docker {username} 2>/dev/null || true
 
-# Load environment variables
+# Load environment variables (source, don't word-split — values may contain
+# spaces or '#', and the Cloudflare token must not leak through xargs)
 if [ -f "{env_path}" ]; then
-    export $(grep -v '^#' "{env_path}" | xargs)
+    set -a
+    . "{env_path}"
+    set +a
 fi
 
 # Create macvlan shim for host-to-container communication
@@ -331,8 +334,9 @@ fi
 if [ -n "$NETWORK_INTERFACE" ] && [ -n "$TRAEFIK_IP" ]; then
     SHIM_NAME="syrvis-shim"
 
-    # Calculate shim IP (traefik_ip + 1)
-    SHIM_IP=$(echo "$TRAEFIK_IP" | awk -F. '{{print $1"."$2"."$3"."$4+1}}')
+    # Honor a configured SHIM_IP from .env; only compute (traefik_ip + 1) as a
+    # fallback, so the shim IP matches what `syrvis start` uses (no boot drift)
+    SHIM_IP="${{SHIM_IP:-$(echo "$TRAEFIK_IP" | awk -F. '{{print $1"."$2"."$3"."$4+1}}')}}"
 
     # Check if shim already exists
     if ! ip link show "$SHIM_NAME" >/dev/null 2>&1; then

@@ -27,6 +27,21 @@ from . import paths
 from . import privileged_ops
 
 
+def resolve_invoking_user() -> str:
+    """Resolve the user whose Docker access / symlink we should be checking.
+
+    Under sudo, ``USER`` is ``root`` but ``SUDO_USER`` holds the real invoking
+    user — and the docker-group / symlink checks care about the latter (root
+    can always reach the socket, so checking root masks the real failure).
+    Prefer SUDO_USER when we are effectively root.
+    """
+    if os.geteuid() == 0:
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            return sudo_user
+    return os.environ.get("USER") or os.environ.get("SUDO_USER") or "unknown"
+
+
 # =============================================================================
 # Result Types
 # =============================================================================
@@ -507,7 +522,7 @@ class DockerValidator:
     """Validates Docker access and configuration."""
 
     def __init__(self, username: str = None):
-        self.username = username or os.environ.get("USER", os.environ.get("SUDO_USER", "unknown"))
+        self.username = username or resolve_invoking_user()
 
     def check_docker_group(self) -> CheckResult:
         """Check if docker group exists."""
@@ -930,7 +945,7 @@ class SystemValidator:
 
     def __init__(self, install_dir: Path = None, username: str = None):
         self.install_dir = install_dir
-        self.username = username or os.environ.get("USER", os.environ.get("SUDO_USER", "unknown"))
+        self.username = username or resolve_invoking_user()
 
     def check_global_command(self) -> CheckResult:
         """Check if global syrvis command exists."""

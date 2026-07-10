@@ -221,6 +221,19 @@ class DockerManager:
         """
         self._run_compose_command(["stop"])
 
+    def pull_core_images(self) -> None:
+        """
+        Pull the images declared in docker-compose.yaml.
+
+        Used by drift remediation so an image mismatch is corrected by
+        fetching the declared version before recreating the container.
+
+        Raises:
+            FileNotFoundError: If docker-compose.yaml missing
+            DockerError: If docker-compose fails
+        """
+        self._run_compose_command(["pull"])
+
     def clean_core_services(self, remove_volumes: bool = False) -> dict:
         """
         Remove all SyrvisCore containers and networks.

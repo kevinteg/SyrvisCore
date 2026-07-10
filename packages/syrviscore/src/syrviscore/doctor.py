@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import List
 
-from . import privileged_ops
+from . import remediation
 from .validators import (
     CheckResult,
     ValidationReport,
@@ -234,69 +234,20 @@ def run_endpoint_health_checks(endpoints: List[dict]) -> None:
 
 
 def apply_fixes(fixable_issues: List[CheckResult], install_dir: Path = None) -> int:
-    """Apply automatic fixes for fixable issues."""
+    """Apply automatic fixes for fixable issues.
+
+    Dispatch lives in remediation.apply_fix (shared with 'verify --fix') so a
+    fixer is wired up in exactly one place.
+    """
     print_section("Attempting Fixes")
     fixed_count = 0
 
     for check in fixable_issues:
-        action = check.fix_action
-
-        if action == "docker_group":
-            click.echo("Creating docker group...")
-            success, msg = privileged_ops.ensure_docker_group()
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action and action.startswith("user_group:"):
-            user = action.split(":", 1)[1]
-            click.echo(f"Adding {user} to docker group...")
-            success, msg = privileged_ops.ensure_user_in_docker_group(user)
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action == "socket_perms":
-            click.echo("Fixing Docker socket permissions...")
-            success, msg = privileged_ops.ensure_docker_socket_permissions()
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action == "symlink" and install_dir:
-            click.echo("Creating global symlink...")
-            success, msg = privileged_ops.ensure_global_symlink(install_dir)
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action and action.startswith("startup:") and install_dir:
-            user = action.split(":", 1)[1]
-            click.echo("Creating startup script...")
-            success, msg = privileged_ops.ensure_startup_script(install_dir, user)
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action == "boot_script" and install_dir:
-            click.echo("Creating boot hook...")
-            success, msg = privileged_ops.ensure_boot_script(install_dir)
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        elif action == "manifest_perms":
-            click.echo("Fixing manifest permissions...")
-            success, msg = privileged_ops.ensure_manifest_permissions(install_dir)
-            click.echo(f"  {'✓' if success else '✗'} {msg}")
-            if success:
-                fixed_count += 1
-
-        else:
-            # A fixer was advertised (fixable=True) but not wired up here.
-            # Surface it instead of silently counting it unfixed — that
-            # discrepancy is exactly the audit's H3 finding.
-            click.echo(f"  ✗ No automatic fix wired up for '{action}'", err=True)
+        click.echo(f"Fixing: {check.name} ({check.fix_action})...")
+        success, msg = remediation.apply_fix(check.fix_action, install_dir)
+        click.echo(f"  {'✓' if success else '✗'} {msg}")
+        if success:
+            fixed_count += 1
 
     return fixed_count
 

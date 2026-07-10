@@ -14,12 +14,12 @@ Tiers:
 """
 
 import json as jsonlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import click
 
-from . import drift, paths, validators
-from .docker_manager import DockerConnectionError, DockerManager
+from . import drift, paths, privilege, remediation, validators
+from .docker_manager import DockerConnectionError, DockerError, DockerManager
 
 
 def _core_compose_expected() -> Dict[str, str]:
@@ -111,6 +111,75 @@ def build_report(
     return result
 
 
+def _reconcile_core_drift() -> Tuple[bool, str]:
+    """Bring the core stack back to the compose-declared state.
+
+    Pull declared images (best-effort — an image mismatch needs the new image
+    present) then ``up -d``, which recreates any missing/stopped/wrong-image
+    container to match compose. Requires root (docker socket + macvlan shim).
+    """
+    mgr = DockerManager()
+    try:
+        mgr.pull_core_images()
+    except DockerError:
+        # pull is best-effort; up -d will still recreate from local images
+        pass
+    mgr.start_core_services()
+    return True, "core services reconciled to compose (pull + up -d)"
+
+
+def remediate(smoke: bool) -> List[Dict[str, object]]:
+    """Apply sanctioned remediations for a fixable-unhealthy install.
+
+    Two kinds of remediation, all privileged (the caller must have elevated):
+    1. Validator fixable issues → the shared remediation.apply_fix dispatch
+       (docker group, socket perms, boot hook, symlink, manifest perms).
+    2. Core drift → reconcile containers to the compose-declared state.
+
+    Returns a structured list of the actions taken (for text/JSON reporting).
+    """
+    actions: List[Dict[str, object]] = []
+    install_dir = remediation.resolve_install_dir()
+
+    for report in run_validation_reports(smoke):
+        for check in report.fixable_issues:
+            ok, msg = remediation.apply_fix(check.fix_action, install_dir)
+            actions.append(
+                {
+                    "target": check.name,
+                    "action": check.fix_action,
+                    "ok": ok,
+                    "message": msg,
+                }
+            )
+
+    try:
+        report = gather_core_drift()
+        if not report.in_sync:
+            ok, msg = _reconcile_core_drift()
+            actions.append(
+                {"target": "core-drift", "action": "compose_up", "ok": ok, "message": msg}
+            )
+    except DockerConnectionError as e:
+        actions.append(
+            {
+                "target": "core-drift",
+                "action": "compose_up",
+                "ok": False,
+                "message": "docker unreachable: {}".format(e),
+            }
+        )
+    except FileNotFoundError:
+        # No compose file yet — nothing to reconcile
+        pass
+    except Exception as e:  # pragma: no cover - defensive
+        actions.append(
+            {"target": "core-drift", "action": "compose_up", "ok": False, "message": str(e)}
+        )
+
+    return actions
+
+
 def _render_text(result: Dict[str, object]) -> None:
     tier = "smoke" if result["smoke"] else "full"
     click.echo()
@@ -141,6 +210,14 @@ def _render_text(result: Dict[str, object]) -> None:
                     )
                 )
 
+    remediation_actions = result.get("remediation")
+    if remediation_actions:
+        click.echo()
+        click.echo("Remediation applied:")
+        for action in remediation_actions:
+            mark = "✓" if action["ok"] else "✗"
+            click.echo("  {} {}: {}".format(mark, action["target"], action["message"]))
+
     click.echo()
     click.echo("Result: {}".format("HEALTHY" if result["healthy"] else "UNHEALTHY"))
 
@@ -148,13 +225,30 @@ def _render_text(result: Dict[str, object]) -> None:
 @click.command()
 @click.option("--smoke", is_flag=True, help="Fast non-destructive subset (post-install gate)")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP health probe)")
-def verify(smoke, as_json):
+@click.option(
+    "--fix",
+    is_flag=True,
+    help="Apply sanctioned remediations (privileged: docker perms, boot hook, "
+    "reconcile drift) then re-report",
+)
+def verify(smoke, as_json, fix):
     """Report installation health and desired-vs-actual container drift.
 
-    Read-only: reports problems and exits non-zero when unhealthy, but never
-    changes system state. Use 'syrvis doctor --fix' for remediation.
+    Without --fix this is read-only: it reports problems and exits non-zero
+    when unhealthy, but never changes system state. With --fix it self-elevates
+    and applies sanctioned remediations, then re-reports the resulting state.
     """
+    remediation_actions = None
+    if fix:
+        privilege.ensure_elevated("verify --fix applies privileged remediations.")
+        # Only act when there is something to fix, to avoid needless restarts.
+        pre = build_report(smoke=smoke)
+        if not pre["healthy"]:
+            remediation_actions = remediate(smoke=smoke)
+
     result = build_report(smoke=smoke)
+    if remediation_actions is not None:
+        result["remediation"] = remediation_actions
 
     if as_json:
         click.echo(jsonlib.dumps(result, indent=2))
