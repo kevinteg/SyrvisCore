@@ -41,6 +41,37 @@ jobs:
         run: |
           ruff check packages/syrviscore-manager/src packages/syrviscore/src tests
 
+  # The MCP server runs on the operator's Mac (not the NAS), so it targets a
+  # modern Python and is tested on its own — never in the 3.8 SPK matrix.
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Install the MCP package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "packages/syrviscore-mcp[dev]"
+
+      - name: Run MCP tests (offline; includes visudo + shim checks)
+        run: |
+          pytest packages/syrviscore-mcp/tests -v --tb=short
+
+      - name: Lint + format
+        run: |
+          black --check packages/syrviscore-mcp/src packages/syrviscore-mcp/tests
+          ruff check packages/syrviscore-mcp/src packages/syrviscore-mcp/tests
+
+      - name: Generated deploy artifacts are in sync
+        run: |
+          python -m syrviscore_mcp.deploy.gen check packages/syrviscore-mcp/deploy
+
   # End-to-end dev loop: build the devkit tarball, then bootstrap a complete
   # install from it (real venvs, real pip, offline manager install) — the same
   # flow used against the NAS via `make nas-dev`.

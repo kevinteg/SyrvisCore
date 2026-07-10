@@ -1,0 +1,25 @@
+# /etc/sudoers.d/syrviscore-mcp  (install 0440 root:root; validate: visudo -cf)
+# GENERATED from syrviscore_mcp/commands.py by deploy/gen.py — do not hand-edit.
+# Enumerated NOPASSWD boundary for the MCP operator. Only the privileged
+# SyrvisCore subcommands below are permitted; everything else needs a human.
+
+Defaults:syrvis-operator  !requiretty, env_reset, secure_path="/usr/bin:/bin:/usr/local/bin"
+
+syrvis-operator ALL=(root) NOPASSWD: \
+    /volume1/syrviscore/bin/syrvis start, \
+    /volume1/syrviscore/bin/syrvis stop, \
+    /volume1/syrviscore/bin/syrvis restart, \
+    /volume1/syrviscore/bin/syrvis verify --fix --json, \
+    /volume1/syrviscore/bin/syrvis verify --smoke --fix --json, \
+    /volume1/syrviscore/bin/syrvis service start -- *, \
+    /volume1/syrviscore/bin/syrvis service stop -- *, \
+    /volume1/syrviscore/bin/syrvis service update -- *, \
+    /volume1/syrviscore/bin/syrvis service add -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl uninstall -y -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep * -y, \
+    /volume1/syrviscore/bin/syrvis service remove -y -- *

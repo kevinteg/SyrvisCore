@@ -1,0 +1,95 @@
+#!/bin/sh
+# /usr/local/bin/syrvis-mcp-shim  (install 0755 root:root)
+# GENERATED from syrviscore_mcp/commands.py by deploy/gen.py — do not hand-edit.
+# Forced command for the MCP operator SSH key. Re-validates the requested
+# command independently of client-side checks (defense in depth, G13).
+
+cmd="$SSH_ORIGINAL_COMMAND"
+if [ -z "$cmd" ]; then
+  echo "syrvis-mcp-shim: interactive login not permitted" >&2; exit 1
+fi
+
+# Injection boundary: reject any shell metacharacter (grep bracket class
+# treats these as literals) or control character, including newlines.
+if printf '%s' "$cmd" | LC_ALL=C grep -q '[;&|`$()<>\!]'; then
+  echo "syrvis-mcp-shim: forbidden character" >&2; exit 1
+fi
+if printf '%s' "$cmd" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+  echo "syrvis-mcp-shim: control character" >&2; exit 1
+fi
+
+# If the command carries a '--' positional, its value must be exactly one
+# safe token: alnum-leading, no leading '-' (blocks e.g. git --upload-pack),
+# no spaces (blocks extra args the sudo '*' would otherwise permit).
+case "$cmd" in
+  *' -- '*)
+    val=${cmd##* -- }
+    case "$val" in
+      *" "*) echo "syrvis-mcp-shim: extra args after --" >&2; exit 1;;
+    esac
+    if ! printf '%s' "$val" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._@:/-]*$'; then
+      echo "syrvis-mcp-shim: invalid positional value" >&2; exit 1
+    fi;;
+esac
+
+# Allowlist of accepted command shapes (glob * = one slot value).
+case "$cmd" in
+  '/volume1/syrviscore/bin/syrvis status --json')
+    exec $cmd;;
+  '/volume1/syrviscore/bin/syrvis verify --json')
+    exec $cmd;;
+  '/volume1/syrviscore/bin/syrvis verify --smoke --json')
+    exec $cmd;;
+  '/volume1/syrviscore/bin/syrvis service list --json')
+    exec $cmd;;
+  '/volume1/syrviscore/bin/syrvis logs -n '*' -- '*)
+    exec $cmd;;
+  '/volume1/syrviscore/bin/syrvis logs -n '*)
+    exec $cmd;;
+  '/var/packages/syrviscore/target/venv/bin/syrvisctl list --json')
+    exec $cmd;;
+  '/var/packages/syrviscore/target/venv/bin/syrvisctl check --json')
+    exec $cmd;;
+  '/var/packages/syrviscore/target/venv/bin/syrvisctl info --json')
+    exec $cmd;;
+  '/var/packages/syrviscore/target/venv/bin/syrvisctl backup list --json')
+    exec $cmd;;
+  '/var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep '*' --dry-run')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis start')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis stop')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis restart')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis verify --fix --json')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis verify --smoke --fix --json')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis service start -- '*)
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis service stop -- '*)
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis service update -- '*)
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis service add -- '*)
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- '*)
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore')
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- '*)
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y -- '*)
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y')
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl uninstall -y -- '*)
+    exec $cmd;;
+  'sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep '*' -y')
+    exec $cmd;;
+  'sudo -n /volume1/syrviscore/bin/syrvis service remove -y -- '*)
+    exec $cmd;;
+  *)
+    echo "syrvis-mcp-shim: command not on allowlist" >&2; exit 1;;
+esac

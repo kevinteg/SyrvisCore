@@ -97,14 +97,19 @@ class ServiceManager:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
     def _is_git_url(self, source: str) -> bool:
-        """Check if source is a git URL."""
+        """Check if source is a safe git URL.
+
+        Only https, scp-style git@host:path, and ssh:// are accepted. file://,
+        http://, git://, and a leading '-' are rejected: local paths and cleartext
+        transports are unsafe, and a '-'-leading value could be parsed as a git
+        flag. (The MCP validates more strictly still; this is the CLI's own gate.)
+        """
+        if not source or source.startswith("-"):
+            return False
         return (
             source.startswith("https://")
-            or source.startswith("http://")
-            or source.startswith("file://")
             or source.startswith("git@")
-            or source.startswith("git://")
-            or source.endswith(".git")
+            or source.startswith("ssh://")
         )
 
     def _clone_service(self, git_url: str) -> Tuple[bool, str, Optional[Path]]:
@@ -117,17 +122,29 @@ class ServiceManager:
             Tuple of (success, message, service_path)
         """
         # Create temp directory for cloning
+        import os
         import tempfile
+
+        if not self._is_git_url(git_url):
+            return False, f"Unsafe or unsupported git URL: {git_url!r}", None
+
+        # Restrict the transports git may use (defense in depth against
+        # protocol-helper abuse), and use '--' so a '-'-leading URL can never be
+        # parsed as a git option.
+        env = dict(os.environ)
+        env["GIT_ALLOW_PROTOCOL"] = "https:git:ssh"
+        env["GIT_TERMINAL_PROMPT"] = "0"
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / "repo"
 
             try:
                 result = subprocess.run(
-                    ["git", "clone", "--depth", "1", git_url, str(temp_path)],
+                    ["git", "clone", "--depth", "1", "--", git_url, str(temp_path)],
                     capture_output=True,
                     text=True,
                     timeout=60,
+                    env=env,
                 )
                 if result.returncode != 0:
                     return False, f"Failed to clone: {result.stderr}", None

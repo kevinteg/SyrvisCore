@@ -1,0 +1,161 @@
+"""
+Configuration for the SyrvisCore MCP server.
+
+Loaded from a TOML file (default ~/.config/syrviscore-mcp/config.toml, override
+via SYRVISCORE_MCP_CONFIG) plus a few environment overrides. No secrets are
+inlined: the SSH key is referenced from a dedicated ssh_config, and the HMAC
+token secret is read from an env var. The loader validates aggressively — an
+unsafe or half-configured server refuses to start rather than doing something
+surprising against a critical NAS.
+"""
+
+import os
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional
+
+from .errors import ConfigError
+
+DEFAULT_CONFIG_PATH = "~/.config/syrviscore-mcp/config.toml"
+
+# Users that must never be the SSH operator: root is over-privileged; cerebrate
+# is the human admin account (using it would conflate human and MCP access).
+_FORBIDDEN_SSH_USERS = {"root", "cerebrate", "admin"}
+
+
+@dataclass
+class NASConfig:
+    # [nas]
+    host: str
+    ssh_target: str
+    ssh_config_file: Path
+    control_path: str
+    command_timeout_s: int = 120
+
+    # [layout]
+    profile: str = "prod"
+    syrvisctl_path: str = ""
+    syrvis_wrapper: str = ""
+    syrvis_home: str = ""
+
+    # [privilege]
+    use_sudo: bool = True
+    sudo_binary: str = "sudo"
+
+    # [safety]
+    managed_marker: str = "syrviscore"
+    environment: str = "production"
+    git_url_allowed_hosts: List[str] = field(default_factory=list)
+
+    # [tokens]
+    token_secret_env: str = "SYRVISCORE_MCP_TOKEN_SECRET"
+    token_ttl_s: int = 300
+
+    # resolved
+    ssh_user: Optional[str] = None
+
+    def token_secret(self) -> bytes:
+        secret = os.environ.get(self.token_secret_env)
+        if secret:
+            return secret.encode()
+        if self.environment == "production":
+            raise ConfigError(
+                f"{self.token_secret_env} is not set",
+                operator_hint=f"export {self.token_secret_env}=<random> before starting the server",
+            )
+        # Non-production: a per-process ephemeral secret is fine (voids on restart)
+        return os.urandom(32)
+
+
+def _abs(path: str, what: str) -> str:
+    if not path or not str(path).startswith("/"):
+        raise ConfigError(f"{what} must be an absolute path (got {path!r})")
+    return path
+
+
+def _parse_ssh_user(ssh_config_file: Path, ssh_target: str) -> Optional[str]:
+    """Extract the User for ssh_target from the ssh_config file (best-effort)."""
+    if not ssh_config_file.exists():
+        return None
+    current = None
+    user = None
+    for raw in ssh_config_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        key, val = parts[0].lower(), parts[1].strip()
+        if key == "host":
+            current = val
+        elif key == "user" and current == ssh_target:
+            user = val
+    return user
+
+
+def load_config(path: Optional[str] = None) -> NASConfig:
+    """Load and validate the server configuration.
+
+    Raises:
+        ConfigError: on any missing/unsafe setting.
+    """
+    cfg_path = Path(
+        os.path.expanduser(path or os.environ.get("SYRVISCORE_MCP_CONFIG", DEFAULT_CONFIG_PATH))
+    )
+    if not cfg_path.exists():
+        raise ConfigError(
+            f"config file not found: {cfg_path}",
+            operator_hint="create ~/.config/syrviscore-mcp/config.toml (see the MCP README)",
+        )
+
+    data = tomllib.loads(cfg_path.read_text())
+    nas = data.get("nas", {})
+    layout = data.get("layout", {})
+    priv = data.get("privilege", {})
+    safety = data.get("safety", {})
+    tokens = data.get("tokens", {})
+
+    ssh_config_file = Path(
+        os.path.expanduser(nas.get("ssh_config_file", "~/.config/syrviscore-mcp/ssh_config"))
+    )
+
+    profile = layout.get("profile", "prod")
+    if profile not in ("dev", "prod"):
+        raise ConfigError(f"layout.profile must be 'dev' or 'prod' (got {profile!r})")
+
+    cfg = NASConfig(
+        host=os.environ.get("SYRVISCORE_NAS_HOST", nas.get("host", "")),
+        ssh_target=nas.get("ssh_target", ""),
+        ssh_config_file=ssh_config_file,
+        control_path=os.path.expanduser(
+            nas.get("control_path", "~/.config/syrviscore-mcp/cm-%r@%h:%p")
+        ),
+        command_timeout_s=int(nas.get("command_timeout_s", 120)),
+        profile=profile,
+        syrvisctl_path=_abs(layout.get("syrvisctl_path", ""), "layout.syrvisctl_path"),
+        syrvis_wrapper=_abs(layout.get("syrvis_wrapper", ""), "layout.syrvis_wrapper"),
+        syrvis_home=_abs(layout.get("syrvis_home", ""), "layout.syrvis_home"),
+        use_sudo=bool(priv.get("use_sudo", True)),
+        sudo_binary=priv.get("sudo_binary", "sudo"),
+        managed_marker=safety.get("managed_marker", "syrviscore"),
+        environment=safety.get("environment", "production"),
+        git_url_allowed_hosts=list(safety.get("git_url_allowed_hosts", [])),
+        token_secret_env=tokens.get("secret_env", "SYRVISCORE_MCP_TOKEN_SECRET"),
+        token_ttl_s=int(tokens.get("ttl_s", 300)),
+    )
+
+    if not cfg.host:
+        raise ConfigError("nas.host is required (or set SYRVISCORE_NAS_HOST)")
+    if not cfg.ssh_target:
+        raise ConfigError("nas.ssh_target is required")
+
+    cfg.ssh_user = _parse_ssh_user(ssh_config_file, cfg.ssh_target)
+    if cfg.ssh_user and cfg.ssh_user.lower() in _FORBIDDEN_SSH_USERS:
+        raise ConfigError(
+            f"ssh User for {cfg.ssh_target!r} is {cfg.ssh_user!r} — use a dedicated "
+            f"operator account, not {sorted(_FORBIDDEN_SSH_USERS)}",
+        )
+
+    return cfg

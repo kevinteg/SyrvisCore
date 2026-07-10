@@ -1,0 +1,240 @@
+"""
+Tool logic — the fastmcp-free core.
+
+Each function here is the actual behavior of an MCP tool: validate args, enforce
+sandbox membership, run the confirmation handshake for destructive ops, invoke
+the remote command, and (for the manager mutators that lack --json) follow up
+with a read for ground truth. server.py is a thin FastMCP wrapper that exposes
+these with typed signatures and hints; keeping the logic here makes it all
+unit-testable without fastmcp or a NAS.
+"""
+
+import secrets
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Optional
+
+from . import sandbox, tokens, validate
+from .commands import get_command
+from .config import NASConfig
+from .errors import McpError
+from .remote import RemoteRunner
+
+
+@dataclass
+class ToolContext:
+    cfg: NASConfig
+    runner: RemoteRunner
+    secret: bytes
+    used_nonces: set = field(default_factory=set)
+    now: Callable[[], float] = time.time
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+
+def _run(ctx: ToolContext, command_id: str, args: Optional[Dict] = None) -> Dict:
+    return ctx.runner.run(get_command(command_id), args or {})
+
+
+def _with_version_state(ctx: ToolContext, result: Dict) -> Dict:
+    """Attach the post-op {versions, active} as ground truth for non-JSON mutators."""
+    try:
+        after = _run(ctx, "versions_list")
+        result["versions"] = after.get("versions")
+        result["active"] = after.get("active")
+    except McpError:
+        pass
+    return result
+
+
+def _with_service_state(ctx: ToolContext, result: Dict) -> Dict:
+    try:
+        after = _run(ctx, "service_list")
+        result["services"] = after.get("services")
+    except McpError:
+        pass
+    return result
+
+
+def _confirm_or_plan(
+    ctx: ToolContext, tool: str, bound_args: Dict, confirm: str, state_parts: list, plan: Dict
+):
+    """Run the destructive-op confirmation handshake.
+
+    Returns a plan+token dict when confirmation is still needed (no mutation),
+    or None once a valid token has been verified (caller proceeds to mutate).
+    """
+    state = tokens.state_hash(*state_parts)
+    if not confirm:
+        nonce = secrets.token_hex(8)
+        expiry = int(ctx.now()) + ctx.cfg.token_ttl_s
+        token = tokens.mint(ctx.secret, tool, bound_args, state, nonce, expiry)
+        return {
+            "needs_confirmation": True,
+            "plan": plan,
+            "confirm_token": token,
+            "expires_at": expiry,
+            "note": "re-call this tool with confirm=<confirm_token> to proceed",
+        }
+    tokens.verify(ctx.secret, tool, bound_args, state, confirm, ctx.now(), ctx.used_nonces)
+    return None
+
+
+# --------------------------------------------------------------------------
+# read-only tools
+# --------------------------------------------------------------------------
+
+
+def status(ctx: ToolContext) -> Dict:
+    return _run(ctx, "status")
+
+
+def verify(ctx: ToolContext, smoke: bool = False) -> Dict:
+    return _run(ctx, "verify_smoke" if smoke else "verify")
+
+
+def service_list(ctx: ToolContext) -> Dict:
+    return _run(ctx, "service_list")
+
+
+def logs(ctx: ToolContext, service: Optional[str] = None, tail: int = 100) -> Dict:
+    validate.validate_tail(tail)
+    if service is not None:
+        validate.validate_name(service)
+        sandbox.assert_service_managed(ctx.runner, service)
+    return _run(ctx, "logs", {"service": service, "tail": tail})
+
+
+def versions_list(ctx: ToolContext) -> Dict:
+    return _run(ctx, "versions_list")
+
+
+def check_updates(ctx: ToolContext) -> Dict:
+    return _run(ctx, "check_updates")
+
+
+def info(ctx: ToolContext) -> Dict:
+    return _run(ctx, "info")
+
+
+def backup_list(ctx: ToolContext) -> Dict:
+    return _run(ctx, "backup_list")
+
+
+def cleanup_preview(ctx: ToolContext, keep: int = 2) -> Dict:
+    validate.validate_keep(keep)
+    return _run(ctx, "cleanup_preview", {"keep": keep})
+
+
+# --------------------------------------------------------------------------
+# privileged, non-destructive tools
+# --------------------------------------------------------------------------
+
+
+def start(ctx: ToolContext) -> Dict:
+    return _run(ctx, "start")
+
+
+def stop(ctx: ToolContext) -> Dict:
+    return _run(ctx, "stop")
+
+
+def restart(ctx: ToolContext) -> Dict:
+    return _run(ctx, "restart")
+
+
+def verify_fix(ctx: ToolContext, smoke: bool = False) -> Dict:
+    return _run(ctx, "verify_fix_smoke" if smoke else "verify_fix")
+
+
+def service_start(ctx: ToolContext, name: str) -> Dict:
+    validate.validate_name(name)
+    sandbox.assert_service_managed(ctx.runner, name)
+    return _with_service_state(ctx, _run(ctx, "service_start", {"name": name}))
+
+
+def service_stop(ctx: ToolContext, name: str) -> Dict:
+    validate.validate_name(name)
+    sandbox.assert_service_managed(ctx.runner, name)
+    return _with_service_state(ctx, _run(ctx, "service_stop", {"name": name}))
+
+
+def service_update(ctx: ToolContext, name: str) -> Dict:
+    validate.validate_name(name)
+    sandbox.assert_service_managed(ctx.runner, name)
+    return _with_service_state(ctx, _run(ctx, "service_update", {"name": name}))
+
+
+def service_add(ctx: ToolContext, git_url: str) -> Dict:
+    validate.validate_git_url(git_url, ctx.cfg.git_url_allowed_hosts)
+    return _with_service_state(ctx, _run(ctx, "service_add", {"git_url": git_url}))
+
+
+def install(ctx: ToolContext, version: Optional[str] = None) -> Dict:
+    if version is not None:
+        validate.validate_version(version)
+    return _with_version_state(ctx, _run(ctx, "install", {"version": version}))
+
+
+# --------------------------------------------------------------------------
+# privileged + destructive tools (confirmation token required)
+# --------------------------------------------------------------------------
+
+
+def activate(ctx: ToolContext, version: str, confirm: str = "") -> Dict:
+    version = validate.validate_version(version)
+    current = versions_list(ctx)
+    plan = {"action": "activate", "version": version, "current_active": current.get("active")}
+    pending = _confirm_or_plan(ctx, "activate", {"version": version}, confirm, [current], plan)
+    if pending:
+        return pending
+    return _with_version_state(ctx, _run(ctx, "activate", {"version": version}))
+
+
+def rollback(ctx: ToolContext, version: Optional[str] = None, confirm: str = "") -> Dict:
+    if version is not None:
+        version = validate.validate_version(version)
+    current = versions_list(ctx)
+    backups = backup_list(ctx)
+    plan = {"action": "rollback", "version": version, "current_active": current.get("active")}
+    pending = _confirm_or_plan(
+        ctx, "rollback", {"version": version}, confirm, [current, backups], plan
+    )
+    if pending:
+        return pending
+    return _with_version_state(ctx, _run(ctx, "rollback", {"version": version}))
+
+
+def uninstall(ctx: ToolContext, version: str, confirm: str = "") -> Dict:
+    version = validate.validate_version(version)
+    current = versions_list(ctx)
+    plan = {"action": "uninstall", "version": version, "installed": current.get("versions")}
+    pending = _confirm_or_plan(ctx, "uninstall", {"version": version}, confirm, [current], plan)
+    if pending:
+        return pending
+    return _with_version_state(ctx, _run(ctx, "uninstall", {"version": version}))
+
+
+def cleanup(ctx: ToolContext, keep: int = 2, confirm: str = "") -> Dict:
+    validate.validate_keep(keep)
+    preview = cleanup_preview(ctx, keep)
+    plan = {"action": "cleanup", "keep": keep, "would_remove": preview.get("detail")}
+    pending = _confirm_or_plan(ctx, "cleanup", {"keep": keep}, confirm, [preview], plan)
+    if pending:
+        return pending
+    return _with_version_state(ctx, _run(ctx, "cleanup", {"keep": keep}))
+
+
+def service_remove(ctx: ToolContext, name: str, confirm: str = "") -> Dict:
+    validate.validate_name(name)
+    sandbox.assert_service_managed(ctx.runner, name)
+    current = service_list(ctx)
+    entry = next((s for s in current.get("services", []) if s.get("name") == name), None)
+    plan = {"action": "service_remove", "name": name, "current": entry, "purge": False}
+    pending = _confirm_or_plan(ctx, "service_remove", {"name": name}, confirm, [entry], plan)
+    if pending:
+        return pending
+    return _with_service_state(ctx, _run(ctx, "service_remove", {"name": name}))
