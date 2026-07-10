@@ -50,6 +50,7 @@ class NASConfig:
 
     # [tokens]
     token_secret_env: str = "SYRVISCORE_MCP_TOKEN_SECRET"
+    token_secret_file: str = ""
     token_ttl_s: int = 300
 
     # resolved
@@ -65,10 +66,23 @@ class NASConfig:
         secret = os.environ.get(self.token_secret_env)
         if secret:
             return secret.encode()
+        # Opt-in fallback: a dedicated 0600 secret file (tokens.secret_file) so the
+        # server can launch from a .mcp.json without the operator exporting an env
+        # var, and without a secret ever living in a repo. ToolContext's per-process
+        # salt still voids outstanding tokens on restart regardless of this value.
+        if self.token_secret_file:
+            p = Path(os.path.expanduser(self.token_secret_file))
+            if p.is_file():
+                data = p.read_text().strip()
+                if data:
+                    return data.encode()
         if self.is_production():
             raise ConfigError(
                 f"{self.token_secret_env} is not set",
-                operator_hint=f"export {self.token_secret_env}=<random> before starting the server",
+                operator_hint=(
+                    f"export {self.token_secret_env}=<random>, or set tokens.secret_file to "
+                    "a 0600 file holding the secret, before starting the server"
+                ),
             )
         # Non-production: a per-process ephemeral secret is fine (voids on restart)
         return os.urandom(32)
@@ -149,6 +163,7 @@ def load_config(path: Optional[str] = None) -> NASConfig:
         environment=safety.get("environment", "production"),
         git_url_allowed_hosts=list(safety.get("git_url_allowed_hosts", [])),
         token_secret_env=tokens.get("secret_env", "SYRVISCORE_MCP_TOKEN_SECRET"),
+        token_secret_file=os.path.expanduser(tokens.get("secret_file", "")),
         token_ttl_s=int(tokens.get("ttl_s", 300)),
     )
 

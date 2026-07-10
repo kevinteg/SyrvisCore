@@ -30,10 +30,16 @@ python3.12 -m venv ~/.venvs/syrviscore-mcp
 
 Config lives at `~/.config/syrviscore-mcp/config.toml` (see
 `docs/mcp-design.md` §4 for the full schema) plus a dedicated
-`~/.config/syrviscore-mcp/ssh_config`. Set the HMAC token secret:
+`~/.config/syrviscore-mcp/ssh_config`.
+
+The HMAC token secret (used to bind destructive-op confirmations) resolves in
+order: the `SYRVISCORE_MCP_TOKEN_SECRET` env var, else the 0600 file named by
+`tokens.secret_file` in the config. The file fallback lets the server launch
+from a `.mcp.json` with no secret in the repo and no shell export:
 
 ```bash
-export SYRVISCORE_MCP_TOKEN_SECRET="$(openssl rand -hex 32)"
+umask 077
+openssl rand -hex 32 > ~/.config/syrviscore-mcp/token_secret   # keep a copy in your vault
 ```
 
 ## Provision the NAS (one-time, needs root)
@@ -131,19 +137,25 @@ ssh syrvis-nas 'sudo -l'           # lists ONLY the enumerated commands
 
 ## Register with a Claude session
 
-`.mcp.json` (e.g. in `home-tech`):
+`.mcp.json` (e.g. in `home-tech`) — no secret inline; point it at the config
+and let the token secret resolve from `tokens.secret_file`:
 
 ```json
 {
   "mcpServers": {
     "syrviscore": {
-      "command": "~/.venvs/syrviscore-mcp/bin/python",
+      "command": "/Users/<you>/.venvs-syrviscore-mcp/bin/python",
       "args": ["-m", "syrviscore_mcp"],
-      "env": { "SYRVISCORE_MCP_TOKEN_SECRET": "..." }
+      "env": {
+        "SYRVISCORE_MCP_CONFIG": "/Users/<you>/.config/syrviscore-mcp/config.toml"
+      }
     }
   }
 }
 ```
+
+Use an absolute `command` path (the venv python) — a `.mcp.json` launch does not
+expand `~`. Tools appear as `mcp__syrviscore__status`, `…__info`, etc.
 
 ## Tools
 

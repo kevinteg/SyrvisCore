@@ -83,6 +83,31 @@ def test_production_requires_token_secret(tmp_path, monkeypatch):
         cfg.token_secret()
 
 
+def test_token_secret_from_file(tmp_path, monkeypatch):
+    # Opt-in fallback: production without the env var reads a 0600 secret file.
+    monkeypatch.delenv("SYRVISCORE_MCP_TOKEN_SECRET", raising=False)
+    sf = tmp_path / "token_secret"
+    sf.write_text("secret-from-file\n")  # trailing newline is stripped
+    cfg = load_config(str(_write(tmp_path, PROD + f'\n[tokens]\nsecret_file = "{sf}"\n')))
+    assert cfg.token_secret() == b"secret-from-file"
+
+
+def test_env_secret_wins_over_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYRVISCORE_MCP_TOKEN_SECRET", "from-env")
+    sf = tmp_path / "token_secret"
+    sf.write_text("from-file")
+    cfg = load_config(str(_write(tmp_path, PROD + f'\n[tokens]\nsecret_file = "{sf}"\n')))
+    assert cfg.token_secret() == b"from-env"
+
+
+def test_production_still_fails_closed_when_secret_file_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("SYRVISCORE_MCP_TOKEN_SECRET", raising=False)
+    missing = tmp_path / "nope"
+    cfg = load_config(str(_write(tmp_path, PROD + f'\n[tokens]\nsecret_file = "{missing}"\n')))
+    with pytest.raises(ConfigError):
+        cfg.token_secret()
+
+
 def test_production_requires_git_allowlist(tmp_path):
     prod_no_hosts = GOOD.replace('environment = "test"', 'environment = "production"')
     with pytest.raises(ConfigError):
