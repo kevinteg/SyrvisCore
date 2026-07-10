@@ -84,6 +84,16 @@ def test_dsm_native_tooling():
     assert "for t in synouser synogroup install cp id awk chmod chown mktemp" in script
 
 
+def test_dry_run_tolerates_missing_operator_home():
+    # In --dry-run the account isn't created, so /etc/passwd has no home entry.
+    # The preview must not abort there; it assumes the DSM default home instead.
+    script = _render()
+    assert '[ "$DRYRUN" = 1 ]' in script
+    assert "/var/services/homes/$OPERATOR" in script
+    # a real run still fails loudly with actionable DSM guidance
+    assert "Enable user home service" in script
+
+
 def test_docker_group_ensured_and_verified():
     script = _render()
     assert "synogroup --add docker" in script

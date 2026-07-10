@@ -42,8 +42,9 @@ The MCP cannot bootstrap its own access — a human installs the root-owned
 operator account, sudoers policy, forced-command shim, and SSH key on the NAS.
 This is fully scripted: you generate a **self-contained provisioning script on
 your Mac**, copy that one file to the NAS, and run it with `sudo`. It is
-idempotent, `visudo`-validates the policy before installing it, and **backs up
-every system file it touches** first.
+idempotent, installs the sudoers policy **atomically** (a torn write can never
+break `sudo`), and **records the original of every system file it touches**
+first so it can revert exactly.
 
 ### Why the volume matters
 
@@ -96,10 +97,10 @@ It creates the `syrvis-operator` user with the correct DSM `synouser` syntax
 (`username password "full name" expired mail AppPrivilege` — SSH-key-only, a
 random unused password), ensures the `docker` group exists and adds the operator
 to it via `--memberadd` (which does **not** replace existing members), installs
-the sudoers policy (`visudo`-validated both before *and* after it lands), the
-shim, and the operator key. The key install is **additive** — it preserves any
-other keys on the account (e.g. a break-glass admin key) and just replaces its
-own line.
+the sudoers policy (staged under a dotted name `sudo` ignores, then renamed into
+place — atomic; `visudo`-validated too if your DSM has it), the shim, and the
+operator key. The key install is **additive** — it preserves any other keys on
+the account (e.g. a break-glass admin key) and just replaces its own line.
 
 Before changing any system file it records the **true pre-install state once**
 (under `/var/log/syrviscore-mcp-provision/original/`) and writes a
@@ -107,7 +108,10 @@ Before changing any system file it records the **true pre-install state once**
 restoring a file that existed, or removing one the script created. To undo
 everything: `sudo sh /var/log/syrviscore-mcp-provision/rollback.sh`. If
 `synouser`/`synogroup` aren't available on your DSM version, the script tells
-you to create the user / add the group via Control Panel and re-run.
+you to create the user / add the group via Control Panel and re-run. The
+operator needs a home directory for its SSH key, so **DSM's user-home service
+must be on** (Control Panel > User & Group > Advanced > Enable user home
+service) — the script says so if it can't resolve the home.
 
 ### Step 3 — pin the host key + verify (on your Mac)
 

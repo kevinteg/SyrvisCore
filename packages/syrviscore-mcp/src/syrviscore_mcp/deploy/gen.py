@@ -450,7 +450,16 @@ run "install -m 0755 -o root -g root '$TMP_SHIM' '$SHIM_PATH'"
 # --- 5. operator SSH key, locked to the shim (ADDITIVE) --------------------
 STEP="install operator SSH key"
 HOMEDIR=$(awk -F: -v u="$OPERATOR" '$1==u{print $6; exit}' /etc/passwd)
-[ -n "$HOMEDIR" ] || die "could not resolve home dir for '$OPERATOR' (enable the user-home service in DSM, then re-run). sudoers + shim are installed; run '$ROLLBACK' to revert if you want to start over."
+if [ -z "$HOMEDIR" ]; then
+    if [ "$DRYRUN" = 1 ]; then
+        # In --dry-run the account was not actually created, so /etc/passwd has
+        # no entry yet. Assume the DSM default home so the preview can finish.
+        HOMEDIR="/var/services/homes/$OPERATOR"
+        say "[dry-run] operator not created yet; a real run will resolve its home (assuming $HOMEDIR)"
+    else
+        die "could not resolve home dir for '$OPERATOR'. On DSM this usually means the user-home service is off (Control Panel > User & Group > Advanced > Enable user home service); enable it, then re-run. sudoers + shim are installed — run '$ROLLBACK' to revert if you want to start over."
+    fi
+fi
 SSH_DIR="$HOMEDIR/.ssh"
 AUTH="$SSH_DIR/authorized_keys"
 say "installing operator key -> $AUTH (forced command + source restriction, keeping any other keys)"
