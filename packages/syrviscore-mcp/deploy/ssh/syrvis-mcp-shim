@@ -77,6 +77,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "restart" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "apply" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "verify" ] && [ "${5}" = "--fix" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi

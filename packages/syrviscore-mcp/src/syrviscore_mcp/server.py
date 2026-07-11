@@ -142,6 +142,13 @@ def verify_fix(smoke: bool = False) -> dict:
     return _call(tools.verify_fix, smoke=smoke)
 
 
+@mcp.tool(annotations={"idempotentHint": True})
+def stack_apply() -> dict:
+    """Regenerate docker-compose.yaml from the declared stack (privileged;
+    idempotent). Run start/restart afterward to apply the new compose."""
+    return _call(tools.stack_apply)
+
+
 @mcp.tool
 def service_start(name: str) -> dict:
     """Start a managed Layer 2 service by name (privileged)."""

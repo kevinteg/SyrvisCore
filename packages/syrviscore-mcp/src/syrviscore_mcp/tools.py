@@ -174,6 +174,10 @@ def verify_fix(ctx: ToolContext, smoke: bool = False) -> Dict:
     return _run(ctx, "verify_fix_smoke" if smoke else "verify_fix")
 
 
+def stack_apply(ctx: ToolContext) -> Dict:
+    return _run(ctx, "stack_apply")
+
+
 def service_start(ctx: ToolContext, name: str) -> Dict:
     validate.validate_name(name)
     sandbox.assert_service_managed(ctx.runner, name)

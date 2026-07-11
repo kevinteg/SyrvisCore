@@ -9,6 +9,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis start, \
     /volume1/syrviscore/bin/syrvis stop, \
     /volume1/syrviscore/bin/syrvis restart, \
+    /volume1/syrviscore/bin/syrvis stack apply, \
     /volume1/syrviscore/bin/syrvis verify --fix --json, \
     /volume1/syrviscore/bin/syrvis verify --smoke --fix --json, \
     /volume1/syrviscore/bin/syrvis service start -- *, \
