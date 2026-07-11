@@ -286,6 +286,13 @@ class ComposeGenerator:
         if not subdomain:
             subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
 
+        # Read-only by default (safe to expose, no management). Opt into container
+        # control by declaring `management: true` on the dashboard in stack.yaml —
+        # only do that once auth is wired (rw socket = host-level authority).
+        management = bool(stack.setting("dashboard", "management", False)) if stack else False
+        socket_mount = "/var/run/docker.sock:/var/run/docker.sock" + ("" if management else ":ro")
+        data_mount = "../data:/syrvis/data" + ("" if management else ":ro")
+
         return {
             "image": image,
             "container_name": "syrviscore-dashboard",
@@ -306,10 +313,10 @@ class ComposeGenerator:
                 "OIDC_REDIRECT_URL=${OIDC_REDIRECT_URL:-}",
             ],
             "volumes": [
-                # rw: container control (start/stop/restart) is a write op on the socket.
-                "/var/run/docker.sock:/var/run/docker.sock",
+                # Socket is :ro unless management is declared (rw = container control).
+                socket_mount,
                 "../config:/syrvis/config:ro",
-                "../data:/syrvis/data",
+                data_mount,
                 # so paths.get_syrvis_home() trusts SYRVIS_HOME (it looks for the manifest).
                 "../.syrviscore-manifest.json:/syrvis/.syrviscore-manifest.json:ro",
             ],
