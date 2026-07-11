@@ -1,5 +1,7 @@
 """SyrvisCore CLI - Main entry point."""
 
+import os
+
 import click
 from dotenv import load_dotenv
 
@@ -648,6 +650,167 @@ def generate(config, output):
     except Exception as e:
         click.echo(f"Failed to generate compose file: {e}", err=True)
         raise click.Abort()
+
+
+# =============================================================================
+# Stack command group (declarative core-tier services)
+# =============================================================================
+
+
+def _regenerate_compose():
+    """Regenerate docker-compose.yaml + Traefik configs from the declared stack.
+
+    Returns (ok, message). Best-effort: needs .env (network config) present.
+    """
+    try:
+        from syrviscore import paths as p
+
+        env_path = get_env_path()
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+
+        versioned = None
+        try:
+            versioned = p.get_config_path()
+        except Exception:
+            versioned = None
+        config_path = str(versioned) if versioned and versioned.exists() else "build/config.yaml"
+
+        out = str(p.get_docker_compose_path())
+        compose = generate_compose_from_config(config_path=config_path, output_path=out)
+
+        # Keep Traefik static/dynamic config in sync too.
+        traefik_data = p.get_syrvis_home() / "data" / "traefik"
+        (traefik_data / "config").mkdir(parents=True, exist_ok=True)
+        (traefik_data / "traefik.yml").write_text(generate_traefik_static_config())
+        (traefik_data / "config" / "dynamic.yml").write_text(generate_traefik_dynamic_config())
+
+        names = ", ".join(sorted(compose["services"].keys()))
+        return True, "Regenerated {} ({} services: {})".format(out, len(compose["services"]), names)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def _post_stack_change(do_apply):
+    if do_apply:
+        ok, msg = _regenerate_compose()
+        click.echo(msg if ok else "(compose not regenerated: {})".format(msg))
+        if ok:
+            click.echo("Run 'syrvis start' to bring the stack up.")
+    else:
+        click.echo("Run 'syrvis stack apply' to regenerate compose, then 'syrvis start'.")
+
+
+@cli.group()
+def stack():
+    """Declare which core-tier containers this instance runs (config/stack.yaml)."""
+    pass
+
+
+@stack.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+def stack_list(as_json):
+    """Show declared core services and whether they're running."""
+    import json as jsonlib
+
+    from syrviscore import stack as stack_mod
+
+    try:
+        st = stack_mod.load_stack()
+    except stack_mod.StackError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+
+    running = {}
+    try:
+        from syrviscore.docker_manager import DockerManager
+
+        status = DockerManager().get_container_status()
+        running = {info["name"]: info["status"] for info in status.values()}
+    except Exception:
+        running = {}
+
+    rows = []
+    for name in stack_mod.ALL_SERVICES:
+        svc = st.services.get(name)
+        enabled = bool(svc and svc.enabled)
+        cname = stack_mod.CONTAINER_NAME[name]
+        token_env = stack_mod.TOKEN_FOR.get(name)
+        note = ""
+        if enabled and token_env and not os.getenv(token_env):
+            note = "enabled but {} not set".format(token_env)
+        rows.append(
+            {
+                "service": name,
+                "primordial": name in stack_mod.PRIMORDIAL,
+                "enabled": enabled,
+                "container": cname,
+                "running": running.get(cname, "not running"),
+                "settings": (svc.settings if svc else {}),
+                "note": note,
+            }
+        )
+
+    if as_json:
+        click.echo(jsonlib.dumps({"services": rows}, indent=2))
+        return
+
+    click.echo()
+    click.echo("SyrvisCore stack (config/stack.yaml)")
+    click.echo("=" * 52)
+    for r in rows:
+        mark = "●" if r["enabled"] else "○"
+        tag = " [primordial]" if r["primordial"] else ""
+        state = "enabled" if r["enabled"] else "disabled"
+        click.echo("  {} {:<16} {:<9} {}{}".format(mark, r["service"], state, r["running"], tag))
+        if r["note"]:
+            click.echo("      ! {}".format(r["note"]))
+    click.echo()
+
+
+@stack.command("enable")
+@click.argument("name")
+@click.option("--subdomain", default=None, help="(dashboard) subdomain to route at")
+@click.option("--apply", "do_apply", is_flag=True, help="Regenerate compose immediately")
+def stack_enable(name, subdomain, do_apply):
+    """Declare a core service enabled."""
+    from syrviscore import stack as stack_mod
+
+    settings = {"subdomain": subdomain} if subdomain else None
+    try:
+        stack_mod.set_enabled(name, True, settings)
+    except stack_mod.StackError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    click.echo("Enabled '{}' in the stack.".format(name))
+    _post_stack_change(do_apply)
+
+
+@stack.command("disable")
+@click.argument("name")
+@click.option("--apply", "do_apply", is_flag=True, help="Regenerate compose immediately")
+def stack_disable(name, do_apply):
+    """Declare a core service disabled (primordial services cannot be disabled)."""
+    from syrviscore import stack as stack_mod
+
+    try:
+        stack_mod.set_enabled(name, False)
+    except stack_mod.StackError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    click.echo("Disabled '{}' in the stack.".format(name))
+    _post_stack_change(do_apply)
+
+
+@stack.command("apply")
+def stack_apply():
+    """Regenerate docker-compose.yaml from the declared stack."""
+    ok, msg = _regenerate_compose()
+    if not ok:
+        click.echo(f"Error: {msg}", err=True)
+        raise click.Abort()
+    click.echo(msg)
+    click.echo("Run 'syrvis start' to bring the stack up (or 'syrvis restart').")
 
 
 # =============================================================================
