@@ -12,6 +12,7 @@ import docker
 from docker.errors import DockerException
 from dotenv import load_dotenv
 
+from syrviscore.compose_cmd import resolve_compose_cmd
 from syrviscore.paths import (
     get_docker_compose_path,
     get_env_path,
@@ -98,13 +99,16 @@ class DockerManager:
         validate_docker_compose_exists()
         syrvis_home = get_syrvis_home()
 
-        full_command = [
-            "docker-compose",
-            "-f",
-            str(get_docker_compose_path()),
-            "-p",
-            self.PROJECT_NAME,
-        ] + command
+        full_command = (
+            resolve_compose_cmd()
+            + [
+                "-f",
+                str(get_docker_compose_path()),
+                "-p",
+                self.PROJECT_NAME,
+            ]
+            + command
+        )
 
         result = subprocess.run(
             full_command, cwd=str(syrvis_home), capture_output=True, text=True, check=False

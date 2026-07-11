@@ -15,6 +15,7 @@ import yaml
 
 from . import exposure as exposure_mod
 from . import paths
+from .compose_cmd import resolve_compose_cmd
 from .service_schema import (
     SUBDOMAIN_RE,
     ServiceDefinition,
@@ -24,9 +25,8 @@ from .service_schema import (
 )
 from .traefik_config import ServiceTraefikConfig, get_domain_from_env
 
-# The compose command to shell out to. Core services and Layer 2 services now
-# use the same one (the audit found them split between v1 and v2).
-COMPOSE_CMD = ["docker", "compose"]
+# Core and Layer 2 both resolve the compose command at runtime (v2 plugin or v1
+# standalone), so a host with only one of them works for both.
 
 
 def _image_tag(image: str) -> str:
@@ -455,7 +455,7 @@ class ServiceManager:
     def _compose(self, name: str, compose_path: Path, *args: str, timeout: int) -> Tuple[bool, str]:
         """Run a docker compose command scoped to this service's project."""
         cmd = (
-            COMPOSE_CMD
+            resolve_compose_cmd()
             + [
                 "-p",
                 self._project_name(name),

@@ -8,8 +8,19 @@ from unittest.mock import Mock, patch
 import pytest
 from docker.errors import DockerException
 
+from syrviscore import compose_cmd
 from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
 from syrviscore.paths import set_syrvis_home
+
+
+@pytest.fixture(autouse=True)
+def _pin_compose_cmd():
+    """Pin the compose resolver to v1 so compose tests don't probe subprocess
+    (their mocks assert an exact call count) and match the 'docker-compose' argv."""
+    compose_cmd.reset_cache()
+    compose_cmd._cached = ["docker-compose"]
+    yield
+    compose_cmd.reset_cache()
 
 
 @pytest.fixture
