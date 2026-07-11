@@ -463,12 +463,19 @@ class TestComposeStructure:
 
 
 class TestDashboardAndDdns:
-    """The dashboard (always, when image present) and DDNS (gated on token)."""
+    """Optional core services are gated on the declarative stack (opt-in)."""
 
-    def test_dashboard_emitted_from_defaults(self, network_env_vars):
-        gen = ComposeGenerator("nonexistent.yaml")  # defaults include the dashboard image
+    def _gen(self):
+        gen = ComposeGenerator("nonexistent.yaml")  # defaults include dashboard + ddns images
         gen.load_config()
-        compose = gen.generate_compose()
+        return gen
+
+    def test_dashboard_emitted_when_declared(self, network_env_vars):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["dashboard"].enabled = True
+        compose = self._gen().generate_compose(stack=st)
         assert "syrviscore-dashboard" in compose["services"]
         svc = compose["services"]["syrviscore-dashboard"]
         assert svc["container_name"] == "syrviscore-dashboard"
@@ -476,22 +483,44 @@ class TestDashboardAndDdns:
         assert "/var/run/docker.sock:/var/run/docker.sock" in svc["volumes"]
         assert any("dash.${DOMAIN}" in label for label in svc["labels"])
 
+    def test_dashboard_absent_when_not_declared(self, network_env_vars):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()  # dashboard off (opt-in default)
+        assert "syrviscore-dashboard" not in self._gen().generate_compose(stack=st)["services"]
+
+    def test_dashboard_subdomain_from_stack(self, network_env_vars):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["dashboard"].enabled = True
+        st.services["dashboard"].settings["subdomain"] = "panel"
+        compose = self._gen().generate_compose(stack=st)
+        labels = compose["services"]["syrviscore-dashboard"]["labels"]
+        assert any("panel.${DOMAIN}" in label for label in labels)
+
+    def test_cloudflared_gated_by_stack(self, network_env_vars):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()  # cloudflared off
+        assert "cloudflared" not in self._gen().generate_compose(stack=st)["services"]
+        st.services["cloudflared"].enabled = True
+        assert "cloudflared" in self._gen().generate_compose(stack=st)["services"]
+
     def test_cloudflared_exposes_metrics(self, network_env_vars):
-        gen = ComposeGenerator("nonexistent.yaml")
-        gen.load_config()
-        svc = gen._generate_cloudflared_service()
+        svc = self._gen()._generate_cloudflared_service()
         assert "TUNNEL_METRICS=0.0.0.0:20241" in svc["environment"]
 
-    def test_ddns_gated_off_without_token(self, network_env_vars, monkeypatch):
-        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
-        gen = ComposeGenerator("nonexistent.yaml")
-        gen.load_config()
-        assert "cloudflare-ddns" not in gen.generate_compose()["services"]
+    def test_ddns_needs_stack_and_token(self, network_env_vars, monkeypatch):
+        from syrviscore import stack as stack_mod
 
-    def test_ddns_emitted_with_token(self, network_env_vars, monkeypatch):
+        st = stack_mod.default_stack()
+        st.services["cloudflare_ddns"].enabled = True
+        # enabled but no token -> not emitted
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+        assert "cloudflare-ddns" not in self._gen().generate_compose(stack=st)["services"]
+        # enabled + token -> emitted
         monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
-        gen = ComposeGenerator("nonexistent.yaml")
-        gen.load_config()
-        compose = gen.generate_compose()
+        compose = self._gen().generate_compose(stack=st)
         assert "cloudflare-ddns" in compose["services"]
         assert compose["services"]["cloudflare-ddns"]["image"].startswith("favonia/")
