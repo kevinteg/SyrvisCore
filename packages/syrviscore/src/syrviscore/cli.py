@@ -870,30 +870,23 @@ def generate_traefik():
 def show():
     """Show current configuration."""
     try:
-        from . import paths as p
+        from .config_reader import read_config
 
-        syrvis_home = p.get_syrvis_home()
-        env_path = p.get_env_path()
+        cfg = read_config()
 
         click.echo()
         click.echo("SyrvisCore Configuration")
         click.echo("=" * 60)
         click.echo()
-        click.echo(f"Install path:  {syrvis_home}")
-        click.echo(f"Active version: {p.get_active_version() or 'unknown'}")
+        click.echo(f"Install path:  {cfg.install_path or 'unknown'}")
+        click.echo(f"Active version: {cfg.active_version or 'unknown'}")
         click.echo()
 
-        if env_path.exists():
-            click.echo(f"Configuration ({env_path}):")
+        if cfg.values:
+            click.echo(f"Configuration ({cfg.env_path}):")
             click.echo("-" * 60)
-            for line in env_path.read_text().splitlines():
-                if line and not line.startswith("#"):
-                    # Mask sensitive values
-                    if "TOKEN" in line or "SECRET" in line or "PASSWORD" in line:
-                        key = line.split("=")[0]
-                        click.echo(f"  {key}=****")
-                    else:
-                        click.echo(f"  {line}")
+            for key, value in cfg.values.items():
+                click.echo(f"  {key}={value}")
         else:
             click.echo("No .env file found")
             click.echo("Run 'syrvis setup' to create configuration")
