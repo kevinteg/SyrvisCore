@@ -117,6 +117,9 @@ api:
   dashboard: true
   insecure: true  # Dashboard on :8080 (internal only)
 
+# Liveness endpoint served on the API entrypoint (:8080) so health checks pass.
+ping: {{}}
+
 entryPoints:
   web:
     address: ":80"
