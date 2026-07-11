@@ -30,8 +30,8 @@ DEFAULT_DOCKER_IMAGES = {
     },
     "cloudflared": {
         "image": "cloudflare/cloudflared",
-        "tag": "2025.11.1",
-        "full_image": "cloudflare/cloudflared:2025.11.1",
+        "tag": "2026.7.1",
+        "full_image": "cloudflare/cloudflared:2026.7.1",
         "description": "",
     },
     "dashboard": {
