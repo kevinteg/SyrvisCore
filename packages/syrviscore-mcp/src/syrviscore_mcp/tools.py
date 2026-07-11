@@ -120,6 +120,10 @@ def service_list(ctx: ToolContext) -> Dict:
     return _run(ctx, "service_list")
 
 
+def stack_hostnames(ctx: ToolContext) -> Dict:
+    return _run(ctx, "stack_hostnames")
+
+
 def logs(ctx: ToolContext, service: Optional[str] = None, tail: int = 100) -> Dict:
     validate.validate_tail(tail)
     if service is not None:
@@ -198,6 +202,35 @@ def service_add(ctx: ToolContext, git_url: str, confirm: str = "") -> Dict:
     if pending:
         return pending
     return _with_service_state(ctx, _run(ctx, "service_add", {"git_url": git_url}))
+
+
+def service_run(
+    ctx: ToolContext,
+    name: str,
+    image: str,
+    subdomain: Optional[str] = None,
+    exposure: str = "internal",
+    port: int = 80,
+    confirm: str = "",
+) -> Dict:
+    # service_run pulls and RUNS a container image (and may expose it to the
+    # internet), so it fails closed on the image registry allowlist AND requires
+    # a confirmation token — the same posture as service_add.
+    validate.validate_name(name)
+    validate.validate_image(image, ctx.cfg.image_allowed_registries)
+    sub = validate.validate_subdomain(subdomain) if subdomain else validate.validate_subdomain(name)
+    exp = validate.validate_exposure(exposure)
+    validate.validate_port(port)
+    args = {"name": name, "image": image, "subdomain": sub, "exposure": exp, "port": port}
+
+    current = service_list(ctx)
+    plan = {"action": "service_run", **args, "existing": current.get("services")}
+    pending = _confirm_or_plan(
+        ctx, "service_run", args, confirm, [image, name, sub, exp, port], plan
+    )
+    if pending:
+        return pending
+    return _with_service_state(ctx, _run(ctx, "service_run", args))
 
 
 def install(ctx: ToolContext, version: Optional[str] = None) -> Dict:

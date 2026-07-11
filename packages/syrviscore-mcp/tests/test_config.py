@@ -7,7 +7,7 @@ from syrviscore_mcp.errors import ConfigError
 
 GOOD = """
 [nas]
-host = "192.168.8.3"
+host = "192.168.1.10"
 ssh_target = "syrvis-nas"
 ssh_config_file = "{ssh}"
 
@@ -34,7 +34,7 @@ def _write(tmp_path, toml_text, user="syrvis-operator"):
 
 def test_load_good(tmp_path):
     cfg = load_config(str(_write(tmp_path, GOOD)))
-    assert cfg.host == "192.168.8.3"
+    assert cfg.host == "192.168.1.10"
     assert cfg.ssh_user == "syrvis-operator"
     assert cfg.syrvis_home == "/volume1/syrviscore"
 
@@ -48,7 +48,14 @@ def test_forbidden_ssh_user_rejected(tmp_path):
     with pytest.raises(ConfigError):
         load_config(str(_write(tmp_path, GOOD, user="root")))
     with pytest.raises(ConfigError):
-        load_config(str(_write(tmp_path, GOOD, user="cerebrate")))
+        load_config(str(_write(tmp_path, GOOD, user="admin")))
+
+
+def test_deployment_forbidden_ssh_user_rejected(tmp_path):
+    # A deployment adds its own human admin accounts to the generic floor.
+    cfg_text = GOOD + '\nforbidden_ssh_users = ["housekeeper"]\n'
+    with pytest.raises(ConfigError):
+        load_config(str(_write(tmp_path, cfg_text, user="housekeeper")))
 
 
 def test_non_absolute_path_rejected(tmp_path):
@@ -65,7 +72,7 @@ def test_bad_profile_rejected(tmp_path):
 
 def test_missing_host_rejected(tmp_path, monkeypatch):
     monkeypatch.delenv("SYRVISCORE_NAS_HOST", raising=False)
-    bad = GOOD.replace('host = "192.168.8.3"', 'host = ""')
+    bad = GOOD.replace('host = "192.168.1.10"', 'host = ""')
     with pytest.raises(ConfigError):
         load_config(str(_write(tmp_path, bad)))
 

@@ -35,8 +35,8 @@ class DeployConfig:
 
     sudo matches commands by their ABSOLUTE PATH, so these must be the real
     paths on YOUR NAS. They default to a /volume1 install. If the SPK installed
-    SyrvisCore on a different volume (e.g. /volume4/syrviscore — check with
-    `syrvisctl info`), generate with `--home /volume4/syrviscore` so the policy
+    SyrvisCore on a different volume (e.g. /volume2/syrviscore — check with
+    `syrvisctl info`), generate with `--home /volume2/syrviscore` so the policy
     matches the real command paths; otherwise sudo denies every command.
     """
 
@@ -109,6 +109,10 @@ _SLOT_PREDICATE = {
     "git_url": "is_giturl",
     "keep": "is_int",
     "tail": "is_int",
+    "image": "is_image",
+    "subdomain": "is_subdomain",
+    "exposure": "is_exposure",
+    "port": "is_int",
 }
 
 
@@ -178,6 +182,12 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "is_giturl()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:"
         "[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }",
+        "is_subdomain() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
+        "'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }",
+        "is_exposure()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }",
+        "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
+        "'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"
+        "(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }",
         "",
         'cmd="$SSH_ORIGINAL_COMMAND"',
         'if [ -z "$cmd" ]; then',

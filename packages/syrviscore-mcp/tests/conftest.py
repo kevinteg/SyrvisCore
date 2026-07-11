@@ -15,7 +15,7 @@ _CM_DIR = tempfile.mkdtemp(prefix="syrvis-mcp-cm-")
 
 def make_config(**overrides) -> NASConfig:
     base = dict(
-        host="192.168.8.3",
+        host="192.168.1.10",
         ssh_target="syrvis-nas",
         ssh_config_file=Path("/dev/null"),
         control_path=f"{_CM_DIR}/cm-%r@%h:%p",

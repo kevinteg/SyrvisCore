@@ -72,6 +72,14 @@ def service_list() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def stack_hostnames() -> dict:
+    """Required external DNS/tunnel state: every routed hostname, its exposure,
+    and the record to create (LAN A record for 'internal'; Cloudflare Tunnel +
+    Access for 'tunnel'). The seam a deployment reconciles against (read-only)."""
+    return _call(tools.stack_hostnames)
+
+
+@mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""
     return _call(tools.logs, service=service, tail=tail)
@@ -158,6 +166,31 @@ def service_add(git_url: str, confirm: str = "") -> dict:
     Fails closed unless the host is in safety.git_url_allowed_hosts. Two-call:
     first returns a plan+token; re-call with confirm=<token> to proceed."""
     return _call(tools.service_add, git_url=git_url, confirm=confirm)
+
+
+@mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
+def service_run(
+    name: str,
+    image: str,
+    subdomain: str = "",
+    exposure: str = "internal",
+    port: int = 80,
+    confirm: str = "",
+) -> dict:
+    """Run a Layer 2 service from a published image (privileged; pulls + RUNS an
+    image). exposure='tunnel' exposes it remotely via Cloudflare. subdomain
+    defaults to name. Fails closed unless the registry is in
+    safety.image_allowed_registries. Two-call: first returns a plan+token;
+    re-call with confirm=<token> to proceed."""
+    return _call(
+        tools.service_run,
+        name=name,
+        image=image,
+        subdomain=subdomain or None,
+        exposure=exposure,
+        port=port,
+        confirm=confirm,
+    )
 
 
 @mcp.tool

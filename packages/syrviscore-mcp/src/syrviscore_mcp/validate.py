@@ -10,8 +10,20 @@ remote.py quote and send it. Nothing reaches SSH unvalidated.
 import re
 from typing import Optional
 
-from ._cli_regexes import NAME_RE, RESERVED_NAMES, validate_version_str
+from ._cli_regexes import EXPOSURES, NAME_RE, RESERVED_NAMES, SUBDOMAIN_RE, validate_version_str
 from .errors import ValidationError
+
+# A registry-qualified, pinned image reference: host[:port]/path...[:tag][@digest].
+# Requires at least one '/' (so it is registry-qualified — the image-first path
+# only accepts registry images, never a bare Docker Hub short name). This is a
+# shape guard; validate_image additionally enforces the registry allowlist and
+# that the reference is pinned (tag != latest, or a digest).
+_IMAGE_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?"  # host[:port]
+    r"(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"  # /path (one or more segments)
+    r"(:[A-Za-z0-9._-]+)?"  # optional :tag
+    r"(@sha256:[a-f0-9]{64})?$"  # optional @digest
+)
 
 # G6 — global deny list applied to every string argument regardless of type.
 # These are the characters that could break out of an ssh remote-command,
@@ -104,6 +116,73 @@ def validate_git_url(url: str, allowed_hosts: Optional[list] = None) -> str:
             f"git host {host!r} is not in the allowed list {allowed_hosts}",
         )
     return url
+
+
+def validate_subdomain(subdomain: str) -> str:
+    """A single DNS label (mirrors service_schema.SUBDOMAIN_RE); no metachars."""
+    _reject_metachars(subdomain, "subdomain")
+    if not SUBDOMAIN_RE.match(subdomain):
+        raise ValidationError(
+            f"invalid subdomain {subdomain!r}: must be a single DNS label",
+        )
+    return subdomain
+
+
+def validate_exposure(exposure: str) -> str:
+    """'internal' (LAN-only) or 'tunnel' (remote via Cloudflare)."""
+    _reject_metachars(exposure, "exposure")
+    if exposure not in EXPOSURES:
+        raise ValidationError(
+            f"invalid exposure {exposure!r}: must be one of {sorted(EXPOSURES)}",
+        )
+    return exposure
+
+
+def validate_port(port: int) -> int:
+    """A container port Traefik forwards to (1-65535)."""
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise ValidationError("port must be an integer")
+    if not 1 <= port <= 65535:
+        raise ValidationError("port must be between 1 and 65535")
+    return port
+
+
+def validate_image(image: str, allowed_registries: Optional[list] = None) -> str:
+    """G4-style — a pinned, registry-qualified image whose registry is allowlisted.
+
+    ``service_run`` pulls and RUNS a container image, so like ``service_add`` it
+    fails CLOSED: an empty/unset ``safety.image_allowed_registries`` means
+    "disabled", never "allow any registry". The image must be pinned (a specific
+    tag, never ``:latest``, or a digest) so a run is reproducible.
+    """
+    _reject_metachars(image, "image")
+    if not _IMAGE_RE.match(image):
+        raise ValidationError(
+            f"invalid image reference {image!r}",
+            operator_hint="use a registry-qualified pinned image, e.g. ghcr.io/owner/name:1.2.3",
+        )
+    # Pinned: a digest, or a tag that is not 'latest'.
+    if "@sha256:" not in image:
+        ref = image.split("@", 1)[0]
+        last = ref.rsplit("/", 1)[-1]  # only a ':' in the final path segment is a tag
+        tag = last.rsplit(":", 1)[1] if ":" in last else None
+        if not tag:
+            raise ValidationError(
+                f"image {image!r} is not pinned: add a version tag or @sha256 digest",
+            )
+        if tag == "latest":
+            raise ValidationError(f"image {image!r} uses :latest — pin a specific version tag")
+    registry = image.split("/", 1)[0]
+    if not allowed_registries:
+        raise ValidationError(
+            "service_run is disabled: no safety.image_allowed_registries configured",
+            operator_hint="set safety.image_allowed_registries (e.g. ['ghcr.io']) to enable service_run",
+        )
+    if registry not in allowed_registries:
+        raise ValidationError(
+            f"image registry {registry!r} is not in the allowed list {allowed_registries}",
+        )
+    return image
 
 
 def validate_tail(tail: int) -> int:

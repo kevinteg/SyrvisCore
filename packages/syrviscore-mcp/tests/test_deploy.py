@@ -78,15 +78,26 @@ DENY = [
     "sudo -n /volume1/syrviscore/bin/syrvis service add -- --evil -- https://github.com/u/r.git",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep 1 --extra-flag -y",
     "/volume1/syrviscore/bin/syrvis logs -n 5 -f -- gollum",  # extra token
+    # service_run red-team: bad exposure, missing flag group, invalid subdomain
+    "sudo -n /volume1/syrviscore/bin/syrvis service run --image ghcr.io/a/b:1.0 "
+    "--subdomain cq --exposure public --port 80 -- cq",  # exposure not internal|tunnel
+    "sudo -n /volume1/syrviscore/bin/syrvis service run --image ghcr.io/a/b:1.0 "
+    "--subdomain cq --exposure tunnel -- cq",  # missing --port group -> wrong arity
+    "sudo -n /volume1/syrviscore/bin/syrvis service run --image ghcr.io/a/b:1.0 "
+    "--subdomain Bad_Sub --exposure tunnel --port 80 -- cq",  # subdomain not a DNS label
 ]
 
 ALLOW = [
     "/volume1/syrviscore/bin/syrvis status --json",
     "/volume1/syrviscore/bin/syrvis verify --smoke --json",
+    "/volume1/syrviscore/bin/syrvis stack hostnames --json",
     "/var/packages/syrviscore/target/venv/bin/syrvisctl list --json",
     "sudo -n /volume1/syrviscore/bin/syrvis service stop -- gollum",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- 0.2.0",
     "sudo -n /volume1/syrviscore/bin/syrvis service add -- https://github.com/u/r.git",
+    "sudo -n /volume1/syrviscore/bin/syrvis service run "
+    "--image ghcr.io/acme/cyberquill:1.4.0 --subdomain cyberquill "
+    "--exposure tunnel --port 8080 -- cyberquill",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep 2 -y",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- 0.2.0",

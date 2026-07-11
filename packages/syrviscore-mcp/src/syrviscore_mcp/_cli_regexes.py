@@ -9,9 +9,11 @@ copy, and a change to the CLI's rules fails the drift test until this file is
 updated to match.
 
 Sources (kept in sync):
-- VERSION_RE:    packages/syrviscore-manager/src/syrviscore_manager/paths.py
-- NAME_RE:       packages/syrviscore/src/syrviscore/service_schema.py
+- VERSION_RE:     packages/syrviscore-manager/src/syrviscore_manager/paths.py
+- NAME_RE:        packages/syrviscore/src/syrviscore/service_schema.py
+- SUBDOMAIN_RE:   packages/syrviscore/src/syrviscore/service_schema.py
 - RESERVED_NAMES: packages/syrviscore/src/syrviscore/service_schema.py
+- EXPOSURES:      packages/syrviscore/src/syrviscore/exposure.py
 """
 
 import re
@@ -25,8 +27,14 @@ VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$", re.ASCII)
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.ASCII)
 
+# service_schema.SUBDOMAIN_RE — a single DNS label used as a Traefik subdomain.
+SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", re.ASCII)
+
 # service_schema.RESERVED_NAMES — core-stack names a Layer 2 service may not use.
 RESERVED_NAMES = frozenset({"traefik", "portainer", "cloudflared", "proxy", "syrvis-macvlan"})
+
+# syrviscore.exposure.EXPOSURES — how a routed service is reached from outside.
+EXPOSURES = frozenset({"internal", "tunnel"})
 
 
 def validate_version_str(version: str) -> str:

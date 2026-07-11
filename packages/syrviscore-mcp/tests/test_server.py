@@ -13,6 +13,7 @@ EXPECTED_TOOLS = {
     "status",
     "verify",
     "service_list",
+    "stack_hostnames",
     "logs",
     "versions_list",
     "check_updates",
@@ -28,6 +29,7 @@ EXPECTED_TOOLS = {
     "service_stop",
     "service_update",
     "service_add",
+    "service_run",
     "install",
     # privileged + destructive
     "activate",
@@ -42,6 +44,7 @@ READ_ONLY = {
     "status",
     "verify",
     "service_list",
+    "stack_hostnames",
     "logs",
     "versions_list",
     "check_updates",
@@ -59,10 +62,10 @@ def _tools():
     return {t.name: t for t in tools}
 
 
-def test_all_23_tools_registered():
+def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 23
+    assert len(EXPECTED_TOOLS) == 25
 
 
 def test_destructive_tools_have_destructive_hint():

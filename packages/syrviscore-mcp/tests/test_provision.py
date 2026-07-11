@@ -11,7 +11,7 @@ PUBKEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAISAMPLE syrvis-mcp"
 
 def _render(**cfg_over):
     cfg = gen.DeployConfig(**cfg_over)
-    return gen.render_provision(cfg, PUBKEY, from_cidr="192.168.8.0/24")
+    return gen.render_provision(cfg, PUBKEY, from_cidr="192.168.1.0/24")
 
 
 def _sh_n(script: str) -> subprocess.CompletedProcess:
@@ -24,16 +24,16 @@ def test_default_script_is_valid_sh():
 
 
 def test_custom_home_is_valid_and_reparameterized():
-    script = _render(syrvis_home="/volume4/syrviscore", operator="mcp-op")
+    script = _render(syrvis_home="/volume2/syrviscore", operator="mcp-op")
     assert _sh_n(script).returncode == 0
-    assert "/volume4/syrviscore/bin/syrvis" in script
+    assert "/volume2/syrviscore/bin/syrvis" in script
     assert 'OPERATOR="mcp-op"' in script
 
 
 def test_bakes_in_key_and_source_restriction():
     script = _render()
     assert PUBKEY in script
-    assert 'from="192.168.8.0/24"' in script
+    assert 'from="192.168.1.0/24"' in script
     assert 'command="/usr/local/bin/syrvis-mcp-shim"' in script
 
 
