@@ -128,7 +128,7 @@ Every error carries the redacted argv sent + actionable operator text.
 
 ```toml
 [nas]
-host = "192.168.8.3"                      # env SYRVISCORE_NAS_HOST wins
+host = "192.168.1.3"                      # env SYRVISCORE_NAS_HOST wins
 ssh_target = "syrvis-nas"                 # Host alias in ssh_config_file
 ssh_config_file = "~/.config/syrviscore-mcp/ssh_config"
 control_path = "~/.config/syrviscore-mcp/cm-%r@%h:%p"
@@ -154,7 +154,7 @@ secret_env = "SYRVISCORE_MCP_TOKEN_SECRET"
 ttl_s = 300
 ```
 Validation on load: profile ∈ {dev,prod}; layout paths absolute; ssh_user ≠
-root/cerebrate; key file mode 0600. Dev profile substitutes operator-home paths and
+root/nasadmin; key file mode 0600. Dev profile substitutes operator-home paths and
 is **absent from sudoers** (privileged tools physically cannot reach the dev tree).
 
 ## 5. Sudoers (generated from deploy/enumerated-commands.yaml)
@@ -194,7 +194,7 @@ mandatory `--` before value args. Trailing `*` is safe because sudo runs a singl
 
 `authorized_keys` (operator user, 0600):
 ```
-restrict,command="/usr/local/bin/syrvis-mcp-shim",from="192.168.8.0/24" ssh-ed25519 AAAA… syrvis-mcp
+restrict,command="/usr/local/bin/syrvis-mcp-shim",from="192.168.1.0/24" ssh-ed25519 AAAA… syrvis-mcp
 ```
 `/usr/local/bin/syrvis-mcp-shim` (POSIX sh): reject any `$SSH_ORIGINAL_COMMAND`
 with `; & | \` $ ( ) < > newline`; word-split; match the whole invocation against

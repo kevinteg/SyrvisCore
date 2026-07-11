@@ -34,8 +34,8 @@ Traefik runs in a Docker container with its own IP address on the LAN using macv
 
 ```
 Network Architecture:
-- Synology NAS:   192.168.8.3 (ports 80/443 for DSM)
-- Traefik:        192.168.8.4 (ports 80/443 for services)
+- Synology NAS:   192.168.1.3 (ports 80/443 for DSM)
+- Traefik:        192.168.1.4 (ports 80/443 for services)
 ```
 
 **Benefits:**
@@ -105,9 +105,9 @@ ACME_EMAIL=admin@yourdomain.com
 
 # Network Configuration (macvlan)
 NETWORK_INTERFACE=ovs_eth0              # Synology uses OVS, not eth0
-NETWORK_SUBNET=192.168.8.0/24           # User's LAN subnet
-NETWORK_GATEWAY=192.168.8.1             # Router IP
-TRAEFIK_IP=192.168.8.4                  # Dedicated IP for Traefik
+NETWORK_SUBNET=192.168.1.0/24           # User's LAN subnet
+NETWORK_GATEWAY=192.168.1.1             # Router IP
+TRAEFIK_IP=192.168.1.4                  # Dedicated IP for Traefik
 
 # Optional: Cloudflare Tunnel
 CLOUDFLARE_TUNNEL_TOKEN=                # Leave blank if not using
@@ -190,9 +190,9 @@ networks:
 - Service account: `syrvis-bot` (must be in administrators group)
 - Network information:
   - Network interface name (typically `ovs_eth0` on Synology)
-  - LAN subnet (e.g., `192.168.8.0/24`)
-  - Gateway IP (router, e.g., `192.168.8.1`)
-  - Available IP for Traefik (e.g., `192.168.8.4`)
+  - LAN subnet (e.g., `192.168.1.0/24`)
+  - Gateway IP (router, e.g., `192.168.1.1`)
+  - Available IP for Traefik (e.g., `192.168.1.4`)
 - Domain name (if using Cloudflare Tunnel)
 
 #### 4.2 postinst Script Requirements
@@ -381,7 +381,7 @@ fi
 
 **Current Status:**
 - Traefik, Portainer, Cloudflared all running on test Synology
-- macvlan networking operational (Traefik on 192.168.8.4:80/443)
+- macvlan networking operational (Traefik on 192.168.1.4:80/443)
 - CLI fully functional for basic operations
 - Ready to build SPK package
 
@@ -481,7 +481,7 @@ source venv/bin/activate
 pip install -e ".[dev]"  # Editable install with dev dependencies
 
 # Testing on Synology
-export SYRVIS_HOME=/volume4/docker/syrviscore-dev
+export SYRVIS_HOME=/volume1/docker/syrviscore-dev
 syrvis generate-compose
 syrvis core start
 syrvis core status
@@ -610,7 +610,7 @@ docker_images:
 
 ### Immediate (Week 4 Completion)
 1. ✅ Traefik configuration working
-2. ⏳ Configure Cloudflare Tunnel to point to Traefik (192.168.8.4:443)
+2. ⏳ Configure Cloudflare Tunnel to point to Traefik (192.168.1.4:443)
 3. ⏳ Test actual service routing (deploy test container with Traefik labels)
 4. ⏳ Document network setup for users (how to find subnet/gateway)
 5. ⏳ Create installation guide with screenshots

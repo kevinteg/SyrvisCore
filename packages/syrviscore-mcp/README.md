@@ -59,7 +59,7 @@ therefore contain the real paths to `syrvis`/`syrvisctl` on your NAS — by
 default a `/volume1` install (`/volume1/syrviscore/bin/syrvis`,
 `/var/packages/syrviscore/target/venv/bin/syrvisctl`). If the SPK installed
 SyrvisCore on a **different volume** (check with `syrvisctl info` — e.g.
-`/volume4/syrviscore`), you must generate with `--home /volume4/syrviscore` so
+`/volume1/syrviscore`), you must generate with `--home /volume1/syrviscore` so
 the policy matches the real command paths. Otherwise sudo denies everything.
 
 ### Step 1 — generate the provisioning script (on your Mac)
@@ -77,7 +77,7 @@ ssh-keygen -t ed25519 -f ~/.ssh/syrvis_mcp_ed25519 -C syrvis-mcp
 python3 packages/syrviscore-mcp/src/syrviscore_mcp/deploy/gen.py provision \
     --home /volume1/syrviscore \
     --pubkey ~/.ssh/syrvis_mcp_ed25519.pub \
-    --from 192.168.8.0/24 \
+    --from 192.168.1.0/24 \
     > /tmp/manual_mcp_account_provision.sh
 ```
 
@@ -88,13 +88,13 @@ package is only required to *run the MCP server*, not to generate this script.)
 Read the generated script — it is plain, auditable POSIX sh — then copy it over:
 
 ```bash
-scp -O /tmp/manual_mcp_account_provision.sh cerebrate@192.168.8.3:/tmp/
+scp -O /tmp/manual_mcp_account_provision.sh nasadmin@192.168.1.3:/tmp/
 ```
 
 ### Step 2 — run it on the NAS (as root)
 
 ```bash
-ssh cerebrate@192.168.8.3
+ssh nasadmin@192.168.1.3
 sudo sh /tmp/manual_mcp_account_provision.sh --dry-run   # preview every action
 sudo sh /tmp/manual_mcp_account_provision.sh             # apply
 ```
@@ -129,7 +129,7 @@ service) — the script says so if it can't resolve the home.
 ### Step 3 — pin the host key + verify (on your Mac)
 
 ```bash
-ssh-keyscan -H 192.168.8.3 >> ~/.config/syrviscore-mcp/known_hosts   # then confirm the fingerprint
+ssh-keyscan -H 192.168.1.3 >> ~/.config/syrviscore-mcp/known_hosts   # then confirm the fingerprint
 ssh syrvis-nas 'id'                # rejected by the shim
 ssh syrvis-nas 'sudo -n /bin/sh'   # denied by the sudoers policy
 ssh syrvis-nas 'sudo -l'           # lists ONLY the enumerated commands

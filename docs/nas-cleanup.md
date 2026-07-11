@@ -9,7 +9,7 @@ networks, it is **not** on this list and should not be touched.
 Context: as of 2026-07-09 there is **no production SyrvisCore install** — these
 are the artifacts a prior/aborted install or a dev bootstrap would have left.
 Use this list to verify a clean slate before the first real install, or to
-tear down after testing. I could not SSH into the NAS (192.168.8.3) to
+tear down after testing. I could not SSH into the NAS (192.168.1.3) to
 enumerate what's actually present — my key isn't authorized yet (see the
 session summary), so this is the code-derived exhaustive list, not an observed
 inventory.
