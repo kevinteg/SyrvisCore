@@ -93,6 +93,7 @@ ALLOW = [
     "/volume1/syrviscore/bin/syrvis stack hostnames --json",
     "/var/packages/syrviscore/target/venv/bin/syrvisctl list --json",
     "sudo -n /volume1/syrviscore/bin/syrvis service stop -- gollum",
+    "sudo -n /volume1/syrviscore/bin/syrvis stack apply",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- 0.2.0",
     "sudo -n /volume1/syrviscore/bin/syrvis service add -- https://github.com/u/r.git",
     "sudo -n /volume1/syrviscore/bin/syrvis service run "

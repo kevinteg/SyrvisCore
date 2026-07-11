@@ -95,6 +95,7 @@ COMMANDS: List[Command] = [
     Command("start", "syrvis", ["start"], sudo=True, expect_json=False),
     Command("stop", "syrvis", ["stop"], sudo=True, expect_json=False),
     Command("restart", "syrvis", ["restart"], sudo=True, expect_json=False),
+    Command("stack_apply", "syrvis", ["stack", "apply"], sudo=True, expect_json=False),
     Command("verify_fix", "syrvis", ["verify"], sudo=True, flags=["--fix", "--json"]),
     Command(
         "verify_fix_smoke", "syrvis", ["verify"], sudo=True, flags=["--smoke", "--fix", "--json"]
