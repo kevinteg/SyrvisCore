@@ -483,6 +483,8 @@ class TestDashboardAndDdns:
         # read-only by default: socket + data mounted :ro (safe to expose, no management)
         assert "/var/run/docker.sock:/var/run/docker.sock:ro" in svc["volumes"]
         assert "../data:/syrvis/data:ro" in svc["volumes"]
+        # L2 service definitions must be mounted or the dashboard shows no services
+        assert "../services:/syrvis/services:ro" in svc["volumes"]
         assert any("dash.${DOMAIN}" in label for label in svc["labels"])
 
     def test_dashboard_management_makes_socket_rw(self, network_env_vars):

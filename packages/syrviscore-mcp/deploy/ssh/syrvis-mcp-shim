@@ -8,6 +8,9 @@ is_version() { printf '%s' "$1" | LC_ALL=C grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+$'
 is_name()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$'; }
 is_int()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9]{1,7}$'; }
 is_giturl()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }
+is_subdomain() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }
+is_exposure()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }
+is_image()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }
 
 cmd="$SSH_ORIGINAL_COMMAND"
 if [ -z "$cmd" ]; then
@@ -45,6 +48,9 @@ if [ $# -eq 6 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "
   set -f; exec "$@"
 fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "logs" ] && [ "${3}" = "-n" ] && is_int "${4}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "stack" ] && [ "${3}" = "hostnames" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
 if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "list" ] && [ "${3}" = "--json" ]; then
@@ -87,6 +93,9 @@ if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "add" ] && [ "${6}" = "--" ] && is_giturl "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 15 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "run" ] && [ "${6}" = "--image" ] && is_image "${7}" && [ "${8}" = "--subdomain" ] && is_subdomain "${9}" && [ "${10}" = "--exposure" ] && is_exposure "${11}" && [ "${12}" = "--port" ] && is_int "${13}" && [ "${14}" = "--" ] && is_name "${15}"; then
   set -f; exec "$@"
 fi
 if [ $# -eq 9 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "install" ] && [ "${5}" = "-y" ] && [ "${6}" = "--path" ] && [ "${7}" = "/volume1/syrviscore" ] && [ "${8}" = "--" ] && is_version "${9}"; then

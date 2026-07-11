@@ -15,6 +15,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service stop -- *, \
     /volume1/syrviscore/bin/syrvis service update -- *, \
     /volume1/syrviscore/bin/syrvis service add -- *, \
+    /volume1/syrviscore/bin/syrvis service run --image * --subdomain * --exposure * --port * -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- *, \

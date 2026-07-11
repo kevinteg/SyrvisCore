@@ -19,9 +19,10 @@ from .errors import ConfigError
 
 DEFAULT_CONFIG_PATH = "~/.config/syrviscore-mcp/config.toml"
 
-# Users that must never be the SSH operator: root is over-privileged; cerebrate
-# is the human admin account (using it would conflate human and MCP access).
-_FORBIDDEN_SSH_USERS = {"root", "cerebrate", "admin"}
+# Users that must never be the SSH operator: over-privileged / human accounts
+# (using one would conflate human and MCP access). This is the generic floor; a
+# deployment adds its own human admin accounts via safety.forbidden_ssh_users.
+_FORBIDDEN_SSH_USERS = {"root", "admin"}
 
 
 @dataclass
@@ -47,6 +48,12 @@ class NASConfig:
     managed_marker: str = "syrviscore"
     environment: str = "production"
     git_url_allowed_hosts: List[str] = field(default_factory=list)
+    # Registries an image-first `service_run` may pull from. Fails CLOSED like
+    # git_url_allowed_hosts: empty means service_run is disabled, never "any".
+    image_allowed_registries: List[str] = field(default_factory=list)
+    # Deployment-specific human accounts that must never be the SSH operator
+    # (added to the generic _FORBIDDEN_SSH_USERS floor).
+    forbidden_ssh_users: List[str] = field(default_factory=list)
 
     # [tokens]
     token_secret_env: str = "SYRVISCORE_MCP_TOKEN_SECRET"
@@ -162,6 +169,8 @@ def load_config(path: Optional[str] = None) -> NASConfig:
         managed_marker=safety.get("managed_marker", "syrviscore"),
         environment=safety.get("environment", "production"),
         git_url_allowed_hosts=list(safety.get("git_url_allowed_hosts", [])),
+        image_allowed_registries=list(safety.get("image_allowed_registries", [])),
+        forbidden_ssh_users=list(safety.get("forbidden_ssh_users", [])),
         token_secret_env=tokens.get("secret_env", "SYRVISCORE_MCP_TOKEN_SECRET"),
         token_secret_file=os.path.expanduser(tokens.get("secret_file", "")),
         token_ttl_s=int(tokens.get("ttl_s", 300)),
@@ -173,10 +182,11 @@ def load_config(path: Optional[str] = None) -> NASConfig:
         raise ConfigError("nas.ssh_target is required")
 
     cfg.ssh_user = _parse_ssh_user(ssh_config_file, cfg.ssh_target)
-    if cfg.ssh_user and cfg.ssh_user.lower() in _FORBIDDEN_SSH_USERS:
+    forbidden = _FORBIDDEN_SSH_USERS | {u.lower() for u in cfg.forbidden_ssh_users}
+    if cfg.ssh_user and cfg.ssh_user.lower() in forbidden:
         raise ConfigError(
             f"ssh User for {cfg.ssh_target!r} is {cfg.ssh_user!r} — use a dedicated "
-            f"operator account, not {sorted(_FORBIDDEN_SSH_USERS)}",
+            f"operator account, not {sorted(forbidden)}",
         )
 
     # Validate the environment label so a typo can't slip through unnoticed.

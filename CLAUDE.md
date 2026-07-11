@@ -185,14 +185,32 @@ syrvis doctor [--fix]         # Diagnose and fix issues
 syrvis config show            # Show current configuration
 syrvis compose generate       # Generate docker-compose.yaml
 
+# Core stack (declarative core-tier: config/stack.yaml)
+syrvis stack list             # Show declared core services + running state
+syrvis stack enable <svc>     # Enable a core service (--subdomain, --exposure)
+syrvis stack disable <svc>    # Disable an optional core service
+syrvis stack apply            # Regenerate docker-compose from the stack
+syrvis stack hostnames        # Required external DNS/tunnel state (--json)
+
 # Layer 2 Services (user-installable containers)
-syrvis service add <git-url>  # Add service from git repo
+syrvis service add <git-url>  # Add service from git repo (--subdomain, --exposure)
+syrvis service run <name>     # Run image-first: --image, --exposure, --port, --env
 syrvis service remove <name>  # Remove a service
 syrvis service list           # List installed services
 syrvis service start <name>   # Start a service
 syrvis service stop <name>    # Stop a service
 syrvis service update <name>  # Update from git repo
 ```
+
+## Service Exposure (internal vs tunnel)
+
+Every routed service declares an `exposure`: `internal` (LAN-only; Traefik + a
+DNS-01 cert — the only external step is a LAN DNS record → Traefik) or `tunnel`
+(remote via the Cloudflare Tunnel + Access). SyrvisCore routes both identically;
+exposure is *declared intent* consumed by `syrvis stack hostnames`, which reports
+the concrete record each host needs. SyrvisCore never touches DNS or the Cloudflare
+API — a deployment repo (e.g. home-tech) reconciles the reported state via its own
+MCP tooling. The repo stays generic: no domain, IPs, accounts, or service catalog.
 
 ## Installation Flow
 

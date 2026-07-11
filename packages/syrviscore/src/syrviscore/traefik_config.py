@@ -157,7 +157,7 @@ def generate_synology_routers_config(domain: str, nas_ip: str) -> str:
     Generate Traefik router configuration for enabled Synology services.
 
     Args:
-        domain: Base domain (e.g., konsume.org)
+        domain: Base domain (e.g., example.com)
         nas_ip: IP address of the Synology NAS
 
     Returns:

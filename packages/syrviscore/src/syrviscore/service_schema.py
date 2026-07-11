@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from . import exposure as exposure_mod
+
 # Safe identifier: what we allow as a service/container/network name.
 # Used directly as a path component and a compose project name.
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -181,6 +183,10 @@ class TraefikConfig:
     subdomain: str = ""
     port: int = 80
     middlewares: List[str] = field(default_factory=list)
+    # How the routed service is reached from outside: "internal" (LAN-only) or
+    # "tunnel" (Cloudflare Tunnel + Access). Declared intent only — SyrvisCore
+    # routes both the same; it drives the `syrvis stack hostnames` report.
+    exposure: str = exposure_mod.DEFAULT
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "TraefikConfig":
@@ -192,6 +198,7 @@ class TraefikConfig:
             subdomain=data.get("subdomain", ""),
             port=data.get("port", 80),
             middlewares=data.get("middlewares", []),
+            exposure=str(data.get("exposure") or exposure_mod.DEFAULT).strip().lower(),
         )
 
 
@@ -325,6 +332,12 @@ class ServiceDefinition:
                 raise ServiceValidationError(
                     "Invalid traefik port {!r}: must be 1-65535".format(traefik.port)
                 )
+            if not exposure_mod.is_valid(traefik.exposure):
+                raise ServiceValidationError(
+                    "Invalid traefik exposure {!r}: must be one of {}".format(
+                        traefik.exposure, ", ".join(exposure_mod.EXPOSURES)
+                    )
+                )
 
         return cls(
             name=name,
@@ -381,6 +394,7 @@ class ServiceDefinition:
                 "enabled": self.traefik.enabled,
                 "subdomain": self.traefik.subdomain,
                 "port": self.traefik.port,
+                "exposure": self.traefik.exposure,
             }
             if self.traefik.middlewares:
                 result["traefik"]["middlewares"] = self.traefik.middlewares

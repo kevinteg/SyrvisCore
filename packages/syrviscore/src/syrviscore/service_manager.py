@@ -13,8 +13,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from . import exposure as exposure_mod
 from . import paths
+from .compose_cmd import resolve_compose_cmd
 from .service_schema import (
+    SUBDOMAIN_RE,
     ServiceDefinition,
     ServiceValidationError,
     load_service_definition,
@@ -22,9 +25,18 @@ from .service_schema import (
 )
 from .traefik_config import ServiceTraefikConfig, get_domain_from_env
 
-# The compose command to shell out to. Core services and Layer 2 services now
-# use the same one (the audit found them split between v1 and v2).
-COMPOSE_CMD = ["docker", "compose"]
+# Core and Layer 2 both resolve the compose command at runtime (v2 plugin or v1
+# standalone), so a host with only one of them works for both.
+
+
+def _image_tag(image: str) -> str:
+    """Best-effort version string from a pinned image reference (for display)."""
+    ref = image.split("@", 1)[0]
+    if ":" in ref:
+        candidate = ref.rsplit(":", 1)[1]
+        if "/" not in candidate:
+            return candidate
+    return "0.0.0"
 
 
 class ServiceManager:
@@ -178,12 +190,39 @@ class ServiceManager:
 
             return True, f"Cloned service '{service.name}'", target_dir
 
-    def add(self, source: str, start: bool = True) -> Tuple[bool, str]:
+    @staticmethod
+    def _apply_overrides(
+        service: ServiceDefinition,
+        subdomain: Optional[str],
+        exposure: Optional[str],
+    ) -> None:
+        """Apply enable-time routing overrides in place (validated)."""
+        if subdomain is not None:
+            sub = subdomain.strip().lower()
+            if not SUBDOMAIN_RE.match(sub):
+                raise ServiceValidationError(
+                    "subdomain {!r} must be a single DNS label".format(subdomain)
+                )
+            service.traefik.enabled = True
+            service.traefik.subdomain = sub
+        if exposure is not None:
+            service.traefik.exposure = exposure_mod.normalize(exposure)
+
+    def add(
+        self,
+        source: str,
+        start: bool = True,
+        subdomain: Optional[str] = None,
+        exposure: Optional[str] = None,
+    ) -> Tuple[bool, str]:
         """Add a service from a git URL or registry name.
 
         Args:
             source: Git URL or registry service name
             start: Whether to start the service after adding
+            subdomain: Override the manifest's Traefik subdomain (the "servicename"
+                this install is routed at). Persisted into the local manifest.
+            exposure: Override the manifest's exposure ("internal" | "tunnel").
 
         Returns:
             Tuple of (success, message)
@@ -209,8 +248,102 @@ class ServiceManager:
                 shutil.rmtree(service_path)
             return False, f"Failed to load service: {e}"
 
-        # From here on, roll back every artifact if any step fails, so a
-        # failed add never leaves partial state that blocks a retry.
+        # Apply enable-time overrides (servicename / exposure) and persist the
+        # effective manifest, so compose, Traefik, and `list()` all agree on the
+        # routed name. Upstream formatting is only replaced when we override.
+        if subdomain is not None or exposure is not None:
+            try:
+                self._apply_overrides(service, subdomain, exposure)
+            except (ServiceValidationError, ValueError) as e:
+                shutil.rmtree(service_path, ignore_errors=True)
+                return False, "Invalid override: {}".format(e)
+            (service_path / "syrvis-service.yaml").write_text(
+                yaml.safe_dump(service.to_dict(), default_flow_style=False, sort_keys=False)
+            )
+
+        return self._install_from_definition(service, service_path, start)
+
+    def add_image(
+        self,
+        name: str,
+        image: str,
+        subdomain: Optional[str] = None,
+        exposure: str = exposure_mod.DEFAULT,
+        port: int = 80,
+        environment: Optional[List[str]] = None,
+        description: str = "",
+        start: bool = True,
+    ) -> Tuple[bool, str]:
+        """Run a Layer 2 service straight from a published image (no git repo).
+
+        This is the "image-first" path: a caller (e.g. home-tech via the MCP)
+        hands SyrvisCore an image reference plus how to route it, and SyrvisCore
+        synthesizes a manifest, validates it through the same trust boundary as a
+        git-sourced service, and runs it. ``exposure="tunnel"`` marks it for
+        remote access — surfaced by ``syrvis stack hostnames`` for the deployment
+        to reconcile (Cloudflare Tunnel route + Access).
+
+        Args:
+            name: Service name (also the container/project name).
+            image: Pinned image reference (no ``:latest``), e.g. a GHCR tag.
+            subdomain: Traefik subdomain to route at (defaults to ``name``).
+            exposure: "internal" (LAN-only) or "tunnel" (remote via Cloudflare).
+            port: Container port Traefik forwards to.
+            environment: ``KEY=VALUE`` runtime env entries.
+            description: Optional human description.
+            start: Start the service after creating it.
+        """
+        self._ensure_directories()
+        try:
+            validate_service_name(name, "service name")
+        except ServiceValidationError as e:
+            return False, str(e)
+
+        service_path = self.services_dir / name
+        if service_path.exists():
+            return False, "Service '{}' already exists (remove it first, or use update)".format(
+                name
+            )
+
+        manifest: Dict[str, Any] = {
+            "name": name,
+            "version": _image_tag(image),
+            "image": image,
+        }
+        if description:
+            manifest["description"] = description
+        if environment:
+            manifest["environment"] = list(environment)
+        manifest["traefik"] = {
+            "enabled": True,
+            "subdomain": (subdomain or name).strip().lower(),
+            "port": port,
+            "exposure": exposure,
+        }
+
+        try:
+            service = ServiceDefinition.from_dict(manifest)
+        except (ServiceValidationError, ValueError) as e:
+            return False, "Invalid service: {}".format(e)
+        service.source_url = image
+
+        # Persist the synthesized manifest so the install is self-describing and
+        # `list()` / regeneration read the same effective routing.
+        service_path.mkdir(parents=True, exist_ok=True)
+        (service_path / "syrvis-service.yaml").write_text(
+            yaml.safe_dump(service.to_dict(), default_flow_style=False, sort_keys=False)
+        )
+        return self._install_from_definition(service, service_path, start)
+
+    def _install_from_definition(
+        self, service: ServiceDefinition, service_path: Path, start: bool
+    ) -> Tuple[bool, str]:
+        """Materialize + (optionally) start a loaded/synthesized service.
+
+        Rolls back every artifact if any step fails, so a failed install never
+        leaves partial state that blocks a retry. Shared by the git-sourced
+        :meth:`add` and the image-first :meth:`add_image`.
+        """
         try:
             service_data_dir = self.data_dir / service.name
             service_data_dir.mkdir(parents=True, exist_ok=True)
@@ -235,12 +368,30 @@ class ServiceManager:
                 success, msg = self._start_service(service.name, compose_path)
                 if not success:
                     raise RuntimeError(f"failed to start: {msg}")
+                self._reload_traefik()
                 return True, f"Service '{service.name}' added and started"
 
+            self._reload_traefik()
             return True, f"Service '{service.name}' added (not started)"
         except Exception as e:
             self._rollback_add(service.name)
             return False, f"Service '{service.name}' not added ({e})"
+
+    def _reload_traefik(self) -> None:
+        """Restart Traefik so it loads a newly written / removed L2 dynamic config.
+
+        Traefik's file-provider watch does not reliably fire for files added to a
+        subdirectory on Synology bind mounts, so a new route can sit unloaded
+        until Traefik re-reads ``/config``. Restarting the container forces that.
+        Best-effort: a failure here never fails the service operation (the manual
+        fallback is ``docker restart traefik``).
+        """
+        try:
+            import docker
+
+            docker.from_env().containers.get("traefik").restart(timeout=10)
+        except Exception:  # noqa: BLE001 - best-effort; never fail the op
+            pass
 
     def _rollback_add(self, name: str) -> None:
         """Remove every artifact created for a service (best-effort)."""
@@ -322,7 +473,7 @@ class ServiceManager:
     def _compose(self, name: str, compose_path: Path, *args: str, timeout: int) -> Tuple[bool, str]:
         """Run a docker compose command scoped to this service's project."""
         cmd = (
-            COMPOSE_CMD
+            resolve_compose_cmd()
             + [
                 "-p",
                 self._project_name(name),
@@ -376,8 +527,9 @@ class ServiceManager:
             self._stop_service(name, compose_path)
             compose_path.unlink()
 
-        # Remove Traefik config
+        # Remove Traefik config + reload so the route is dropped
         self.traefik_config.remove_config(name)
+        self._reload_traefik()
 
         # Remove service definition
         if service_dir.exists():
@@ -428,6 +580,8 @@ class ServiceManager:
                         "status": status,
                         "url": url,
                         "description": service.description,
+                        "subdomain": service.traefik.subdomain if service.traefik.enabled else "",
+                        "exposure": (service.traefik.exposure if service.traefik.enabled else None),
                     }
                 )
             except Exception:

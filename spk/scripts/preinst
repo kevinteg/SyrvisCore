@@ -50,7 +50,7 @@ log_info "  Working directory: $(pwd)"
 log_info "  PATH: $PATH"
 
 # Determine the volume the package installs to (from SYNOPKG_PKGDEST,
-# e.g. /volume4/@appstore/syrviscore -> /volume4). The old check against
+# e.g. /volume1/@appstore/syrviscore -> /volume1). The old check against
 # ${pkgwizard_volume}/docker validated a legacy path this package never
 # uses and could hard-fail perfectly valid installs.
 PKG_VOLUME="/$(echo "${SYNOPKG_PKGDEST:-/volume1}" | cut -d/ -f2)"

@@ -77,7 +77,7 @@ def get_package_volume() -> Optional[str]:
     3. Location of this module
 
     Returns:
-        Volume path (e.g., "/volume4") or None if not detectable
+        Volume path (e.g., "/volume1") or None if not detectable
     """
 
     def _volume_of(path_str: str) -> Optional[str]:

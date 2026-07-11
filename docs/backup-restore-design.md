@@ -56,7 +56,7 @@ X.Y.Z.tar.gz
   "reason": "pre-upgrade",
   "previous_version": null,
   "upgraded_to": "0.1.13",
-  "syrvis_home": "/volume4/syrviscore"
+  "syrvis_home": "/volume1/syrviscore"
 }
 ```
 
@@ -77,7 +77,7 @@ Installing SyrvisCore service...
   Target version:  0.1.13
 
 [1/5] Creating backup of current state...
-      Backup: /volume4/syrviscore/backups/0.1.12.tar.gz
+      Backup: /volume1/syrviscore/backups/0.1.12.tar.gz
 
 [2/5] Downloading syrviscore-0.1.13...
 ...
@@ -151,13 +151,13 @@ Restore from backup (for disaster recovery):
 syrvisctl restore
 # Output:
 # Available backups:
-#   1. 0.1.12 (2025-12-26) - /volume4/syrviscore/backups/0.1.12.tar.gz
-#   2. 0.1.11 (2025-12-25) - /volume4/syrviscore/backups/0.1.11.tar.gz
+#   1. 0.1.12 (2025-12-26) - /volume1/syrviscore/backups/0.1.12.tar.gz
+#   2. 0.1.11 (2025-12-25) - /volume1/syrviscore/backups/0.1.11.tar.gz
 #
 # Select backup [1]:
 
 # Restore from specific file (disaster recovery)
-syrvisctl restore ~/syrviscore-backup-0.1.12.tar.gz --path /volume4/syrviscore
+syrvisctl restore ~/syrviscore-backup-0.1.12.tar.gz --path /volume1/syrviscore
 ```
 
 ### syrvisctl backup list (new)
@@ -177,7 +177,7 @@ Available backups:
   0.1.11    2025-12-25  2.1 MB  pre-upgrade
   0.1.10    2025-12-24  2.0 MB  pre-upgrade
 
-  Location: /volume4/syrviscore/backups/
+  Location: /volume1/syrviscore/backups/
 ```
 
 ### syrvisctl backup cleanup (new)

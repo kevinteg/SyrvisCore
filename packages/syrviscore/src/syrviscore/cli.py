@@ -48,20 +48,31 @@ def service():
 @service.command("add")
 @click.argument("source")
 @click.option("--no-start", is_flag=True, help="Don't start the service after adding")
-def service_add(source, no_start):
+@click.option("--subdomain", default=None, help="Override the routed subdomain (servicename)")
+@click.option(
+    "--exposure",
+    type=click.Choice(["internal", "tunnel"]),
+    default=None,
+    help="internal = LAN-only; tunnel = remote via Cloudflare",
+)
+def service_add(source, no_start, subdomain, exposure):
     """Add a service from a git URL.
 
     SOURCE can be a git repository URL containing a syrvis-service.yaml file.
+    --subdomain / --exposure override the manifest's routing at enable time.
 
     Examples:
         syrvis service add https://github.com/user/syrvis-gollum.git
+        syrvis service add https://github.com/user/svc.git --subdomain wiki --exposure tunnel
     """
     privilege.ensure_elevated("Adding services requires elevated privileges.")
     try:
         from syrviscore.service_manager import ServiceManager
 
         manager = ServiceManager()
-        success, message = manager.add(source, start=not no_start)
+        success, message = manager.add(
+            source, start=not no_start, subdomain=subdomain, exposure=exposure
+        )
 
         if success:
             click.echo(message)
@@ -74,6 +85,59 @@ def service_add(source, no_start):
         raise click.Abort()
     except Exception as e:
         click.echo(f"Failed to add service: {e}", err=True)
+        raise click.Abort()
+
+
+@service.command("run")
+@click.argument("name")
+@click.option("--image", required=True, help="Pinned image reference (e.g. a GHCR tag)")
+@click.option("--subdomain", default=None, help="Subdomain to route at (defaults to NAME)")
+@click.option(
+    "--exposure",
+    type=click.Choice(["internal", "tunnel"]),
+    default="internal",
+    help="internal = LAN-only; tunnel = remote via Cloudflare",
+)
+@click.option("--port", type=int, default=80, help="Container port Traefik forwards to")
+@click.option("--env", "env_vars", multiple=True, help="KEY=VALUE runtime env (repeatable)")
+@click.option("--description", default="", help="Human description")
+@click.option("--no-start", is_flag=True, help="Create but don't start the service")
+def service_run(name, image, subdomain, exposure, port, env_vars, description, no_start):
+    """Run a Layer 2 service straight from a published image (no git repo).
+
+    The image-first path: hand SyrvisCore an image + how to route it, and it
+    synthesizes a validated manifest and runs it. This is what home-tech drives
+    over MCP for image-only services.
+
+    Examples:
+        syrvis service run cyberquill --image ghcr.io/acme/cyberquill:1.4.0 \\
+            --exposure tunnel --port 8080
+    """
+    privilege.ensure_elevated("Running services requires elevated privileges.")
+    try:
+        from syrviscore.service_manager import ServiceManager
+
+        manager = ServiceManager()
+        success, message = manager.add_image(
+            name,
+            image,
+            subdomain=subdomain,
+            exposure=exposure,
+            port=port,
+            environment=list(env_vars),
+            description=description,
+            start=not no_start,
+        )
+        if success:
+            click.echo(message)
+        else:
+            click.echo(f"Error: {message}", err=True)
+            raise click.Abort()
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.Abort()
+    except Exception as e:
+        click.echo(f"Failed to run service: {e}", err=True)
         raise click.Abort()
 
 
@@ -780,14 +844,24 @@ def stack_list(as_json):
 @stack.command("enable")
 @click.argument("name")
 @click.option("--subdomain", default=None, help="(dashboard) subdomain to route at")
+@click.option(
+    "--exposure",
+    type=click.Choice(["internal", "tunnel"]),
+    default=None,
+    help="internal = LAN-only; tunnel = remote via Cloudflare",
+)
 @click.option("--apply", "do_apply", is_flag=True, help="Regenerate compose immediately")
-def stack_enable(name, subdomain, do_apply):
+def stack_enable(name, subdomain, exposure, do_apply):
     """Declare a core service enabled."""
     from syrviscore import stack as stack_mod
 
-    settings = {"subdomain": subdomain} if subdomain else None
+    settings = {}
+    if subdomain:
+        settings["subdomain"] = subdomain
+    if exposure:
+        settings["exposure"] = exposure
     try:
-        stack_mod.set_enabled(name, True, settings)
+        stack_mod.set_enabled(name, True, settings or None)
     except stack_mod.StackError as e:
         click.echo(f"Error: {e}", err=True)
         raise click.Abort()
@@ -820,6 +894,74 @@ def stack_apply():
         raise click.Abort()
     click.echo(msg)
     click.echo("Run 'syrvis start' to bring the stack up (or 'syrvis restart').")
+
+
+@stack.command("hostnames")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@click.option(
+    "--exposure",
+    type=click.Choice(["internal", "tunnel"]),
+    default=None,
+    help="Only show hosts with this exposure",
+)
+def stack_hostnames(as_json, exposure):
+    """Report the external DNS / tunnel state this instance needs.
+
+    Every hostname SyrvisCore routes, its exposure, and the record a deployment
+    must create: a LAN DNS A record for 'internal', a Cloudflare Tunnel route +
+    Access policy for 'tunnel'. This is the seam home-tech reconciles against.
+    """
+    import json as jsonlib
+
+    from syrviscore import hostnames as hostnames_mod
+
+    # Load .env so DOMAIN / TRAEFIK_IP reflect the configured instance.
+    try:
+        env_path = get_env_path()
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    except Exception:
+        pass
+
+    report = hostnames_mod.build_report()
+    entries = report.get("entries", [])
+    if exposure:
+        entries = [e for e in entries if e["exposure"] == exposure]
+
+    if as_json:
+        out = dict(report)
+        out["entries"] = entries
+        click.echo(jsonlib.dumps(out, indent=2))
+        return
+
+    if report.get("error"):
+        click.echo("Could not read config: {}".format(report["error"]), err=True)
+        raise click.Abort()
+
+    domain = report.get("domain") or "(domain unset)"
+    traefik_ip = report.get("traefik_ip") or "(TRAEFIK_IP unset)"
+    click.echo()
+    click.echo("Required external state for {}".format(domain))
+    click.echo("=" * 60)
+    if not entries:
+        click.echo("  (no routed hostnames)")
+        click.echo()
+        return
+
+    internal = [e for e in entries if e["exposure"] == "internal"]
+    tunnel = [e for e in entries if e["exposure"] == "tunnel"]
+
+    if internal:
+        click.echo("\n  LOCAL (add a LAN DNS A record -> {}):".format(traefik_ip))
+        for e in internal:
+            state = "" if e["enabled"] else "  [disabled]"
+            click.echo("    {:<28} A   {}{}".format(e["hostname"], traefik_ip, state))
+    if tunnel:
+        click.echo("\n  REMOTE (Cloudflare Tunnel public hostname + Access policy):")
+        for e in tunnel:
+            state = "" if e["enabled"] else "  [disabled]"
+            click.echo("    {:<28} tunnel + Access{}".format(e["hostname"], state))
+    click.echo()
 
 
 # =============================================================================

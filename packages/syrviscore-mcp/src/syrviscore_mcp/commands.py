@@ -28,6 +28,10 @@ KIND_NAME = "name"
 KIND_GIT_URL = "git_url"
 KIND_KEEP = "keep"
 KIND_TAIL = "tail"
+KIND_IMAGE = "image"
+KIND_SUBDOMAIN = "subdomain"
+KIND_EXPOSURE = "exposure"
+KIND_PORT = "port"
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ COMMANDS: List[Command] = [
         flags=["-n", FlagValue(Slot("tail", KIND_TAIL))],
         positional=Slot("service", KIND_NAME, optional=True),
     ),
+    Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
     Command("versions_list", "syrvisctl", ["list"], read_only=True, flags=["--json"]),
     Command("check_updates", "syrvisctl", ["check"], read_only=True, flags=["--json"]),
     Command("info", "syrvisctl", ["info"], read_only=True, flags=["--json"]),
@@ -125,6 +130,27 @@ COMMANDS: List[Command] = [
         sudo=True,
         expect_json=False,
         positional=Slot("git_url", KIND_GIT_URL),
+        timeout_s=600,
+    ),
+    Command(
+        "service_run",
+        "syrvis",
+        ["service", "run"],
+        sudo=True,
+        expect_json=False,
+        # Fixed flag order mirrors remote.build_remote_tokens so the shim matches
+        # the real argv exactly. name is the trailing positional (after '--').
+        flags=[
+            "--image",
+            FlagValue(Slot("image", KIND_IMAGE)),
+            "--subdomain",
+            FlagValue(Slot("subdomain", KIND_SUBDOMAIN)),
+            "--exposure",
+            FlagValue(Slot("exposure", KIND_EXPOSURE)),
+            "--port",
+            FlagValue(Slot("port", KIND_PORT)),
+        ],
+        positional=Slot("name", KIND_NAME),
         timeout_s=600,
     ),
     Command(

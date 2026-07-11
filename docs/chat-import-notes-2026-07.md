@@ -34,7 +34,7 @@ An SPK is a **plain `tar` (NOT gzipped)** whose top level contains, at minimum,
 | `scripts` | **directory** named `scripts/` (per official DSM 7 docs) | include the dir directly | see note below |
 
 Error taxonomy learned by installing repeatedly on the real NAS (DSM 7.1,
-`/volume4`, Synology avoton):
+`/volume1`, Synology avoton):
 
 - **263** — invalid/unsortable format. Root cause was gzipping the *outer* archive.
   Fix: outer archive is uncompressed `tar cf`.

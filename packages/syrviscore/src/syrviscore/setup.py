@@ -96,7 +96,7 @@ def get_default_network_settings() -> dict:
         if result.returncode == 0:
             for line in result.stdout.split("\n"):
                 if "inet " in line:
-                    # Extract IP from "inet 192.168.8.3/24 ..."
+                    # Extract IP from "inet 192.168.1.10/24 ..."
                     parts = line.strip().split()
                     if len(parts) >= 2:
                         ip_cidr = parts[1]

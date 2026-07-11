@@ -39,6 +39,10 @@ _KIND_VALIDATORS = {
     "git_url": lambda v, cfg: validate.validate_git_url(v, cfg.git_url_allowed_hosts),
     "keep": lambda v, cfg: str(validate.validate_keep(v)),
     "tail": lambda v, cfg: str(validate.validate_tail(v)),
+    "image": lambda v, cfg: validate.validate_image(v, cfg.image_allowed_registries),
+    "subdomain": lambda v, cfg: validate.validate_subdomain(v),
+    "exposure": lambda v, cfg: validate.validate_exposure(v),
+    "port": lambda v, cfg: str(validate.validate_port(v)),
 }
 
 

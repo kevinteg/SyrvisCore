@@ -124,7 +124,7 @@ fi
 if [ -z "$HOME_DIR" ]; then
     # fresh install: no prior home. syrvisctl install --path will create it.
     warn "no existing SYRVIS_HOME found; this looks like a fresh install"
-    die "pass --home DIR to choose the install location (e.g. --home /volume4/syrviscore)"
+    die "pass --home DIR to choose the install location (e.g. --home /volume1/syrviscore)"
 fi
 log "SYRVIS_HOME: $HOME_DIR"
 # NB: `syrvisctl info --json` emits the key "active" (the manifest FILE uses

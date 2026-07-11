@@ -35,6 +35,15 @@ class TestRegexDrift:
         src = _extract("NAME_RE", "packages/syrviscore/src/syrviscore/service_schema.py")
         assert _cli_regexes.NAME_RE.pattern == src
 
+    def test_subdomain_re_matches_source(self):
+        src = _extract("SUBDOMAIN_RE", "packages/syrviscore/src/syrviscore/service_schema.py")
+        assert _cli_regexes.SUBDOMAIN_RE.pattern == src
+
+    def test_exposures_match_source(self):
+        text = (REPO / "packages/syrviscore/src/syrviscore/exposure.py").read_text()
+        assert 'INTERNAL = "internal"' in text and 'TUNNEL = "tunnel"' in text
+        assert _cli_regexes.EXPOSURES == frozenset({"internal", "tunnel"})
+
     def test_reserved_names_match_source(self):
         text = (REPO / "packages/syrviscore/src/syrviscore/service_schema.py").read_text()
         m = re.search(r"RESERVED_NAMES\s*=\s*frozenset\((\{[^}]+\})\)", text)
