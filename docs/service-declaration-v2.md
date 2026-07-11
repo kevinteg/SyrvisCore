@@ -3,7 +3,7 @@
 **Status:** Proposed · **Audience:** SyrvisCore core · **Date:** 2026-07-11
 **Companion:** [wiki/05 Layer 2 Services](wiki/05-layer2-services.md), [wiki/07 Schema Reference](wiki/07-service-schema-reference.md), [home-tech-provisioning-requirement.md](home-tech-provisioning-requirement.md)
 
-We just shipped the exposure model and ran our first Layer 2 service end to end (cyberquill). This
+We just shipped the exposure model and ran our first Layer 2 service end to end. This
 doc proposes the next iteration of the service declaration + flow, with one north star:
 
 > **Adding a new service should be trivial, honest about what it can't do, and safe by default.**
@@ -202,5 +202,35 @@ syrvis stack apply --from desired.yaml   # converge core stack + L2 set to match
 | **4 — convergence** | `stack apply --from` with plan/dry-run/`on_undeclared` policy ✅; `verify` extended to the L2 set ✅; the MCP `stack_apply_from` tool remains (needs a base64url transport slot through the forced-command shim's charset whitelist) | ✅ CLI/library shipped; MCP tool pending |
 | **5 — non-HTTP (if needed)** | explicit reject *or* `traefik.protocol: tcp/udp` | deferred until a concrete need |
 
-Phases 1–4 shipped 2026-07-11 (additive, backward-compatible, audited). Remaining follow-ups:
-pull-before-run diagnostics, keep-manifest-on-start-failure, and the MCP convergence tool.
+Phases 1–4 shipped 2026-07-11 (additive, backward-compatible, audited).
+
+### Remaining follow-ups
+
+Friction surfaced (2026-07-11) once env vars and data volumes became load-bearing
+for real Layer 2 services:
+
+- **`user:` / PUID-GID volume ownership** — today an `rw` bind-mount dir is made
+  blanket `0777` so a non-root container UID can write to it (see
+  [Layer 2 how-to](wiki/05-layer2-services.md#persistent-data-volumes)). That
+  works but is coarse. A per-service `user: "uid:gid"` (or `PUID`/`PGID`) field
+  would let SyrvisCore `chown` the dir to the container's actual UID and drop the
+  world-writable bit — least-privilege for persistent data.
+- **MCP rich-config transport** — the `service_declare` MCP tool carries only
+  `image`/`subdomain`/`exposure`/`port`/`enabled`/`critical`. A declaration that
+  needs `environment` or `volumes` (the common case) therefore **can't** be
+  expressed as one tool call; it must be **file-pushed** into `services.d/` (the
+  declaration copied to the NAS, e.g. over `tar`-over-`ssh`, then `reconcile`).
+  Close this by either (a) blessing the file-push as the sanctioned transport and
+  giving the MCP a `services_d_put` tool that validates + writes one declaration
+  file through the forced-command shim's charset whitelist (base64url payload), or
+  (b) a whole-declaration `service_apply` tool. Either unblocks the pending
+  `stack_apply_from` tool too.
+- **pull-before-run diagnostics** — `docker compose pull` first, so a typo'd tag
+  fails as *"image not pullable"* instead of an opaque rollback line. (Its runtime
+  cousin: a service can pull and start clean yet be silently mis-configured, e.g.
+  an image that falls back to a demo mode when a required var is unset — the fix
+  there is operational, a post-deploy health/status check, documented in the
+  how-to.)
+- **keep-manifest-on-start-failure** — on a failed *start* (vs. failed
+  *validate*), keep the definition + compose on disk so the user can fix env/tag
+  and `service start` rather than re-run the whole `add`.

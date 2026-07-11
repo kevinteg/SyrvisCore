@@ -75,6 +75,8 @@ restart: unless-stopped         # no | always | on-failure | unless-stopped
 | `networks` | | list | each a valid name; `proxy` is always included |
 | `config_templates` | | list | `{source, dest}` — both relative subpaths (no absolute, no `..`) |
 | `restart` | | string | `no` \| `always` \| `on-failure` \| `unless-stopped` |
+| `enabled` | | bool | orchestration key (default `true`); `false` → declared but not run. Only meaningful in a `services.d/` declaration — see [Declarative loading](05-layer2-services.md#declarative-loading--servicesd--reconcile). |
+| `critical` | | bool | orchestration key (default `false`); `true` → this service's failure makes a `reconcile` run report the stack unhealthy instead of merely degraded. |
 
 Any key **not** in this list is rejected — this is what stops a manifest smuggling `privileged`,
 `cap_add`, `devices`, `network_mode`, etc.
@@ -110,6 +112,16 @@ Refused:
 
 Containment is re-checked when the compose file is generated, so a value that somehow reached that
 layer unvalidated still can't escape the service's own data directory.
+
+**On-disk behavior of a bind mount** (handled for you, but worth knowing):
+
+- The host source dir is **pre-created** — DSM's Docker refuses to auto-create it, so `up` would
+  otherwise fail with *"Bind mount failed: … does not exist"*.
+- An `rw` source dir is made **`0777`** so a non-root container UID can write to it (a root-owned dir
+  would shadow the image's volume and crash the app). `ro` dirs get no write bit. A narrower,
+  per-service ownership control (a `user:`/PUID-GID field) is on the [roadmap](service-declaration-v2.md).
+- `syrvis service start <name>` **regenerates the compose file first**, so a volume dir pruned or
+  re-permissioned out from under a service is re-created before the container starts (drift self-heal).
 
 ## The v2 fields (healthcheck, env_file, resources)
 

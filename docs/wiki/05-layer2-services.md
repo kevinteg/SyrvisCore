@@ -129,6 +129,146 @@ filesystem paths and a compose file that root starts. The schema is therefore st
 
 ---
 
+## Configuring a service
+
+Routing gets a service *reachable*; two more things get it *working* — its
+environment and its persistent storage. Both are declared in the manifest (or as
+flags on `service run`), and both have a sharp edge worth knowing.
+
+### Environment variables
+
+The container's config almost always comes from env vars. Declare them inline:
+
+```yaml
+environment:
+  - "APP_MODE=production"
+  - "LOG_LEVEL=info"
+```
+
+…or pass them on the image-first path (repeat `--env` per variable):
+
+```bash
+syrvis service run myapp \
+  --image ghcr.io/example/myapp:1.4.0 --subdomain app --exposure internal --port 8080 \
+  --env APP_MODE=production --env LOG_LEVEL=info
+```
+
+Each entry must be `KEY=VALUE` with `KEY` matching `[A-Za-z_][A-Za-z0-9_]*` — a
+bare `KEY` (pass-through-from-host) is **rejected**, because a service must not
+silently inherit the host environment. A manifest that carries inline
+`environment:` is written `0600` (the values may be secrets).
+
+**Secrets belong in `env_file`, not the manifest.** Point at a data-dir-relative
+file; it is created empty and clamped to `0600` at install, and never leaves the
+NAS:
+
+```yaml
+env_file: "secrets.env"     # → $SYRVIS_HOME/data/<name>/secrets.env, 0600
+```
+
+> **Verify the env actually took — a service can come up "healthy" but
+> mis-configured.** Some images *silently* fall back to a built-in demo/sample
+> mode when a required variable is unset: the container is `running`, Traefik is
+> green, the health endpoint returns 200 — and every value it serves is fake.
+> After any install or update, check the app's own health/status endpoint, not
+> just container state. Green ≠ configured.
+
+### Persistent data volumes
+
+Anything a service must keep across a restart or an image update — a database, an
+upload dir — needs a declared volume. Use a **relative** host path; it resolves
+under the service's own data dir (`$SYRVIS_HOME/data/<name>/`) and survives
+updates:
+
+```yaml
+volumes:
+  - "data:/data:rw"          # → $SYRVIS_HOME/data/<name>/data  mounted at /data
+```
+
+On the image-first path: `--volume data:/data:rw`.
+
+Three things SyrvisCore handles so a bind mount actually works on DSM:
+
+1. **The host directory is pre-created.** DSM's Docker refuses to auto-create a
+   bind-mount source, so `up` would fail with *"Bind mount failed: … does not
+   exist"*. SyrvisCore `mkdir`s it first.
+2. **`rw` dirs are made world-writable (`0777`).** Most images run as a
+   non-root UID; a root-owned host dir would shadow the image's volume and the app
+   would crash-looping-fail to write. `0777` is the pragmatic fix today (a
+   narrower, per-service `user:`/PUID field is on the [roadmap](service-declaration-v2.md)).
+   `ro` mounts get no write bit.
+3. **`start` self-heals volume-dir drift.** `syrvis service start <name>`
+   regenerates the compose file first, so a directory that was pruned or
+   re-permissioned out from under a service is re-created before the container
+   comes up.
+
+> **Why relative, not a named volume, for data you care about:** a service that
+> declares no volume (or an anonymous one) loses its data to a fresh anonymous
+> volume on **every** update. The relative bind under `data/<name>/` is the
+> durable, backed-up-by-DR location — see [Disaster Recovery](06-disaster-recovery.md).
+
+---
+
+## Declarative loading — `services.d/` + `reconcile`
+
+Everything above is imperative (`service run/add/remove`). The **declarative**
+model — the one built for infrastructure-as-code, driven by an external
+deployment repo, an agent, or CI — is a directory of one-service-per-file
+declarations that SyrvisCore reconciles reality to:
+
+```
+$SYRVIS_HOME/config/services.d/
+├── myapp.yaml          # filename (minus .yaml) IS the service name
+└── uptime-kuma.yaml
+```
+
+Each file is a full `syrvis-service.yaml` plus two orchestration keys:
+
+```yaml
+name: myapp
+image: ghcr.io/example/myapp:1.4.0
+enabled: true      # false → declared but not run (kept in the desired set)
+critical: false    # true → its failure makes the whole stack unhealthy
+traefik: { enabled: true, subdomain: app, port: 8080, exposure: internal }
+environment: ["APP_MODE=production"]
+volumes: ["data:/data:rw"]
+```
+
+Then converge:
+
+```bash
+syrvis reconcile --dry-run       # side-effect-free plan (load → plan → apply)
+syrvis reconcile -y              # apply it
+syrvis reconcile --prune remove  # additionally remove installed-but-undeclared services
+```
+
+The engine's guarantees are what make this safe to drive from a script or an agent:
+
+- **Per-file, per-service failure isolation** — a non-critical service that fails
+  to come up is reported `degraded` and **never blocks the rest**; only a
+  `critical` failure makes the run unhealthy.
+- **An invalid file fails the run loudly** (fatal by default) — a malformed
+  declaration is never silently skipped.
+- **`reconcile` without `--prune` never removes anything** — deleting a file
+  *undeclares* a service (reported `unmanaged`); actual teardown stays an explicit
+  `--prune` choice.
+- **The boot hook runs `reconcile --boot`**, so the declared set is restored after
+  a NAS reboot with no manual step.
+
+This is the seam an external deployment repo drives: it keeps `services.d/` under
+version control, pushes it to the NAS (e.g. over `tar`-over-`ssh`), and runs
+`reconcile` — no MCP required, though the MCP's `reconcile`/`service_declare` tools
+drive the same steps when an agent does it instead.
+
+> **Transport note:** the MCP `service_declare` tool today carries only
+> image/subdomain/exposure/port/enabled/critical — **not** `environment` or
+> `volumes`. A declaration that needs either is therefore **file-pushed** (its
+> `.yaml` copied into `services.d/`, then reconciled) rather than expressed as a
+> single tool call. See the [roadmap](service-declaration-v2.md) for closing that
+> gap.
+
+---
+
 ## Lifecycle commands
 
 ```bash
@@ -199,9 +339,9 @@ syrvis service run gollum \
   --subdomain wiki --exposure internal --port 4567
 
 syrvis stack hostnames
-#  wiki.example.com   internal   A → 192.168.8.4   (create this on your LAN resolver)
+#  wiki.example.com   internal   A → <TRAEFIK_IP>   (create this on your LAN resolver)
 
-# ...home-tech creates the A record, then:
+# ...once the A record exists, then:
 open https://wiki.example.com     # from the LAN
 ```
 
