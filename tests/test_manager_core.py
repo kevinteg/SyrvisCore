@@ -388,6 +388,34 @@ class TestBackupRestore:
         assert paths.active_version(target) == "0.1.0"
         assert (target / "bin" / "syrvis").exists()
 
+    def test_backup_captures_and_restores_layer2_state(self, home, tmp_path, fake_venv_backend):
+        """Layer-2 services (definitions, compose, per-service data) must survive a
+        backup/restore round-trip and be listed in the metadata inventory — a
+        bare-metal rebuild otherwise silently loses every user-installed service."""
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+
+        # A user-installed Layer-2 service: definition + generated compose + data.
+        (home / "services" / "wiki").mkdir(parents=True)
+        (home / "services" / "wiki" / "syrvis-service.yaml").write_text(
+            "name: wiki\nimage: ghcr.io/o/wiki:1.0.0\n"
+        )
+        (home / "compose").mkdir(parents=True)
+        (home / "compose" / "wiki.yaml").write_text("services: {wiki: {}}\n")
+        (home / "data" / "wiki").mkdir(parents=True)
+        (home / "data" / "wiki" / "state.db").write_text("rows")
+
+        backup_path = backup.create_backup(home)
+        metadata = backup.read_backup_metadata(backup_path)
+        assert metadata["layer2_services"] == ["wiki"]
+
+        target = tmp_path / "restored"
+        restored_meta = backup.restore_from_backup(backup_path, target)
+        assert restored_meta["layer2_services"] == ["wiki"]
+        assert (target / "services" / "wiki" / "syrvis-service.yaml").exists()
+        assert (target / "compose" / "wiki.yaml").exists()
+        assert (target / "data" / "wiki" / "state.db").read_text() == "rows"
+
     def test_restore_rejects_path_traversal(self, home, tmp_path):
         evil_tar = tmp_path / "0.1.0.tar.gz"
         with tarfile.open(str(evil_tar), "w:gz") as tar:
@@ -463,3 +491,107 @@ class TestBackupRestore:
         backup.cleanup_old_backups(home, keep_versions=2)
         remaining = sorted(b["filename"] for b in backup.list_backups(home))
         assert remaining == ["0.3.0.tar.gz", "0.4.0.tar.gz"]
+
+
+class TestManagerCompatibilityGate:
+    """activate refuses a service that declares a newer MIN_MANAGER_VERSION."""
+
+    def test_activate_refused_when_manager_too_old(
+        self, home, tmp_path, fake_venv_backend, monkeypatch
+    ):
+        from syrviscore_manager.errors import CompatibilityError
+
+        install(home, tmp_path, "0.2.0", activate=False)
+        monkeypatch.setattr(version_manager, "probe_min_manager_version", lambda h, v: "99.0.0")
+        with pytest.raises(CompatibilityError, match="requires manager >= 99.0.0"):
+            version_manager.activate_version(home, "0.2.0")
+        # the refused activation changed nothing
+        assert paths.active_version(home) != "0.2.0"
+
+    def test_activate_allowed_when_manager_new_enough(
+        self, home, tmp_path, fake_venv_backend, monkeypatch
+    ):
+        install(home, tmp_path, "0.2.0", activate=False)
+        monkeypatch.setattr(version_manager, "probe_min_manager_version", lambda h, v: "0.1.0")
+        version_manager.activate_version(home, "0.2.0")
+        assert paths.active_version(home) == "0.2.0"
+
+    def test_no_declared_constraint_is_backward_compatible(self, home, tmp_path, fake_venv_backend):
+        # The fake venv has no python, so the probe yields None -> no gate.
+        install(home, tmp_path, "0.2.0", activate=True)
+        assert paths.active_version(home) == "0.2.0"
+
+    def test_malformed_declaration_never_blocks(
+        self, home, tmp_path, fake_venv_backend, monkeypatch
+    ):
+        install(home, tmp_path, "0.2.0", activate=False)
+        monkeypatch.setattr(
+            version_manager, "probe_min_manager_version", lambda h, v: "not-a-version"
+        )
+        version_manager.activate_version(home, "0.2.0")
+        assert paths.active_version(home) == "0.2.0"
+
+
+class TestBackupIntegrity:
+    """Per-file digests + sidecar + staged verify-then-move extraction."""
+
+    def test_backup_records_digests_and_sidecar(self, home, tmp_path, fake_venv_backend):
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+        backup_path = backup.create_backup(home)
+
+        metadata = backup.read_backup_metadata(backup_path)
+        digests = metadata.get("file_digests") or {}
+        assert "config/.env" in digests
+        assert all(len(d) == 64 for d in digests.values())
+
+        sidecar = backup.sidecar_path(backup_path)
+        assert sidecar.exists()
+        recorded = sidecar.read_text().split()[0]
+        assert recorded == backup._sha256_file(backup_path)
+
+    def test_restore_refuses_tampered_member_and_leaves_target_untouched(
+        self, home, tmp_path, fake_venv_backend
+    ):
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+        backup_path = backup.create_backup(home)
+
+        # Repack the archive with one member's content changed but the original
+        # metadata (digests) intact — simulating corruption/tampering.
+        tampered = tmp_path / "tampered.tar.gz"
+        with tarfile.open(str(backup_path), "r:gz") as src_tar:
+            with tarfile.open(str(tampered), "w:gz") as dst_tar:
+                for member in src_tar.getmembers():
+                    payload = src_tar.extractfile(member)
+                    data = payload.read() if payload else b""
+                    if member.name == "config/.env":
+                        data = b"EVIL=1\n"
+                        member.size = len(data)
+                    dst_tar.addfile(member, io.BytesIO(data))
+
+        target = tmp_path / "victim"
+        with pytest.raises(RestoreError, match="does not match its recorded digest"):
+            backup.restore_from_backup(tampered, target)
+
+        # Verified-before-moved: nothing was written into the target.
+        assert not (target / "config" / ".env").exists()
+        assert not (target / ".restore-staging").exists()
+
+    def test_restore_refuses_bad_sidecar(self, home, tmp_path, fake_venv_backend):
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+        backup_path = backup.create_backup(home)
+        backup.sidecar_path(backup_path).write_text("0" * 64 + "  " + backup_path.name + "\n")
+
+        with pytest.raises(RestoreError, match="sidecar"):
+            backup.restore_from_backup(backup_path, tmp_path / "victim2")
+
+    def test_restore_clamps_env_to_0600(self, home, tmp_path, fake_venv_backend):
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+        backup_path = backup.create_backup(home)
+
+        target = tmp_path / "restored-env"
+        backup.restore_from_backup(backup_path, target)
+        assert stat.S_IMODE((target / "config" / ".env").stat().st_mode) == 0o600

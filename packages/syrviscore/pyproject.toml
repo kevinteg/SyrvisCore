@@ -25,7 +25,10 @@ classifiers = [
 dependencies = [
     "click==8.1.7",
     "pyyaml==6.0.2",
-    "requests==2.31.0",
+    # Keep in lockstep with syrviscore-manager: both are co-installed into one
+    # environment (CI, and the NAS), and two disagreeing exact pins resolve
+    # order-dependently with no error.
+    "requests==2.32.3",
     "docker==7.1.0",
     "python-dotenv==1.0.1",
 ]
@@ -52,7 +55,9 @@ Issues = "https://github.com/kevinteg/SyrvisCore/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-syrviscore = ["py.typed", "build/*.yaml"]
+# catalog_templates ships the bundled service catalog; the build/*.yaml glob is
+# the per-version config.yaml slot (populated by `syrvisctl install --config`).
+syrviscore = ["py.typed", "build/*.yaml", "catalog_templates/*.yaml"]
 
 [tool.black]
 line-length = 100

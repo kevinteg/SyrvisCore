@@ -93,3 +93,9 @@ class LockError(SyrvisError):
     """Could not acquire the installation lock (another operation in progress)."""
 
     code = "lock"
+
+
+class CompatibilityError(SyrvisError):
+    """The service version declares a newer minimum manager than is installed."""
+
+    code = "incompatible_manager"

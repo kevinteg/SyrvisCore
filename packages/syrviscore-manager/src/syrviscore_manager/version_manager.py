@@ -21,7 +21,14 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from . import backup, downloader, manifest, paths
-from .errors import ActiveVersionError, InstallError, IntegrityError, VersionNotFoundError
+from .__version__ import __version__
+from .errors import (
+    ActiveVersionError,
+    CompatibilityError,
+    InstallError,
+    IntegrityError,
+    VersionNotFoundError,
+)
 from .locking import hold_lock
 
 LogCallback = Callable[[str], None]
@@ -262,12 +269,81 @@ def uninstall_version(home: Path, version: str) -> None:
         manifest.remove_version_from_manifest(home, version)
 
 
+def _parse_semver(value: str) -> Optional[tuple]:
+    """Parse 'MAJOR.MINOR.PATCH' into a comparable tuple; None if malformed."""
+    try:
+        parts = tuple(int(p) for p in value.strip().lstrip("v").split("."))
+        return parts if len(parts) == 3 else None
+    except (ValueError, AttributeError):
+        return None
+
+
+def probe_min_manager_version(home: Path, version: str) -> Optional[str]:
+    """The minimum manager version a service release declares, if any.
+
+    Newer service wheels ship ``syrviscore.__compat__.MIN_MANAGER_VERSION``;
+    the probe runs the version's OWN venv python (offline, no imports into the
+    manager's environment). Returns None when the venv has no python, the
+    module is absent (older service), or the probe fails — all of which mean
+    "no declared constraint" (backward compatible).
+    """
+    venv_python = paths.version_dir(home, version) / "cli" / "venv" / "bin" / "python"
+    if not venv_python.exists():
+        return None
+    try:
+        result = subprocess.run(
+            [
+                str(venv_python),
+                "-c",
+                "from syrviscore.__compat__ import MIN_MANAGER_VERSION; "
+                "print(MIN_MANAGER_VERSION)",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    declared = result.stdout.strip()
+    return declared or None
+
+
+def check_manager_compatibility(home: Path, version: str) -> None:
+    """Refuse activation of a service that requires a newer manager.
+
+    In production the manager and service version-skew freely (manager 0.2.0
+    has driven service 0.3.x); this gate turns a future *incompatible* skew
+    from a runtime breakage into a clear typed error at activate time.
+
+    Raises:
+        CompatibilityError: when the service declares MIN_MANAGER_VERSION newer
+            than this manager.
+    """
+    declared = probe_min_manager_version(home, version)
+    if declared is None:
+        return
+    needed = _parse_semver(declared)
+    have = _parse_semver(__version__)
+    if needed is None or have is None:
+        return  # malformed on either side: don't block on a bad string
+    if have < needed:
+        raise CompatibilityError(
+            "Service {} requires manager >= {} but this manager is {}. "
+            "Upgrade the SyrvisCore SPK, then re-run the activate.".format(
+                version, declared, __version__
+            )
+        )
+
+
 def activate_version(home: Path, version: str) -> None:
     """
     Activate a service version (atomic symlink switch + wrapper + manifest).
 
     Raises:
         VersionNotFoundError: If the version is not installed or incomplete.
+        CompatibilityError: If the service requires a newer manager.
     """
     version = paths.validate_version(version)
 
@@ -279,6 +355,8 @@ def activate_version(home: Path, version: str) -> None:
             raise VersionNotFoundError(
                 "Version {} is incomplete (no working venv); reinstall it".format(version)
             )
+
+        check_manager_compatibility(home, version)
 
         paths.update_current_symlink(home, version)
         paths.create_syrvis_wrapper(home)
@@ -317,6 +395,7 @@ def download_and_install(
     version: Optional[str] = None,
     force: bool = False,
     verify: bool = True,
+    allow_backup_failure: bool = False,
     log: LogCallback = _noop_log,
     confirm_reinstall: Optional[ConfirmCallback] = None,
     progress: Optional[downloader.ProgressCallback] = None,
@@ -408,8 +487,17 @@ def download_and_install(
                 else:
                     log("      Backup already exists for {}".format(current_version))
             except Exception as e:
-                # Backup failure shouldn't block an upgrade, but must be visible
-                log("      WARNING: could not create backup: {}".format(e))
+                # "Every upgrade has a restore point" is the DR invariant: a failed
+                # pre-upgrade backup aborts by default (the operator can override with
+                # --no-backup once they accept losing the rollback point).
+                if not allow_backup_failure:
+                    raise InstallError(
+                        "Pre-upgrade backup of {} failed: {}. Aborting to preserve a "
+                        "rollback point (re-run with --no-backup to upgrade anyway).".format(
+                            current_version, e
+                        )
+                    )
+                log("      WARNING: could not create backup (--no-backup): {}".format(e))
         else:
             log("[4/5] No existing version to back up")
 

@@ -181,8 +181,13 @@ def _progress_bar(downloaded: int, total: int) -> None:
     is_flag=True,
     help="Allow installing releases that publish no SHA256SUMS asset",
 )
+@click.option(
+    "--no-backup",
+    is_flag=True,
+    help="Proceed even if the pre-upgrade backup fails (loses the rollback point)",
+)
 @handle_errors
-def install(version, wheel_file, config_file, force, clean, path, yes, no_verify):
+def install(version, wheel_file, config_file, force, clean, path, yes, no_verify, no_backup):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
@@ -243,6 +248,7 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
             version=version,
             force=force,
             verify=not no_verify,
+            allow_backup_failure=no_backup,
             log=click.echo,
             confirm_reinstall=confirm,
             progress=_progress_bar,
@@ -861,16 +867,32 @@ def restore(backup_file, path, yes):
     click.echo()
 
     click.echo("[1/2] Extracting backup...")
-    backup.restore_from_backup(backup_path, install_path, log=lambda m: click.echo("      " + m))
+    metadata = backup.restore_from_backup(
+        backup_path, install_path, log=lambda m: click.echo("      " + m)
+    )
 
     click.echo("[2/2] Restore complete!")
     click.echo()
     click.echo("Restored version {} to {}".format(version, install_path))
+
+    l2 = metadata.get("layer2_services") or []
+    if l2:
+        click.echo()
+        click.echo("Restored {} Layer-2 service(s): {}".format(len(l2), ", ".join(l2)))
+        click.echo("  Start them after 'syrvis start' with: syrvis service start <name>")
+
     click.echo()
     click.echo("Next steps:")
     click.echo("  1. Source the profile: source {}/syrvis.profile".format(install_path))
     click.echo("  2. Run diagnostics: syrvis doctor")
     click.echo("  3. Start services: syrvis start")
+    click.echo()
+    click.echo(
+        "Note: docker-group membership, the macvlan shim, and the S99 boot hook are\n"
+        "      NOT in the backup — they come from 'syrvis setup'. On a bare-metal\n"
+        "      rebuild, run 'sudo syrvis setup' before/after restore so Traefik can\n"
+        "      bind its IP and services survive reboot."
+    )
 
 
 def main():

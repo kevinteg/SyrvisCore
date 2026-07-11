@@ -23,10 +23,12 @@ Backup naming convention:
     0.1.12-2.tar.gz    - Post-setup backup #2
 """
 
+import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import tarfile
 from datetime import datetime
 from pathlib import Path
@@ -137,6 +139,77 @@ def get_wheel_path(home: Path, version: str) -> Optional[Path]:
     return wheels[0] if wheels else None
 
 
+def _sha256_file(path: Path) -> str:
+    """Streaming SHA-256 of a file."""
+    digest = hashlib.sha256()
+    with open(str(path), "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sidecar_path(backup_path: Path) -> Path:
+    """The `<backup>.sha256` sidecar next to an archive (for off-box validation)."""
+    return backup_path.with_name(backup_path.name + ".sha256")
+
+
+def _gather_backup_items(home: Path, version: str) -> List[Tuple[str, Path]]:
+    """Every (arcname, source_path) the archive will carry, in a stable order.
+
+    Gathering up front (instead of interleaving with tar writes) lets
+    create_backup compute per-file digests BEFORE the metadata member is
+    written, so the archive carries its own integrity manifest.
+    """
+    items: List[Tuple[str, Path]] = []
+
+    mpath = paths.manifest_path(home)
+    if mpath.exists():
+        items.append(("manifest.json", mpath))
+
+    config_dir = home / "config"
+    if config_dir.exists():
+        for item in sorted(config_dir.rglob("*")):
+            if item.is_file():
+                items.append(("config/{}".format(item.relative_to(config_dir)), item))
+
+    for arcname, src in (
+        ("data/traefik/acme.json", home / "data/traefik/acme.json"),
+        ("data/traefik/traefik.yml", home / "data/traefik/traefik.yml"),
+    ):
+        if src.exists():
+            items.append((arcname, src))
+    for subdir in ("data/traefik/config", "data/portainer", "data/cloudflared"):
+        root = home / subdir
+        if root.exists():
+            for item in sorted(root.rglob("*")):
+                if item.is_file():
+                    items.append(("{}/{}".format(subdir, item.relative_to(root)), item))
+
+    # Layer-2 service state: definitions, generated compose, per-service data.
+    core_data_dirs = {"traefik", "portainer", "cloudflared"}
+    for top in ("services", "compose"):
+        root = home / top
+        if root.exists():
+            for item in sorted(root.rglob("*")):
+                if item.is_file():
+                    items.append(("{}/{}".format(top, item.relative_to(root)), item))
+    data_root = home / "data"
+    if data_root.exists():
+        for entry in sorted(data_root.iterdir()):
+            if entry.is_dir() and entry.name not in core_data_dirs:
+                for item in sorted(entry.rglob("*")):
+                    if item.is_file():
+                        items.append(
+                            ("data/{}/{}".format(entry.name, item.relative_to(entry)), item)
+                        )
+
+    wheel_path = get_wheel_path(home, version)
+    if wheel_path and wheel_path.exists():
+        items.append(("wheel/{}".format(wheel_path.name), wheel_path))
+
+    return items
+
+
 def create_backup(
     home: Path,
     output_path: Optional[Path] = None,
@@ -163,6 +236,16 @@ def create_backup(
         output_path = get_backup_path(home, version, suffix)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Layer-2 service inventory (user-installed service names) so a restore can
+    # report exactly which L2 services the archive carries. Directory names are
+    # enough for the report; their full definitions + data are captured below.
+    services_root = home / "services"
+    l2_services = (
+        sorted(p.name for p in services_root.iterdir() if p.is_dir())
+        if services_root.exists()
+        else []
+    )
+
     metadata = {
         "backup_version": BACKUP_SCHEMA_VERSION,
         "created_at": datetime.now().isoformat(),
@@ -170,9 +253,15 @@ def create_backup(
         "manager_version": __version__,
         "reason": reason,
         "syrvis_home": str(home),
+        "layer2_services": l2_services,
     }
     if extra_metadata:
         metadata.update(extra_metadata)
+
+    # Gather everything first so per-file digests can ride inside the metadata
+    # member (the archive's own integrity manifest, verified on restore).
+    items = _gather_backup_items(home, version)
+    metadata["file_digests"] = {arcname: _sha256_file(src) for arcname, src in items}
 
     # 0600 from the moment of creation — never world-readable, even briefly
     fd = os.open(str(output_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -185,45 +274,19 @@ def create_backup(
                 meta_info.mtime = int(datetime.now().timestamp())
                 tar.addfile(meta_info, fileobj=io.BytesIO(metadata_json))
 
-                mpath = paths.manifest_path(home)
-                if mpath.exists():
-                    tar.add(str(mpath), arcname="manifest.json")
-
-                config_dir = home / "config"
-                if config_dir.exists():
-                    for item in sorted(config_dir.rglob("*")):
-                        if item.is_file():
-                            tar.add(
-                                str(item),
-                                arcname="config/{}".format(item.relative_to(config_dir)),
-                            )
-
-                data_items = [
-                    ("data/traefik/acme.json", home / "data/traefik/acme.json"),
-                    ("data/traefik/traefik.yml", home / "data/traefik/traefik.yml"),
-                ]
-                for subdir in ("data/traefik/config", "data/portainer", "data/cloudflared"):
-                    root = home / subdir
-                    if root.exists():
-                        for item in sorted(root.rglob("*")):
-                            if item.is_file():
-                                data_items.append(
-                                    ("{}/{}".format(subdir, item.relative_to(root)), item)
-                                )
-
-                for arcname, src_path in data_items:
-                    if src_path.exists():
-                        tar.add(str(src_path), arcname=arcname)
-
-                wheel_path = get_wheel_path(home, version)
-                if wheel_path and wheel_path.exists():
-                    tar.add(str(wheel_path), arcname="wheel/{}".format(wheel_path.name))
+                for arcname, src_path in items:
+                    tar.add(str(src_path), arcname=arcname)
     except BaseException:
         try:
             output_path.unlink()
         except OSError:
             pass
         raise
+
+    # Sidecar digest of the archive itself, so an off-box copy can be validated
+    # before a restore ever opens it (`shasum -a 256 -c <backup>.sha256`).
+    sidecar = sidecar_path(output_path)
+    sidecar.write_text("{}  {}\n".format(_sha256_file(output_path), output_path.name))
 
     return output_path
 
@@ -309,40 +372,83 @@ def restore_from_backup(
     Raises:
         RestoreError: On unsafe/invalid archives or a failed venv rebuild.
     """
+    # Off-box copies can be validated cheaply first: if the sidecar digest file
+    # travelled with the archive, verify the archive against it before opening.
+    sidecar = sidecar_path(backup_path)
+    if sidecar.exists():
+        try:
+            recorded = sidecar.read_text().split()[0].strip()
+        except (OSError, IndexError):
+            recorded = ""
+        if recorded and recorded != _sha256_file(backup_path):
+            raise RestoreError(
+                "Backup {} does not match its .sha256 sidecar — the archive is "
+                "corrupt or was tampered with; refusing to restore".format(backup_path.name)
+            )
+
     metadata = read_backup_metadata(backup_path)
     version = paths.validate_version(metadata["version"])
+    file_digests = metadata.get("file_digests") or {}
 
     install_path.mkdir(parents=True, exist_ok=True)
 
-    with tarfile.open(str(backup_path), "r:gz") as tar:
-        for member in tar.getmembers():
-            if member.name == "backup-metadata.json":
-                continue
-            if not member.isfile():
-                continue
+    # Staged extraction: every member is written to a staging dir and verified
+    # against the metadata digests BEFORE anything overwrites live config/data,
+    # so a corrupt archive can never leave a partially-restored installation.
+    staging = install_path / ".restore-staging"
+    if staging.exists():
+        shutil.rmtree(str(staging), ignore_errors=True)
+    staging.mkdir(parents=True)
 
-            if member.name.startswith("config/") or member.name.startswith("data/"):
-                dest = _safe_dest(install_path, member.name)
-            elif member.name == "manifest.json":
-                dest = install_path / paths.MANIFEST_FILENAME
-            elif member.name.startswith("wheel/"):
-                wheel_name = Path(member.name).name
-                dest = _safe_dest(install_path, "versions/{}/wheel/{}".format(version, wheel_name))
-            else:
-                continue
+    try:
+        planned = []  # (final_dest, staged_path, member)
+        with tarfile.open(str(backup_path), "r:gz") as tar:
+            for member in tar.getmembers():
+                if member.name == "backup-metadata.json":
+                    continue
+                if not member.isfile():
+                    continue
 
+                if member.name.startswith(("config/", "data/", "services/", "compose/")):
+                    dest = _safe_dest(install_path, member.name)
+                elif member.name == "manifest.json":
+                    dest = install_path / paths.MANIFEST_FILENAME
+                elif member.name.startswith("wheel/"):
+                    wheel_name = Path(member.name).name
+                    dest = _safe_dest(
+                        install_path, "versions/{}/wheel/{}".format(version, wheel_name)
+                    )
+                else:
+                    continue
+
+                src = tar.extractfile(member)
+                if src is None:
+                    continue
+                staged = staging / dest.relative_to(install_path)
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                with src:
+                    staged.write_bytes(src.read())
+
+                expected_digest = file_digests.get(member.name)
+                if expected_digest and _sha256_file(staged) != expected_digest:
+                    raise RestoreError(
+                        "Backup member {!r} does not match its recorded digest — "
+                        "the archive is corrupt; nothing was restored".format(member.name)
+                    )
+                planned.append((dest, staged, member))
+
+        # All members extracted and verified — move into place.
+        for dest, staged, member in planned:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            src = tar.extractfile(member)
-            if src is None:
-                continue
-            with src:
-                dest.write_bytes(src.read())
+            os.replace(str(staged), str(dest))
 
             # Restore the recorded mode; secrets are always clamped to 0600
-            if dest.name == "acme.json" or "cloudflared" in dest.parts:
+            if dest.name in ("acme.json", ".env") or "cloudflared" in dest.parts:
                 dest.chmod(0o600)
             else:
                 dest.chmod(member.mode & 0o777 or 0o644)
+    finally:
+        shutil.rmtree(str(staging), ignore_errors=True)
 
     # Rebuild the venv from the cached wheel if needed (single install path)
     version_venv = install_path / "versions" / version / "cli" / "venv"
