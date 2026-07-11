@@ -460,3 +460,38 @@ class TestComposeStructure:
 
         for service_name, service in compose["services"].items():
             assert service["restart"] == "unless-stopped"
+
+
+class TestDashboardAndDdns:
+    """The dashboard (always, when image present) and DDNS (gated on token)."""
+
+    def test_dashboard_emitted_from_defaults(self, network_env_vars):
+        gen = ComposeGenerator("nonexistent.yaml")  # defaults include the dashboard image
+        gen.load_config()
+        compose = gen.generate_compose()
+        assert "syrviscore-dashboard" in compose["services"]
+        svc = compose["services"]["syrviscore-dashboard"]
+        assert svc["container_name"] == "syrviscore-dashboard"
+        assert "proxy" in svc["networks"]
+        assert "/var/run/docker.sock:/var/run/docker.sock" in svc["volumes"]
+        assert any("dash.${DOMAIN}" in label for label in svc["labels"])
+
+    def test_cloudflared_exposes_metrics(self, network_env_vars):
+        gen = ComposeGenerator("nonexistent.yaml")
+        gen.load_config()
+        svc = gen._generate_cloudflared_service()
+        assert "TUNNEL_METRICS=0.0.0.0:20241" in svc["environment"]
+
+    def test_ddns_gated_off_without_token(self, network_env_vars, monkeypatch):
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+        gen = ComposeGenerator("nonexistent.yaml")
+        gen.load_config()
+        assert "cloudflare-ddns" not in gen.generate_compose()["services"]
+
+    def test_ddns_emitted_with_token(self, network_env_vars, monkeypatch):
+        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
+        gen = ComposeGenerator("nonexistent.yaml")
+        gen.load_config()
+        compose = gen.generate_compose()
+        assert "cloudflare-ddns" in compose["services"]
+        assert compose["services"]["cloudflare-ddns"]["image"].startswith("favonia/")

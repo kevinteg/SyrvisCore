@@ -276,7 +276,10 @@ All Docker images use specific version tags (no `:latest`).
 
 ## Design Principles
 
-- **CLI-first** - No web service
+- **Deterministic core, thin adapters** - One tested library layer does the work; the
+  `syrvis` CLI, the MCP server (`packages/syrviscore-mcp`), and the web dashboard
+  (`packages/syrviscore-dashboard`, a base-tier container — see `docs/dashboard.md`) are all
+  thin adapters over it. Anything an adapter can do, `ssh nas && syrvis …` can do.
 - **Split packages** - Manager (immutable) vs Service (updatable)
 - **Single-node** - Docker Compose orchestration
 - **Simple over complex** - Minimal viable solution first

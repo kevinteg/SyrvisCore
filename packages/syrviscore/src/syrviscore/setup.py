@@ -436,6 +436,28 @@ ACME_EMAIL={config['email']}
 # Cloudflare Tunnel (optional)
 CLOUDFLARE_TUNNEL_TOKEN={config.get('cloudflare_token', '')}
 
+# SyrvisCore Dashboard (web UI at DASHBOARD_SUBDOMAIN.DOMAIN)
+DASHBOARD_SUBDOMAIN={config.get('dashboard_subdomain', 'dash')}
+DASHBOARD_AUTH_MODE={config.get('dashboard_auth_mode', 'none')}
+ENABLE_L2_MUTATIONS={str(config.get('enable_l2_mutations', False)).lower()}
+DASHBOARD_SESSION_SECRET={config.get('dashboard_session_secret', '')}
+SSH_TARGET={config.get('ssh_target', 'nas')}
+
+# Dashboard auth — Cloudflare Access (remote + hairpin)
+CLOUDFLARE_ACCESS_TEAM={config.get('cloudflare_access_team', '')}
+CLOUDFLARE_ACCESS_AUD={config.get('cloudflare_access_aud', '')}
+
+# Dashboard auth — local OIDC SSO (Synology SSO Server by default; any OIDC IdP)
+OIDC_ISSUER={config.get('oidc_issuer', '')}
+OIDC_CLIENT_ID={config.get('oidc_client_id', '')}
+OIDC_CLIENT_SECRET={config.get('oidc_client_secret', '')}
+OIDC_REDIRECT_URL={config.get('oidc_redirect_url', '')}
+
+# Cloudflare DDNS (optional — favonia/cloudflare-ddns updates records on IP change)
+CLOUDFLARE_API_TOKEN={config.get('cloudflare_api_token', '')}
+CLOUDFLARE_DDNS_RECORDS={config.get('cloudflare_ddns_records', '')}
+CLOUDFLARE_DDNS_PROXIED={str(config.get('cloudflare_ddns_proxied', True)).lower()}
+
 # Traefik
 TRAEFIK_LOG_LEVEL=INFO
 TRAEFIK_API_DASHBOARD=true

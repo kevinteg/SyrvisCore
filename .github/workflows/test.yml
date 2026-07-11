@@ -3,8 +3,10 @@ name: Test
 on:
   push:
     branches: [main, develop]
+    tags: ['v*']
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -71,6 +73,95 @@ jobs:
       - name: Generated deploy artifacts are in sync
         run: |
           python -m syrviscore_mcp.deploy.gen check packages/syrviscore-mcp/deploy
+
+  # The dashboard runs on the NAS as a container (its own Python 3.12) and imports
+  # the syrviscore library in-process — tested on a modern Python, not the 3.8 matrix.
+  dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: 'pip'
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: 'npm'
+          cache-dependency-path: packages/syrviscore-dashboard/frontend/package-lock.json
+
+      - name: Install the dashboard (+ the service library it imports)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "packages/syrviscore" -e "packages/syrviscore-dashboard[dev]"
+
+      - name: Run dashboard tests
+        run: |
+          pytest packages/syrviscore-dashboard/tests -v --tb=short
+
+      - name: Lint + format
+        run: |
+          black --check packages/syrviscore-dashboard/src packages/syrviscore-dashboard/tests
+          ruff check packages/syrviscore-dashboard/src packages/syrviscore-dashboard/tests
+
+      - name: Frontend typecheck + build
+        working-directory: packages/syrviscore-dashboard/frontend
+        run: |
+          npm ci
+          npm run build
+
+  # Build the dashboard image (push to GHCR only on tags).
+  dashboard-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read dashboard version
+        id: ver
+        run: |
+          echo "version=$(grep '^__version__' \
+            packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py \
+            | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+
+      # Publish to GHCR on merge-to-main, a v* tag, or a manual run; otherwise just build.
+      - name: Should publish?
+        id: publish
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ] \
+             || [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ] \
+             || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to GHCR
+        if: steps.publish.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and publish when appropriate)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/syrviscore-dashboard/Dockerfile
+          push: ${{ steps.publish.outputs.push == 'true' }}
+          tags: |
+            ghcr.io/kevinteg/syrviscore-dashboard:${{ steps.ver.outputs.version }}
+            ghcr.io/kevinteg/syrviscore-dashboard:latest
 
   # End-to-end dev loop: build the devkit tarball, then bootstrap a complete
   # install from it (real venvs, real pip, offline manager install) — the same

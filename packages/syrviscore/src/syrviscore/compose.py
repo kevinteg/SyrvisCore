@@ -2,8 +2,9 @@
 Docker Compose configuration generator for SyrvisCore.
 
 This module reads build/config.yaml (for Docker images) and .env file
-(for network settings) to generate docker-compose.yaml with Traefik, Portainer,
-and Cloudflared services.
+(for network settings) to generate docker-compose.yaml with the core-tier
+services: Traefik, Portainer, Cloudflared, the SyrvisCore dashboard, and
+(optionally) Cloudflare DDNS.
 """
 
 import ipaddress
@@ -12,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import yaml
-
 
 # Default Docker image versions - used when config.yaml doesn't exist
 DEFAULT_DOCKER_IMAGES = {
@@ -33,6 +33,18 @@ DEFAULT_DOCKER_IMAGES = {
         "tag": "2025.11.1",
         "full_image": "cloudflare/cloudflared:2025.11.1",
         "description": "",
+    },
+    "dashboard": {
+        "image": "ghcr.io/kevinteg/syrviscore-dashboard",
+        "tag": "0.1.0",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.0",
+        "description": "SyrvisCore web dashboard",
+    },
+    "cloudflare_ddns": {
+        "image": "favonia/cloudflare-ddns",
+        "tag": "1.15.1",
+        "full_image": "favonia/cloudflare-ddns:1.15.1",
+        "description": "Cloudflare Dynamic DNS updater",
     },
 }
 
@@ -247,8 +259,93 @@ class ComposeGenerator:
             "container_name": "cloudflared",
             "restart": "unless-stopped",
             "networks": ["proxy"],
-            "environment": ["TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}"],
+            "environment": [
+                "TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}",
+                # Expose the metrics/`/ready` server on the proxy network so the
+                # dashboard can report real tunnel connectivity (not just container up).
+                "TUNNEL_METRICS=0.0.0.0:20241",
+            ],
             "command": "tunnel --no-autoupdate run",
+        }
+
+    def _generate_dashboard_service(self) -> Optional[Dict[str, Any]]:
+        """Generate the SyrvisCore dashboard service (web observability + management).
+
+        Emitted whenever a ``dashboard`` image is configured. Runs on the ``proxy``
+        network so it can reach traefik:8080 / portainer:9000 / cloudflared:20241,
+        holds the docker socket for container-safe management, and mounts the
+        config/data/manifest so the in-process ``syrviscore`` library resolves
+        ``SYRVIS_HOME``.
+        """
+        if "dashboard" not in self.build_config["docker_images"]:
+            return None
+
+        image = self.build_config["docker_images"]["dashboard"]["full_image"]
+        subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
+
+        return {
+            "image": image,
+            "container_name": "syrviscore-dashboard",
+            "restart": "unless-stopped",
+            "security_opt": ["no-new-privileges:true"],
+            "networks": ["proxy"],
+            "environment": [
+                "SYRVIS_HOME=/syrvis",
+                "DASHBOARD_AUTH_MODE=${DASHBOARD_AUTH_MODE:-none}",
+                "DASHBOARD_SESSION_SECRET=${DASHBOARD_SESSION_SECRET:-}",
+                "ENABLE_L2_MUTATIONS=${ENABLE_L2_MUTATIONS:-false}",
+                "SSH_TARGET=${SSH_TARGET:-nas}",
+                "CLOUDFLARE_ACCESS_TEAM=${CLOUDFLARE_ACCESS_TEAM:-}",
+                "CLOUDFLARE_ACCESS_AUD=${CLOUDFLARE_ACCESS_AUD:-}",
+                "OIDC_ISSUER=${OIDC_ISSUER:-}",
+                "OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}",
+                "OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}",
+                "OIDC_REDIRECT_URL=${OIDC_REDIRECT_URL:-}",
+            ],
+            "volumes": [
+                # rw: container control (start/stop/restart) is a write op on the socket.
+                "/var/run/docker.sock:/var/run/docker.sock",
+                "../config:/syrvis/config:ro",
+                "../data:/syrvis/data",
+                # so paths.get_syrvis_home() trusts SYRVIS_HOME (it looks for the manifest).
+                "../.syrviscore-manifest.json:/syrvis/.syrviscore-manifest.json:ro",
+            ],
+            "labels": [
+                "traefik.enable=true",
+                "traefik.http.routers.dashboard-http.entrypoints=web",
+                "traefik.http.routers.dashboard-http.rule=Host(`" + subdomain + ".${DOMAIN}`)",
+                "traefik.http.routers.dashboard-http.middlewares=https-redirect@file",
+                "traefik.http.routers.dashboard.entrypoints=websecure",
+                "traefik.http.routers.dashboard.rule=Host(`" + subdomain + ".${DOMAIN}`)",
+                "traefik.http.routers.dashboard.tls=true",
+                "traefik.http.routers.dashboard.tls.certresolver=letsencrypt",
+                "traefik.http.services.dashboard.loadbalancer.server.port=8000",
+            ],
+        }
+
+    def _generate_ddns_service(self) -> Optional[Dict[str, Any]]:
+        """Generate the Cloudflare DDNS service (favonia/cloudflare-ddns).
+
+        Optional like cloudflared: only emitted when a ``CLOUDFLARE_API_TOKEN`` is
+        configured (else the dashboard's DDNS probe reports ``not_configured``).
+        """
+        if "cloudflare_ddns" not in self.build_config["docker_images"]:
+            return None
+        if not os.getenv("CLOUDFLARE_API_TOKEN"):
+            return None
+
+        image = self.build_config["docker_images"]["cloudflare_ddns"]["full_image"]
+        return {
+            "image": image,
+            "container_name": "cloudflare-ddns",
+            "restart": "unless-stopped",
+            "security_opt": ["no-new-privileges:true"],
+            "networks": ["proxy"],
+            "environment": [
+                "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}",
+                "DOMAINS=${CLOUDFLARE_DDNS_RECORDS}",
+                "PROXIED=${CLOUDFLARE_DDNS_PROXIED:-true}",
+            ],
         }
 
     def _generate_networks(self, network_config: Dict[str, str]) -> Dict[str, Any]:
@@ -313,6 +410,16 @@ class ComposeGenerator:
         cloudflared = self._generate_cloudflared_service()
         if cloudflared:
             compose["services"]["cloudflared"] = cloudflared
+
+        # Add the dashboard (core service, emitted whenever its image is configured)
+        dashboard = self._generate_dashboard_service()
+        if dashboard:
+            compose["services"]["syrviscore-dashboard"] = dashboard
+
+        # Add Cloudflare DDNS if an API token is configured
+        ddns = self._generate_ddns_service()
+        if ddns:
+            compose["services"]["cloudflare-ddns"] = ddns
 
         return compose
 

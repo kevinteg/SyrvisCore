@@ -1,7 +1,7 @@
 # Makefile for SyrvisCore
 # Compatible with local development and GitHub Actions
 
-.PHONY: all help clean test lint format build-manager build-service build-spk validate install dev-install check version
+.PHONY: all help clean test lint format build-manager build-service build-spk build-dashboard test-dashboard validate install dev-install check version
 
 # Colors for output (disabled in CI)
 ifdef CI
@@ -125,6 +125,15 @@ build-service: ## Build service wheel
 	@echo "$(BLUE)[INFO]$(NC) Building service wheel..."
 	chmod +x $(BUILD_TOOLS)/build-service.sh
 	./$(BUILD_TOOLS)/build-service.sh
+
+build-dashboard: ## Build the dashboard container image (docker; PUSH=1 to push, WITH_L2_TOOLS=true for L2)
+	@echo "$(BLUE)[INFO]$(NC) Building dashboard image..."
+	chmod +x $(BUILD_TOOLS)/build-dashboard.sh
+	./$(BUILD_TOOLS)/build-dashboard.sh
+
+test-dashboard: ## Run the dashboard package tests (Python 3.10+)
+	@echo "$(BLUE)[INFO]$(NC) Running dashboard tests..."
+	$(PYTEST) packages/syrviscore-dashboard/tests -v
 
 build-spk: build-manager ## Build SPK package (manager only)
 	@echo "$(BLUE)[INFO]$(NC) Building SPK package..."
