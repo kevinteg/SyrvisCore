@@ -201,6 +201,29 @@ jobs:
           SYRVIS_HOME="$RUNNER_TEMP/syrvis-dev-home" \
             "$RUNNER_TEMP/devkit/manager-venv/bin/syrvisctl" list --json
 
+      # The disaster-recovery path, end to end with the REAL (non-mocked) venv
+      # backend: create a backup, copy it "off-box", wipe the entire home, and
+      # restore — the venv must rebuild offline from the backup's cached wheel.
+      - name: "DR: backup, wipe, restore, re-verify"
+        run: |
+          HOME_DIR="$RUNNER_TEMP/syrvis-dev-home"
+          CTL="$RUNNER_TEMP/devkit/manager-venv/bin/syrvisctl"
+
+          SYRVIS_HOME="$HOME_DIR" "$CTL" backup create
+          BACKUP=$(ls "$HOME_DIR"/backups/*.tar.gz | head -n1)
+          test -f "$BACKUP.sha256"   # integrity sidecar was written
+
+          cp "$BACKUP" "$RUNNER_TEMP/dr-backup.tar.gz"
+          cp "$BACKUP.sha256" "$RUNNER_TEMP/dr-backup.tar.gz.sha256"
+
+          rm -rf "$HOME_DIR"         # bare-metal: the installation is gone
+
+          "$CTL" restore --path "$HOME_DIR" -y "$RUNNER_TEMP/dr-backup.tar.gz"
+
+          test -L "$HOME_DIR/current"
+          "$HOME_DIR"/current/cli/venv/bin/syrvis --version
+          SYRVIS_HOME="$HOME_DIR" "$CTL" list --json
+
       - name: Tear down with --clean
         run: |
           cd "$RUNNER_TEMP/devkit"
