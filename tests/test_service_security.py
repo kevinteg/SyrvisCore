@@ -169,6 +169,11 @@ class TestComposeGenerationContainment:
         vols = compose["services"]["gollum"]["volumes"]
         expected = str((tmp_path / "data" / "gollum" / "wiki").resolve())
         assert vols == [f"{expected}:/wiki:rw"]
+        # The bind-mount SOURCE must be pre-created: DSM's Docker refuses to
+        # auto-create it, so `up` fails ("Bind mount failed: ... does not exist")
+        # if the dir is missing. Regression guard for the bug that took a
+        # volume-declaring service offline on a reconcile replace.
+        assert (tmp_path / "data" / "gollum" / "wiki").is_dir()
         # no-new-privileges is always set for Layer 2 services
         assert compose["services"]["gollum"]["security_opt"] == ["no-new-privileges:true"]
         # no deprecated top-level version key

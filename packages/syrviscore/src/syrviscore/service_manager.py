@@ -612,6 +612,12 @@ class ServiceManager:
                     raise ServiceValidationError(
                         "Volume host path {!r} escapes the service data directory".format(vol)
                     )
+                # The DSM Docker daemon refuses to auto-create a bind-mount source
+                # directory, so `up` fails with "Bind mount failed: ... does not
+                # exists" if we don't pre-create it (mirrors the env_file branch
+                # below). Containment was just checked, so this stays under the
+                # service's own data dir.
+                Path(resolved).mkdir(parents=True, exist_ok=True)
                 processed_volumes.append(f"{resolved}:{container_path}:{mode}")
 
             svc["volumes"] = processed_volumes
