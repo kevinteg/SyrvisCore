@@ -503,3 +503,32 @@ class TestServiceDeclareCli:
         result = CliRunner().invoke(cli, ["reconcile", "--json"])
         assert result.exit_code == 0, result.output
         assert installed == ["app"]
+
+
+class TestStartSelfHeals:
+    def test_start_regenerates_compose_and_fixes_volume_dir(self, home, monkeypatch):
+        """`start` must re-materialize (regenerate compose -> recreate/chmod the
+        volume dir) so a service whose bind-mount dir was left in a bad state
+        self-heals — no reconcile action could fix it otherwise."""
+        import stat as _stat
+
+        sm = _manager(home)
+        # install a volume-declaring service (not started)
+        assert sm.add_image("app", "ghcr.io/a/app:1.0", volumes=["data:/data:rw"], start=False)[0]
+
+        # Simulate the 0.3.5-era damage: the volume dir was created root-owned/0755.
+        vol_dir = home / "data" / "app" / "data"
+        assert vol_dir.is_dir()
+        vol_dir.chmod(0o755)
+        assert _stat.S_IMODE(vol_dir.stat().st_mode) == 0o755
+
+        # start() should regenerate compose -> _ensure_volume_dir chmods it 0777.
+        started = {}
+        monkeypatch.setattr(
+            ServiceManager,
+            "_start_service",
+            lambda self, n, p: (started.setdefault("yes", True), (True, "started"))[1],
+        )
+        ok, _ = sm.start("app")
+        assert ok and started.get("yes")
+        assert _stat.S_IMODE(vol_dir.stat().st_mode) == 0o777

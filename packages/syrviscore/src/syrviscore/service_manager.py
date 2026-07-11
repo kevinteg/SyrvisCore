@@ -865,11 +865,24 @@ class ServiceManager:
             Tuple of (success, message)
         """
         try:
-            compose_path = self._service_paths(name)["compose"]
+            paths_ = self._service_paths(name)
         except ServiceValidationError as e:
             return False, str(e)
-        if not compose_path.exists():
+        compose_path = paths_["compose"]
+        manifest_path = paths_["service"] / "syrvis-service.yaml"
+        if not compose_path.exists() or not manifest_path.exists():
             return False, f"Service '{name}' is not installed"
+
+        # Re-materialize before starting so `start` self-heals host-side drift:
+        # regenerating the compose file re-creates and re-permissions the
+        # bind-mount volume dirs (a dir left root-owned by an older version
+        # would otherwise make a non-root container crash-loop forever, with no
+        # reconcile action able to fix it — `start` never regenerated compose).
+        # Idempotent: identical compose content, mkdir/chmod exist_ok.
+        try:
+            self._generate_compose_file(load_service_definition(manifest_path))
+        except Exception:  # noqa: BLE001 - fall back to the existing compose file
+            pass
 
         ok, msg = self._start_service(name, compose_path)
         if ok:
