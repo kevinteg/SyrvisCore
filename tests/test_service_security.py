@@ -173,11 +173,30 @@ class TestComposeGenerationContainment:
         # auto-create it, so `up` fails ("Bind mount failed: ... does not exist")
         # if the dir is missing. Regression guard for the bug that took a
         # volume-declaring service offline on a reconcile replace.
-        assert (tmp_path / "data" / "gollum" / "wiki").is_dir()
+        import stat as _stat
+
+        wiki_dir = tmp_path / "data" / "gollum" / "wiki"
+        assert wiki_dir.is_dir()
+        # ...and it must be writable by the container's (non-root) UID, or a
+        # root-owned dir shadows the image volume -> the app can't write ->
+        # crash-loop. rw volumes are made 0777 (see _ensure_volume_dir).
+        assert _stat.S_IMODE(wiki_dir.stat().st_mode) == 0o777
         # no-new-privileges is always set for Layer 2 services
         assert compose["services"]["gollum"]["security_opt"] == ["no-new-privileges:true"]
         # no deprecated top-level version key
         assert "version" not in compose
+
+    def test_readonly_volume_dir_is_not_world_writable(self, tmp_path):
+        mgr = self._manager(tmp_path)
+        mgr._ensure_directories()
+        svc = ServiceDefinition.from_dict(base_service(name="ro", volumes=["conf:/etc/app:ro"]))
+        mgr._generate_compose_file(svc)
+        import stat as _stat
+
+        conf_dir = tmp_path / "data" / "ro" / "conf"
+        assert conf_dir.is_dir()
+        # a read-only mount needs no write bit granted
+        assert _stat.S_IMODE(conf_dir.stat().st_mode) != 0o777
 
     def test_project_name_isolated_per_service(self, tmp_path):
         mgr = self._manager(tmp_path)

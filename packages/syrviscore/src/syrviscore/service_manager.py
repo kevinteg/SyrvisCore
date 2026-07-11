@@ -562,6 +562,35 @@ class ServiceManager:
             if path.exists():
                 shutil.rmtree(path, ignore_errors=True)
 
+    @staticmethod
+    def _ensure_volume_dir(path: Path, mode: str) -> None:
+        """Create a bind-mount source dir the container can actually write to.
+
+        Two failure modes this closes, both hit live:
+        1. DSM's Docker refuses to auto-create a bind-mount source, so `up`
+           fails ("Bind mount failed: ... does not exist") if the dir is absent.
+        2. SyrvisCore creates the dir as the reconcile user (root over the
+           operator seam), but Layer 2 images commonly run as a NON-root user
+           (e.g. uid 10001) — a root-owned dir shadows the image's own volume
+           dir, so the process can't write (SQLITE_CANTOPEN etc.) and crash-loops.
+
+        The container's runtime UID is baked into the image and not reliably
+        known at compose-generation time (Config.User is often a name, and the
+        image may not be pulled yet), so a read-write volume is made writable by
+        any UID: 0777 on the dir itself (files the container creates inside keep
+        their own ownership). The dir is strictly confined under the service's
+        own ``data/<name>/`` subtree (containment was just checked) on a
+        single-owner NAS, so the blast radius is that one service's data. A
+        read-only (``:ro``) volume needs no write bit. (A future ``user:`` schema
+        field could replace this with a targeted chown.)
+        """
+        path.mkdir(parents=True, exist_ok=True)
+        if mode != "ro":
+            try:
+                os.chmod(str(path), 0o777)
+            except OSError:
+                pass  # best-effort; a pre-owned dir may already be writable
+
     def _generate_compose_file(self, service: ServiceDefinition) -> Path:
         """Generate docker-compose file for a service.
 
@@ -617,7 +646,7 @@ class ServiceManager:
                 # exists" if we don't pre-create it (mirrors the env_file branch
                 # below). Containment was just checked, so this stays under the
                 # service's own data dir.
-                Path(resolved).mkdir(parents=True, exist_ok=True)
+                self._ensure_volume_dir(Path(resolved), mode)
                 processed_volumes.append(f"{resolved}:{container_path}:{mode}")
 
             svc["volumes"] = processed_volumes
