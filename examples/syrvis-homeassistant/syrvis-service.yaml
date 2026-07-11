@@ -16,6 +16,9 @@ traefik:
   enabled: true
   subdomain: ha
   port: 8123
+  # LAN-only: reach https://ha.<domain> from inside the network. Change to
+  # 'tunnel' to expose it remotely through the Cloudflare Tunnel + Access.
+  exposure: internal
 
 # Restart policy
 restart: unless-stopped

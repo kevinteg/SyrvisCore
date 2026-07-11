@@ -539,3 +539,34 @@ class TestDashboardAndDdns:
         compose = self._gen().generate_compose(stack=st)
         assert "cloudflare-ddns" in compose["services"]
         assert compose["services"]["cloudflare-ddns"]["image"].startswith("favonia/")
+
+
+class TestImagePinLockstep:
+    """The built-in image pins must stay in lockstep with sibling packages."""
+
+    def test_dashboard_tag_matches_dashboard_version(self):
+        """compose.py's dashboard tag must equal syrviscore_dashboard.__version__ —
+        the GHCR image CI publishes is tagged with that version, so a mismatch
+        means the core stack pulls a stale (or nonexistent) dashboard image."""
+        import re
+
+        from syrviscore.compose import DEFAULT_DOCKER_IMAGES
+
+        version_file = (
+            Path(__file__).resolve().parent.parent
+            / "packages"
+            / "syrviscore-dashboard"
+            / "src"
+            / "syrviscore_dashboard"
+            / "__version__.py"
+        )
+        if not version_file.exists():
+            pytest.skip("dashboard package not present in this checkout")
+
+        match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text())
+        assert match, "could not parse dashboard __version__"
+        dashboard_version = match.group(1)
+
+        entry = DEFAULT_DOCKER_IMAGES["dashboard"]
+        assert entry["tag"] == dashboard_version
+        assert entry["full_image"].endswith(":" + dashboard_version)

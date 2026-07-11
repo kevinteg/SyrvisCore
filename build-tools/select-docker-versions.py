@@ -264,14 +264,20 @@ class VersionSelector:
         import os
         import re
 
-        # Find compose.py relative to this script
+        # Find compose.py relative to this script. In the monorepo it lives under
+        # packages/syrviscore/src/syrviscore/ — the old ../src/... path silently
+        # missed it, leaving DEFAULT_DOCKER_IMAGES (the real source of truth) stale.
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        compose_path = os.path.join(script_dir, "..", "src", "syrviscore", "compose.py")
-        compose_path = os.path.normpath(compose_path)
+        compose_path = os.path.normpath(
+            os.path.join(
+                script_dir, "..", "packages", "syrviscore", "src", "syrviscore", "compose.py"
+            )
+        )
 
         if not os.path.exists(compose_path):
-            print(f"\n⚠️  Could not find compose.py at {compose_path}")
-            return
+            # Fail loudly: a broken sync must not pass as a no-op.
+            print(f"\n❌ Could not find compose.py at {compose_path}")
+            sys.exit(1)
 
         try:
             with open(compose_path, "r") as f:

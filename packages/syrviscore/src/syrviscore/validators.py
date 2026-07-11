@@ -10,8 +10,8 @@ Provides reusable validation functions for:
 
 Used by:
 - syrvis doctor: Comprehensive diagnostics
+- syrvis verify: Health + desired-vs-actual reporting
 - syrvis setup: Pre-flight validation
-- syrvis start: Service readiness checks
 """
 
 import os
@@ -909,26 +909,26 @@ def get_configured_endpoints(config: ConfigurationValidator = None) -> List[Dict
         }
     )
 
-    # Synology services
-    synology_services = {
-        "SYNOLOGY_DSM_ENABLED": ("DSM Portal", "dsm", 5001, [200, 302]),
-        "SYNOLOGY_PHOTOS_ENABLED": ("Photos", "photos", 5001, [200, 302]),
-        "SYNOLOGY_DRIVE_ENABLED": ("Synology Drive", "drive", 6690, [200, 302, 400]),
-        "SYNOLOGY_AUDIO_ENABLED": ("Audio Station", "audio", 5001, [200, 302]),
-        "SYNOLOGY_VIDEO_ENABLED": ("Video Station", "video", 5001, [200, 302]),
+    # Synology services — subdomain/port/label come from the single catalog in
+    # traefik_config.SYNOLOGY_SERVICES; only the acceptable-status sets (an
+    # endpoint-validation concern) live here.
+    from .traefik_config import SYNOLOGY_SERVICES
+
+    expected_status_overrides = {
+        "drive": [200, 302, 400],  # Drive answers 400 to a bare HTTP probe
     }
 
-    for env_key, (name, subdomain, port, expected_status) in synology_services.items():
-        if config.get_value(env_key, "").lower() in ("true", "1", "yes"):
+    for key, svc in SYNOLOGY_SERVICES.items():
+        if config.get_value(svc["env_enabled"], "").lower() in ("true", "1", "yes"):
             endpoints.append(
                 {
-                    "name": name,
-                    "subdomain": subdomain,
-                    "domain": f"{subdomain}.{domain}",
+                    "name": svc["label"],
+                    "subdomain": svc["subdomain"],
+                    "domain": f"{svc['subdomain']}.{domain}",
                     "expected_ip": traefik_ip,
                     "backend_host": nas_ip,
-                    "backend_port": port,
-                    "expected_status": expected_status,
+                    "backend_port": svc["port"],
+                    "expected_status": expected_status_overrides.get(key, [200, 302]),
                 }
             )
 
@@ -1028,11 +1028,6 @@ def validate_installation() -> ValidationReport:
     return InstallationValidator().validate()
 
 
-def validate_docker() -> ValidationReport:
-    """Quick validation of Docker access."""
-    return DockerValidator().validate()
-
-
 def validate_configuration() -> ValidationReport:
     """Quick validation of configuration."""
     return ConfigurationValidator().validate()
@@ -1054,37 +1049,3 @@ def validate_all() -> List[ValidationReport]:
         reports.append(NetworkValidator(config_validator).validate())
 
     return reports
-
-
-def is_ready_to_start() -> Tuple[bool, List[str]]:
-    """
-    Check if the system is ready to start services.
-
-    Returns:
-        Tuple of (ready, list_of_issues)
-    """
-    issues = []
-
-    # Check installation
-    install = InstallationValidator()
-    if not install.syrvis_home:
-        issues.append("SYRVIS_HOME not found - run: syrvisctl install")
-        return False, issues
-
-    if not install.manifest:
-        issues.append("Manifest missing - run: syrvisctl install")
-        return False, issues
-
-    # Check Docker
-    docker = DockerValidator()
-    if not docker.check_daemon_accessible().passed:
-        issues.append("Docker not accessible")
-
-    # Check configuration
-    config = ConfigurationValidator()
-    if not config.check_env_exists().passed:
-        issues.append(".env missing - run: syrvis setup")
-    elif not config.check_required_vars().passed:
-        issues.append("Configuration incomplete - run: syrvis setup")
-
-    return len(issues) == 0, issues

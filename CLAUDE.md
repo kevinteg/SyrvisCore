@@ -86,7 +86,7 @@ SyrvisCore/
 │   ├── build-spk.sh                  # Build SPK (manager only)
 │   └── release-service.sh            # GitHub release for service
 ├── tests/                            # Pytest tests
-└── build/config.yaml                 # Docker image versions
+└── build/                            # scratch build output (config.yaml is generated, not committed)
 ```
 
 ## Getting Started
@@ -244,7 +244,7 @@ MCP tooling. The repo stays generic: no domain, IPs, accounts, or service catalo
 
 ### Build System
 
-- `build/config.yaml` contains Docker image versions (bundled with service)
+- Docker image versions are pinned in `DEFAULT_DOCKER_IMAGES` (`packages/syrviscore/src/syrviscore/compose.py`) — the committed source of truth. A release may attach a `config.yaml` asset, which `syrvisctl install` bundles into the version tree (`versions/<v>/build/config.yaml`) and which then overrides the built-in pins; `build-tools/select-docker-versions.py` keeps both in sync.
 - Manager SPK is minimal (~20KB wheel)
 - Service wheel includes all dependencies
 
@@ -279,7 +279,7 @@ MCP tooling. The repo stays generic: no domain, IPs, accounts, or service catalo
 ## Git Practices
 
 - Atomic, well-described commits
-- **DO commit:** `build/config.yaml` (versioned Docker tags), `packages/`
+- **DO commit:** `packages/` (image pins live in compose.py's `DEFAULT_DOCKER_IMAGES`)
 - **DON'T commit:** `.env`, `venv/`, `__pycache__/`, `*.spk`, `dist/`
 
 ## External Dependencies

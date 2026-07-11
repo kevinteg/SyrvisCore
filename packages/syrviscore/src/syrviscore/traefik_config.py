@@ -26,13 +26,18 @@ if TYPE_CHECKING:
 #   2. Set the corresponding env var to enable it (e.g., SYNOLOGY_DSM_ENABLED=true)
 #   3. Run 'syrvis setup' to regenerate configs
 
+# This dict is THE catalog of Synology passthrough services — the single source
+# consumed by the compose/traefik generators, hostnames.build_report(), the
+# validators' endpoint checks, and the dashboard's links/routes endpoints. Do
+# not redefine service→subdomain mappings elsewhere.
 SYNOLOGY_SERVICES = {
-    # Service key: (subdomain, port, protocol, description)
+    # Service key: (subdomain, port, protocol, label, description)
     # Note: DS File removed - use SMB directly to NAS IP instead
     "photos": {
         "subdomain": "photos",
         "port": 5001,
         "protocol": "https",
+        "label": "Photos",
         "description": "Photos (Synology Photos / Photo Station)",
         "env_enabled": "SYNOLOGY_PHOTOS_ENABLED",
     },
@@ -40,6 +45,7 @@ SYNOLOGY_SERVICES = {
         "subdomain": "dsm",
         "port": 5001,
         "protocol": "https",
+        "label": "DSM",
         "description": "DSM Web Interface",
         "env_enabled": "SYNOLOGY_DSM_ENABLED",
     },
@@ -47,6 +53,7 @@ SYNOLOGY_SERVICES = {
         "subdomain": "drive",
         "port": 6690,
         "protocol": "https",
+        "label": "Drive",
         "description": "Synology Drive",
         "env_enabled": "SYNOLOGY_DRIVE_ENABLED",
     },
@@ -54,6 +61,7 @@ SYNOLOGY_SERVICES = {
         "subdomain": "audio",
         "port": 5001,
         "protocol": "https",
+        "label": "Audio",
         "description": "Audio Station",
         "env_enabled": "SYNOLOGY_AUDIO_ENABLED",
     },
@@ -61,10 +69,29 @@ SYNOLOGY_SERVICES = {
         "subdomain": "video",
         "port": 5001,
         "protocol": "https",
+        "label": "Video",
         "description": "Video Station",
         "env_enabled": "SYNOLOGY_VIDEO_ENABLED",
     },
 }
+
+# The primordial core UIs Traefik always routes, at fixed subdomains — the
+# companion catalog to SYNOLOGY_SERVICES, consumed by hostnames.py and the
+# dashboard's links endpoint (mirrors the compose labels + dynamic config).
+PRIMORDIAL_UIS = (
+    {
+        "service": "portainer",
+        "subdomain": "portainer",
+        "label": "Portainer",
+        "description": "Container management",
+    },
+    {
+        "service": "traefik",
+        "subdomain": "traefik",
+        "label": "Traefik",
+        "description": "Reverse proxy dashboard",
+    },
+)
 
 
 def get_enabled_synology_services() -> Dict[str, dict]:
@@ -152,13 +179,14 @@ certificatesResolvers:
     return config
 
 
-def generate_synology_routers_config(domain: str, nas_ip: str) -> str:
+def generate_synology_routers_config(domain: str, backend_ip: str) -> str:
     """
     Generate Traefik router configuration for enabled Synology services.
 
     Args:
         domain: Base domain (e.g., example.com)
-        nas_ip: IP address of the Synology NAS
+        backend_ip: Accepted for symmetry with the services generator; routers are
+            host-based (``Host(subdomain.domain)``) so the backend IP is unused here.
 
     Returns:
         YAML snippet for routers section
@@ -202,12 +230,18 @@ def generate_synology_routers_config(domain: str, nas_ip: str) -> str:
     return "\n".join(lines)
 
 
-def generate_synology_services_config(nas_ip: str) -> str:
+def generate_synology_services_config(backend_ip: str) -> str:
     """
     Generate Traefik service configuration for enabled Synology services.
 
     Args:
-        nas_ip: IP address of the Synology NAS
+        backend_ip: The address Traefik dials to reach DSM services. Under macvlan
+            this is the shim IP (SHIM_IP), not NAS_IP — the Traefik container
+            cannot reach the host at NAS_IP directly, but a packet arriving at the
+            host on the shim interface IS accepted *because DSM system services
+            (DSM/Photos/Drive on 5000/5001/6690) bind 0.0.0.0*. If DSM were ever
+            pinned to a specific NAS_IP, this routing would need a host route to
+            NAS_IP over the shim instead.
 
     Returns:
         YAML snippet for services section
@@ -232,7 +266,7 @@ def generate_synology_services_config(nas_ip: str) -> str:
                 f"    synology-{key}:",
                 "      loadBalancer:",
                 "        servers:",
-                f'          - url: "{protocol}://{nas_ip}:{port}"',
+                f'          - url: "{protocol}://{backend_ip}:{port}"',
                 "        serversTransport: insecure-skip-verify@file",
             ]
         )
@@ -368,6 +402,10 @@ class ServiceTraefikConfig:
         if not service.traefik.enabled or not service.traefik.subdomain:
             return {}
 
+        # NOTE: ``service.traefik.exposure`` is intentionally NOT consumed here.
+        # Exposure ('internal' vs 'tunnel') is declared intent reported by
+        # ``syrvis stack hostnames``; SyrvisCore routes both identically at the
+        # Traefik layer (same router + letsencrypt resolver). See exposure.py.
         host = f"{service.traefik.subdomain}.{domain}"
         name = service.name
 

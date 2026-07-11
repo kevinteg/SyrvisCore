@@ -1,10 +1,18 @@
 """
 Docker Compose configuration generator for SyrvisCore.
 
-This module reads build/config.yaml (for Docker images) and .env file
-(for network settings) to generate docker-compose.yaml with the core-tier
-services: Traefik, Portainer, Cloudflared, the SyrvisCore dashboard, and
-(optionally) Cloudflare DDNS.
+Generates docker-compose.yaml with the core-tier services: Traefik, Portainer,
+Cloudflared, the SyrvisCore dashboard, and (optionally) Cloudflare DDNS.
+
+Image versions come from, in order of precedence:
+1. an explicit ``config_path`` handed to :class:`ComposeGenerator`;
+2. the active version's bundled ``build/config.yaml`` (a release can attach a
+   ``config.yaml`` asset, which ``syrvisctl install`` copies into the version
+   tree — the channel for shipping image bumps without a code change);
+3. the built-in :data:`DEFAULT_DOCKER_IMAGES` pins below (the committed source
+   of truth in this repo).
+
+Network settings come from ``.env``.
 """
 
 import ipaddress
@@ -52,36 +60,58 @@ DEFAULT_DOCKER_IMAGES = {
 class ComposeGenerator:
     """Generate docker-compose.yaml from build configuration and environment variables."""
 
-    def __init__(self, config_path: str = "build/config.yaml"):
+    def __init__(self, config_path: Optional[str] = None):
         """
         Initialize the compose generator.
 
         Args:
-            config_path: Path to build configuration file
+            config_path: Explicit path to a build configuration file. None (the
+                default) resolves the active version's bundled
+                ``build/config.yaml`` when one exists, falling back to the
+                built-in :data:`DEFAULT_DOCKER_IMAGES` pins.
         """
-        self.config_path = Path(config_path)
+        self.config_path: Optional[Path] = Path(config_path) if config_path else None
         self.build_config: Optional[Dict[str, Any]] = None
+
+    @staticmethod
+    def _resolve_default_config_path() -> Optional[Path]:
+        """The active version's bundled config.yaml, or None when absent.
+
+        Best-effort: an unresolvable SYRVIS_HOME (unit tests, fresh box) simply
+        means the built-in pins apply.
+        """
+        try:
+            from . import paths
+
+            bundled = paths.get_version_config_yaml()
+            return bundled if bundled.exists() else None
+        except Exception:  # noqa: BLE001 - no install context -> built-in pins
+            return None
 
     def load_config(self) -> Dict[str, Any]:
         """
-        Load build configuration from YAML file, or use defaults.
+        Load the build configuration (image versions).
 
-        If config.yaml doesn't exist, uses built-in default Docker image versions.
+        Precedence: explicit config_path > the active version's bundled
+        config.yaml > the built-in DEFAULT_DOCKER_IMAGES pins.
 
         Returns:
             Parsed configuration dictionary
         """
-        if self.config_path.exists():
+        if self.config_path is None:
+            self.config_path = self._resolve_default_config_path()
+
+        if self.config_path is not None and self.config_path.exists():
             with open(self.config_path, "r") as f:
                 self.build_config = yaml.safe_load(f)
 
             if not self.build_config or "docker_images" not in self.build_config:
                 raise ValueError("Invalid config: missing docker_images section")
         else:
-            # Use built-in defaults
+            # Built-in pinned versions (the committed source of truth)
             self.build_config = {
                 "metadata": {
-                    "description": "Using default Docker image versions",
+                    "description": "Using built-in pinned Docker image versions",
                 },
                 "docker_images": DEFAULT_DOCKER_IMAGES,
             }
@@ -313,7 +343,12 @@ class ComposeGenerator:
                 "DASHBOARD_AUTH_MODE=${DASHBOARD_AUTH_MODE:-none}",
                 "DASHBOARD_SESSION_SECRET=${DASHBOARD_SESSION_SECRET:-}",
                 "ENABLE_L2_MUTATIONS=${ENABLE_L2_MUTATIONS:-false}",
+                # SSH_TARGET is resolved to the NAS IP at setup time (explicit
+                # SSH_TARGET > NAS_IP > 'nas'); NAS_IP is passed too so the
+                # dashboard can resolve privileged-action hints inline even when
+                # an older .env still carries the placeholder alias.
                 "SSH_TARGET=${SSH_TARGET:-nas}",
+                "NAS_IP=${NAS_IP:-}",
                 "CLOUDFLARE_ACCESS_TEAM=${CLOUDFLARE_ACCESS_TEAM:-}",
                 "CLOUDFLARE_ACCESS_AUD=${CLOUDFLARE_ACCESS_AUD:-}",
                 "OIDC_ISSUER=${OIDC_ISSUER:-}",
@@ -500,13 +535,14 @@ class ComposeGenerator:
 
 
 def generate_compose_from_config(
-    config_path: str = "build/config.yaml", output_path: str = "docker-compose.yaml"
+    config_path: Optional[str] = None, output_path: str = "docker-compose.yaml"
 ) -> Dict[str, Any]:
     """
     Helper function to generate docker-compose.yaml from build config.
 
     Args:
-        config_path: Path to build configuration file
+        config_path: Explicit build-config path; None resolves the active
+            version's bundled config.yaml, else the built-in pins.
         output_path: Path where to save the compose file
 
     Returns:

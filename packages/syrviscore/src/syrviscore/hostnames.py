@@ -23,13 +23,11 @@ from typing import Any, Dict, List, Optional
 
 from . import exposure as exposure_mod
 from .config_reader import read_config
+from .traefik_config import PRIMORDIAL_UIS
 
-# Primordial core UIs Traefik always routes, at fixed subdomains (mirrors the
-# compose labels + the dashboard's launcher links).
-_PRIMORDIAL_UIS = (
-    ("portainer", "portainer"),
-    ("traefik", "traefik"),
-)
+# Primordial core UIs Traefik always routes — derived from the single catalog in
+# traefik_config so the subdomain mapping can't drift between consumers.
+_PRIMORDIAL_UIS = tuple((ui["service"], ui["subdomain"]) for ui in PRIMORDIAL_UIS)
 
 
 def _host(subdomain: str, domain: str) -> str:

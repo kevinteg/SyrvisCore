@@ -16,6 +16,11 @@ traefik:
   enabled: true
   subdomain: wiki
   port: 4567
+  # How this service is reached from outside SyrvisCore:
+  #   internal = LAN-only (a local DNS record points wiki.<domain> at Traefik)
+  #   tunnel   = remote via the Cloudflare Tunnel + Access
+  # SyrvisCore routes both identically; this drives `syrvis stack hostnames`.
+  exposure: internal
 
 # Restart policy
 restart: unless-stopped

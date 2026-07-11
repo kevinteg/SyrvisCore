@@ -1,0 +1,35 @@
+# Uptime Kuma for SyrvisCore
+# A self-hosted status/monitoring page — a good example of a TUNNEL service:
+# something you want to reach from anywhere (e.g. to check status while away),
+# gated by Cloudflare Access.
+
+name: uptime-kuma
+version: "1.23.16"
+description: "Self-hosted uptime monitor"
+author: "SyrvisCore"
+homepage: "https://github.com/louislam/uptime-kuma"
+
+# Docker image - pin a specific version (floating tags like :latest are rejected)
+image: louislam/uptime-kuma:1.23.16
+
+# Traefik routing
+traefik:
+  enabled: true
+  subdomain: status
+  port: 3001
+  # exposure: tunnel -> reachable remotely through the Cloudflare Tunnel + an
+  # Access policy. `syrvis stack hostnames` then reports a proxied CNAME at the
+  # tunnel (rather than a LAN A record) for status.<domain>. SyrvisCore does NOT
+  # create that record — a deployment repo (e.g. home-tech) reconciles it.
+  exposure: tunnel
+
+# Restart policy
+restart: unless-stopped
+
+# Volume mounts (relative -> resolved under $SYRVIS_HOME/data/uptime-kuma/)
+volumes:
+  - "data:/app/data:rw"
+
+# Networks (proxy is always included)
+networks:
+  - proxy
