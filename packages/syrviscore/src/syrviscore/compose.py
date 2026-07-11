@@ -281,7 +281,10 @@ class ComposeGenerator:
             return None
 
         image = self.build_config["docker_images"]["dashboard"]["full_image"]
-        subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
+        stack = getattr(self, "_stack", None)
+        subdomain = stack.setting("dashboard", "subdomain") if stack is not None else None
+        if not subdomain:
+            subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
 
         return {
             "image": image,
@@ -380,9 +383,14 @@ class ComposeGenerator:
             },
         }
 
-    def generate_compose(self) -> Dict[str, Any]:
+    def generate_compose(self, stack=None) -> Dict[str, Any]:
         """
         Generate complete docker-compose configuration.
+
+        Args:
+            stack: an explicit ``stack.Stack`` declaring which optional core
+                services to emit. When None, it is loaded from
+                ``config/stack.yaml`` (falling back to an env-inferred default).
 
         Returns:
             Docker Compose configuration dictionary
@@ -393,6 +401,11 @@ class ComposeGenerator:
         if not self.build_config:
             raise ValueError("Build config not loaded. Call load_config() first.")
 
+        # Which core-tier services this instance declares (config/stack.yaml).
+        from . import stack as stack_mod
+
+        self._stack = stack if stack is not None else stack_mod.load_stack()
+
         # Get and validate network configuration from environment
         network_config = self._get_network_config_from_env()
         self._validate_network_config(network_config)
@@ -400,26 +413,29 @@ class ComposeGenerator:
         compose = {
             "version": "3.8",
             "services": {
+                # Primordial: always present.
                 "traefik": self._generate_traefik_service(network_config),
                 "portainer": self._generate_portainer_service(),
             },
             "networks": self._generate_networks(network_config),
         }
 
-        # Add Cloudflared if configured
-        cloudflared = self._generate_cloudflared_service()
-        if cloudflared:
-            compose["services"]["cloudflared"] = cloudflared
+        # Optional core services — emitted only when declared enabled in the stack
+        # (and, for cloudflared/DDNS, when their config is present).
+        if self._stack.is_enabled("cloudflared"):
+            cloudflared = self._generate_cloudflared_service()
+            if cloudflared:
+                compose["services"]["cloudflared"] = cloudflared
 
-        # Add the dashboard (core service, emitted whenever its image is configured)
-        dashboard = self._generate_dashboard_service()
-        if dashboard:
-            compose["services"]["syrviscore-dashboard"] = dashboard
+        if self._stack.is_enabled("dashboard"):
+            dashboard = self._generate_dashboard_service()
+            if dashboard:
+                compose["services"]["syrviscore-dashboard"] = dashboard
 
-        # Add Cloudflare DDNS if an API token is configured
-        ddns = self._generate_ddns_service()
-        if ddns:
-            compose["services"]["cloudflare-ddns"] = ddns
+        if self._stack.is_enabled("cloudflare_ddns"):
+            ddns = self._generate_ddns_service()
+            if ddns:
+                compose["services"]["cloudflare-ddns"] = ddns
 
         return compose
 
