@@ -67,7 +67,13 @@ def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
     new_static = generate_traefik_static_config()
     old_static = static_path.read_text() if static_path.exists() else None
     static_changed = old_static != new_static
-    static_path.write_text(new_static)
+    # Only touch the file on a REAL change: the stale-static drift check compares
+    # the file's mtime against Traefik's StartedAt, so a no-op regeneration that
+    # rewrote identical bytes would bump the mtime and raise a false
+    # stale_static_config flag (observed live: `stack apply` with unchanged
+    # content flipped the dashboard to degraded).
+    if static_changed:
+        static_path.write_text(new_static)
     static_path.chmod(0o644)
 
     config_dir = traefik_data / "config"

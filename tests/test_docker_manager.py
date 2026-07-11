@@ -411,6 +411,23 @@ class TestCreateTraefikFiles:
         traefik_yml.write_text("stale: config\n")
         assert write_traefik_config_files() is True
 
+    def test_noop_regeneration_preserves_static_mtime(self, temp_syrvis_home_with_compose):
+        """An unchanged static config must NOT be rewritten: the stale-static
+        drift check is mtime-vs-StartedAt, so a no-op regen that bumped the
+        mtime would raise a false stale_static_config flag (seen live)."""
+        import os
+
+        from syrviscore.docker_manager import write_traefik_config_files
+
+        write_traefik_config_files()
+        traefik_yml = temp_syrvis_home_with_compose / "data" / "traefik" / "traefik.yml"
+        # Backdate the file, then regenerate with identical content.
+        old_epoch = traefik_yml.stat().st_mtime - 3600
+        os.utime(str(traefik_yml), (old_epoch, old_epoch))
+
+        assert write_traefik_config_files() is False
+        assert traefik_yml.stat().st_mtime == old_epoch  # untouched
+
     def test_start_core_services_restarts_traefik_on_static_change(
         self, mock_docker_client, temp_syrvis_home_with_compose
     ):
