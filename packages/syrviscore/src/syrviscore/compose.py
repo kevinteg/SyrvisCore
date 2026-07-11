@@ -297,6 +297,10 @@ class ComposeGenerator:
         management = bool(stack.setting("dashboard", "management", False)) if stack else False
         socket_mount = "/var/run/docker.sock:/var/run/docker.sock" + ("" if management else ":ro")
         data_mount = "../data:/syrvis/data" + ("" if management else ":ro")
+        # Layer 2 service definitions live here; the dashboard reads them via
+        # ServiceManager.list(). Without this mount the dashboard shows no L2
+        # services at all. Read-only unless management (add/remove) is declared.
+        services_mount = "../services:/syrvis/services" + ("" if management else ":ro")
 
         return {
             "image": image,
@@ -322,6 +326,7 @@ class ComposeGenerator:
                 socket_mount,
                 "../config:/syrvis/config:ro",
                 data_mount,
+                services_mount,
                 # so paths.get_syrvis_home() trusts SYRVIS_HOME (it looks for the manifest).
                 "../.syrviscore-manifest.json:/syrvis/.syrviscore-manifest.json:ro",
             ],

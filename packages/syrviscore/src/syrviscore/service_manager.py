@@ -368,12 +368,30 @@ class ServiceManager:
                 success, msg = self._start_service(service.name, compose_path)
                 if not success:
                     raise RuntimeError(f"failed to start: {msg}")
+                self._reload_traefik()
                 return True, f"Service '{service.name}' added and started"
 
+            self._reload_traefik()
             return True, f"Service '{service.name}' added (not started)"
         except Exception as e:
             self._rollback_add(service.name)
             return False, f"Service '{service.name}' not added ({e})"
+
+    def _reload_traefik(self) -> None:
+        """Restart Traefik so it loads a newly written / removed L2 dynamic config.
+
+        Traefik's file-provider watch does not reliably fire for files added to a
+        subdirectory on Synology bind mounts, so a new route can sit unloaded
+        until Traefik re-reads ``/config``. Restarting the container forces that.
+        Best-effort: a failure here never fails the service operation (the manual
+        fallback is ``docker restart traefik``).
+        """
+        try:
+            import docker
+
+            docker.from_env().containers.get("traefik").restart(timeout=10)
+        except Exception:  # noqa: BLE001 - best-effort; never fail the op
+            pass
 
     def _rollback_add(self, name: str) -> None:
         """Remove every artifact created for a service (best-effort)."""
@@ -509,8 +527,9 @@ class ServiceManager:
             self._stop_service(name, compose_path)
             compose_path.unlink()
 
-        # Remove Traefik config
+        # Remove Traefik config + reload so the route is dropped
         self.traefik_config.remove_config(name)
+        self._reload_traefik()
 
         # Remove service definition
         if service_dir.exists():
