@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-base-900 text-slate-200 antialiased;
+  margin: 0;
+}
+
+/* Thin, unobtrusive scrollbars for the log/console panes. */
+.scroll-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  @apply bg-base-600 rounded;
+}
