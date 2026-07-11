@@ -314,15 +314,19 @@ class ComposeGenerator:
                 "../.syrviscore-manifest.json:/syrvis/.syrviscore-manifest.json:ro",
             ],
             "labels": [
+                # Router names are prefixed `syrvis-dashboard` to avoid colliding with
+                # the generated file-provider `dashboard` router (Traefik's own UI).
                 "traefik.enable=true",
-                "traefik.http.routers.dashboard-http.entrypoints=web",
-                "traefik.http.routers.dashboard-http.rule=Host(`" + subdomain + ".${DOMAIN}`)",
-                "traefik.http.routers.dashboard-http.middlewares=https-redirect@file",
-                "traefik.http.routers.dashboard.entrypoints=websecure",
-                "traefik.http.routers.dashboard.rule=Host(`" + subdomain + ".${DOMAIN}`)",
-                "traefik.http.routers.dashboard.tls=true",
-                "traefik.http.routers.dashboard.tls.certresolver=letsencrypt",
-                "traefik.http.services.dashboard.loadbalancer.server.port=8000",
+                "traefik.http.routers.syrvis-dashboard-http.entrypoints=web",
+                "traefik.http.routers.syrvis-dashboard-http.rule=Host(`"
+                + subdomain
+                + ".${DOMAIN}`)",
+                "traefik.http.routers.syrvis-dashboard-http.middlewares=https-redirect@file",
+                "traefik.http.routers.syrvis-dashboard.entrypoints=websecure",
+                "traefik.http.routers.syrvis-dashboard.rule=Host(`" + subdomain + ".${DOMAIN}`)",
+                "traefik.http.routers.syrvis-dashboard.tls=true",
+                "traefik.http.routers.syrvis-dashboard.tls.certresolver=letsencrypt",
+                "traefik.http.services.syrvis-dashboard.loadbalancer.server.port=8000",
             ],
         }
 
