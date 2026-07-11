@@ -9,6 +9,18 @@ from syrviscore_dashboard.app import create_app
 from syrviscore_dashboard.settings import DashboardSettings
 
 
+@pytest.fixture(autouse=True)
+def _no_real_docker(monkeypatch):
+    """Make every test treat Docker as unavailable, regardless of the host.
+
+    Locally there's often no daemon, but CI runners have one — point DOCKER_HOST
+    at a dead socket so "docker unavailable" paths are deterministic everywhere.
+    Tests that need a container monkeypatch ``docker_util.get_managed_container``
+    and never hit this.
+    """
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/syrvis-test-docker.sock")
+
+
 @pytest.fixture
 def syrvis_home(tmp_path):
     """A minimal but realistic SYRVIS_HOME: manifest + config/.env + compose."""
