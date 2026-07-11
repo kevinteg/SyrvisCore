@@ -136,3 +136,37 @@ export interface Updates {
 
 export const getLinks = () => api<LinksResponse>("/api/links");
 export const getUpdates = () => api<Updates>("/api/updates");
+
+export type RouteKind = "core" | "synology" | "service";
+export type Exposure = "internal" | "tunnel";
+export type RouteHealth = "ok" | "degraded" | "down" | "unknown";
+
+export interface RouteReachability {
+  status: RouteHealth;
+  http_code: number | null;
+  detail: string;
+}
+
+export interface RouteEntry {
+  service: string;
+  kind: RouteKind;
+  subdomain: string;
+  hostname: string;
+  exposure: Exposure;
+  enabled: boolean;
+  access_required: boolean;
+  managed: boolean;
+  router_present: boolean;
+  reachability: RouteReachability;
+}
+
+export interface RoutesResponse {
+  domain: string | null;
+  traefik_ip: string | null;
+  traefik_api_ok: boolean;
+  entries: RouteEntry[];
+  error?: string;
+  note?: string;
+}
+
+export const getRoutes = () => api<RoutesResponse>("/api/routes");

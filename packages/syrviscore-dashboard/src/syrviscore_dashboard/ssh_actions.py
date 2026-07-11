@@ -68,7 +68,9 @@ _BY_ID = {a.id: a for a in CATALOG}
 
 
 def render(settings, action: SshAction) -> str:
-    return "ssh {} '{}'".format(settings.ssh_target, action.command)
+    # ssh_target_effective resolves the placeholder alias to the concrete NAS_IP
+    # when known, so the hint works without assuming the operator's ssh config.
+    return "ssh {} '{}'".format(settings.ssh_target_effective, action.command)
 
 
 def catalog(settings) -> List[dict]:

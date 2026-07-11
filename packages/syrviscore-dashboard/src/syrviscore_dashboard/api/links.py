@@ -6,21 +6,20 @@ enabled Synology services, and any Layer 2 services. All under the instance doma
 
 from fastapi import APIRouter
 
+# Both catalogs come from syrviscore.traefik_config (the single source) so the
+# service→subdomain mapping cannot drift between the CLI, the hostnames report,
+# the validators, and this launcher.
+from syrviscore.traefik_config import PRIMORDIAL_UIS, SYNOLOGY_SERVICES
+
 router = APIRouter(prefix="/api", tags=["links"])
 
 # Primordial core UIs (always routed by SyrvisCore).
-_PRIMORDIAL = [
-    ("portainer", "Portainer", "Container management"),
-    ("traefik", "Traefik", "Reverse proxy dashboard"),
-]
+_PRIMORDIAL = [(ui["subdomain"], ui["label"], ui["description"]) for ui in PRIMORDIAL_UIS]
 
 # Synology services keyed by their enabled_components flag -> (subdomain, label).
 _SYNOLOGY = {
-    "synology_dsm": ("dsm", "DSM"),
-    "synology_photos": ("photos", "Photos"),
-    "synology_drive": ("drive", "Drive"),
-    "synology_audio": ("audio", "Audio"),
-    "synology_video": ("video", "Video"),
+    "synology_{}".format(key): (svc["subdomain"], svc["label"])
+    for key, svc in SYNOLOGY_SERVICES.items()
 }
 
 

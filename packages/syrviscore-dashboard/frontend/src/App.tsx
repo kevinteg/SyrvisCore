@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Header, type Tab } from "./components/Header";
 import { OverviewPanel } from "./components/OverviewPanel";
 import { ServicesPanel } from "./components/ServicesPanel";
+import { RoutesPanel } from "./components/RoutesPanel";
 import { LogsPanel } from "./components/LogsPanel";
 import { ConfigPanel } from "./components/ConfigPanel";
 import { useHealthStream } from "./lib/useHealthStream";
@@ -9,6 +10,7 @@ import { useHealthStream } from "./lib/useHealthStream";
 const TABS: Tab[] = [
   { id: "overview", label: "Overview" },
   { id: "services", label: "Services" },
+  { id: "routes", label: "Routes" },
   { id: "logs", label: "Logs" },
   { id: "config", label: "Config" },
 ];
@@ -26,6 +28,7 @@ export default function App() {
           <OverviewPanel snapshot={snapshot} isLoading={isLoading} error={error} />
         )}
         {tab === "services" && <ServicesPanel />}
+        {tab === "routes" && <RoutesPanel />}
         {tab === "logs" && <LogsPanel />}
         {tab === "config" && <ConfigPanel />}
       </main>

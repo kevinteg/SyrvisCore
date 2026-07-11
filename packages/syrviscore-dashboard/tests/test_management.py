@@ -134,3 +134,16 @@ def test_system_action_command(client):
     body = client.post("/api/system/actions/verify-fix").json()
     assert body["ssh_command"] == "ssh nas 'sudo syrvis verify --fix'"
     assert client.post("/api/system/actions/nope").status_code == 404
+
+
+def test_ssh_hint_resolves_placeholder_alias_to_nas_ip(make_settings):
+    """The placeholder 'nas' alias resolves to the concrete NAS_IP when known, so
+    privileged-action hints work without assuming the operator's ssh config."""
+    client = TestClient(create_app(make_settings(nas_ip="192.168.8.3")))
+    body = client.post("/api/system/actions/verify-fix").json()
+    assert body["ssh_command"] == "ssh 192.168.8.3 'sudo syrvis verify --fix'"
+
+    # An explicitly configured non-placeholder target still wins over NAS_IP.
+    client = TestClient(create_app(make_settings(ssh_target="admin@ds", nas_ip="192.168.8.3")))
+    body = client.post("/api/system/actions/verify-fix").json()
+    assert body["ssh_command"] == "ssh admin@ds 'sudo syrvis verify --fix'"

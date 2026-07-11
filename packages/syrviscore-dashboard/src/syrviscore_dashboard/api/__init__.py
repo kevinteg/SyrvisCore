@@ -10,6 +10,7 @@ from . import (
     links,
     logs,
     me,
+    routes,
     services,
     system,
     updates,
@@ -25,6 +26,7 @@ api_router.include_router(events.router)
 api_router.include_router(logs.router)
 api_router.include_router(me.router)
 api_router.include_router(links.router)
+api_router.include_router(routes.router)
 api_router.include_router(updates.router)
 
 __all__ = ["api_router"]

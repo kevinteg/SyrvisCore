@@ -37,6 +37,7 @@ class DashboardSettings(BaseSettings):
     # --- management ---
     enable_l2_mutations: bool = False
     ssh_target: str = "nas"  # host alias used when rendering `ssh <target> '...'` hints
+    nas_ip: str = ""  # the NAS host IP; preferred over the placeholder alias in hints
 
     # --- auth ---
     dashboard_auth_mode: AuthMode = "none"
@@ -49,6 +50,18 @@ class DashboardSettings(BaseSettings):
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
     oidc_redirect_url: str = ""  # e.g. https://dash.<domain>/auth/callback
+
+    @property
+    def ssh_target_effective(self) -> str:
+        """The target rendered into privileged `ssh <target> '...'` hints.
+
+        An explicitly configured SSH_TARGET wins; the placeholder alias 'nas'
+        (or an empty value) resolves to the concrete NAS_IP when known, so the
+        hint works without assuming the operator's ssh config defines the alias.
+        """
+        if self.ssh_target and self.ssh_target != "nas":
+            return self.ssh_target
+        return self.nas_ip or self.ssh_target or "nas"
 
     @property
     def auth_mode(self) -> AuthMode:
