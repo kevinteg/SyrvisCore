@@ -141,7 +141,7 @@ class TestStartStopRestart:
             assert "stop" in args
 
     def test_restart_core_services(self, mock_docker_client, temp_syrvis_home_with_compose):
-        """Test restarting services."""
+        """Restart force-recreates so both static-config AND compose-spec changes apply."""
         with patch("syrviscore.docker_manager.subprocess.run") as mock_run:
             mock_run.return_value = Mock(returncode=0)
 
@@ -150,7 +150,8 @@ class TestStartStopRestart:
 
             mock_run.assert_called_once()
             args = mock_run.call_args[0][0]
-            assert "restart" in args
+            assert "up" in args
+            assert "--force-recreate" in args
 
 
 class TestGetContainerStatus:
@@ -349,6 +350,83 @@ class TestCreateTraefikFiles:
         # Verify acme.json still has original content
         assert acme_file.read_text() == cert_data
 
+    def test_remove_disabled_core_containers(self, temp_syrvis_home_with_compose):
+        """A disabled optional core service's container is stopped+removed on apply;
+        enabled and primordial services are never touched."""
+        from syrviscore.docker_manager import remove_disabled_core_containers
+
+        # stack.yaml: dashboard disabled, cloudflared enabled.
+        (temp_syrvis_home_with_compose / "config" / "stack.yaml").write_text(
+            "version: 1\n"
+            "services:\n"
+            "  traefik: {enabled: true}\n"
+            "  portainer: {enabled: true}\n"
+            "  cloudflared: {enabled: true}\n"
+            "  dashboard: {enabled: false}\n"
+            "  cloudflare_ddns: {enabled: false}\n"
+        )
+
+        containers = {
+            "syrviscore-dashboard": Mock(),
+            "cloudflared": Mock(),
+            "traefik": Mock(),
+        }
+
+        class _NotFound(Exception):
+            pass
+
+        def get_container(name):
+            if name in containers:
+                return containers[name]
+            raise _NotFound(name)
+
+        with patch("docker.from_env") as mock_env:
+            mock_env.return_value.containers.get.side_effect = get_container
+            removed = remove_disabled_core_containers()
+
+        # Only the disabled-but-present dashboard was removed; ddns had no container.
+        assert removed == ["syrviscore-dashboard"]
+        containers["syrviscore-dashboard"].stop.assert_called_once()
+        containers["syrviscore-dashboard"].remove.assert_called_once()
+        containers["cloudflared"].stop.assert_not_called()
+        containers["traefik"].stop.assert_not_called()
+
+    def test_write_traefik_config_files_reports_static_change(self, temp_syrvis_home_with_compose):
+        """write_traefik_config_files() must flag when the STATIC config changed.
+
+        Regression guard for the ping-404 class of bug: static config is only read
+        by Traefik at process start, so callers rely on this boolean to know when a
+        restart is required. First write (no prior file) -> True; an identical
+        rewrite -> False; a rewrite over stale content -> True.
+        """
+        from syrviscore.docker_manager import write_traefik_config_files
+
+        # First write: no traefik.yml existed -> change signalled.
+        assert write_traefik_config_files() is True
+        # Identical rewrite: content matches on disk -> no change.
+        assert write_traefik_config_files() is False
+
+        # Simulate an upgrade that adds a line (e.g. `ping: {}`) to the static file.
+        traefik_yml = temp_syrvis_home_with_compose / "data" / "traefik" / "traefik.yml"
+        traefik_yml.write_text("stale: config\n")
+        assert write_traefik_config_files() is True
+
+    def test_start_core_services_restarts_traefik_on_static_change(
+        self, mock_docker_client, temp_syrvis_home_with_compose
+    ):
+        """A static-config change during `syrvis start` must trigger a Traefik restart.
+
+        `docker compose up -d` does not recreate a container for a bind-mounted file
+        edit, so start_core_services() restarts Traefik itself when the static config
+        changed. (First start has no prior traefik.yml, so a change is always seen.)
+        """
+        manager = DockerManager()
+        with patch("syrviscore.docker_manager.restart_traefik_if_running") as mock_restart, patch(
+            "syrviscore.docker_manager.DockerManager._run_compose_command"
+        ), patch("syrviscore.docker_manager.DockerManager._ensure_macvlan_shim"):
+            manager.start_core_services()
+            mock_restart.assert_called_once()
+
     def test_config_files_are_overwritten(self, mock_docker_client, temp_syrvis_home_with_compose):
         """Test that traefik.yml and dynamic.yml ARE overwritten to allow updates."""
         manager = DockerManager()
@@ -466,6 +544,6 @@ class TestDockerErrorHandling:
             with pytest.raises(DockerError) as exc_info:
                 manager.restart_core_services()
 
-            # Error should mention which command failed
-            assert "restart" in str(exc_info.value)
+            # Error should mention which command failed (restart = up --force-recreate)
+            assert "--force-recreate" in str(exc_info.value)
             assert "docker-compose" in str(exc_info.value)

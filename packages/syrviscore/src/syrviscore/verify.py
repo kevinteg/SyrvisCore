@@ -39,6 +39,42 @@ def _core_actual_from_docker() -> Dict[str, Dict[str, str]]:
     }
 
 
+def gather_static_config_drift() -> Optional[drift.DriftItem]:
+    """Detect a traefik.yml newer than the running Traefik process.
+
+    Traefik reads its STATIC config only at process start, so a regenerated
+    ``traefik.yml`` that postdates the container's StartedAt is silently NOT in
+    effect (the /ping-404 class of failure). Best-effort and read-only: any
+    error (docker unreachable, file missing, container absent) yields None —
+    the container-level drift kinds already cover those states.
+    """
+    try:
+        static_path = paths.get_traefik_data_dir() / "traefik.yml"
+        if not static_path.exists():
+            return None
+
+        import docker
+
+        container = docker.from_env().containers.get("traefik")
+        if container.status != "running":
+            return None  # a stopped/missing traefik is reported as STOPPED/MISSING
+        started_at = (container.attrs.get("State") or {}).get("StartedAt") or ""
+        stale = drift.static_config_is_stale(static_path.stat().st_mtime, started_at)
+        if not stale:
+            return None
+        from datetime import datetime, timezone
+
+        mtime_iso = datetime.fromtimestamp(static_path.stat().st_mtime, timezone.utc).isoformat()
+        return drift.DriftItem(
+            service="traefik",
+            kind=drift.DriftKind.STALE_STATIC,
+            expected=mtime_iso,
+            actual=started_at,
+        )
+    except Exception:  # noqa: BLE001 - best-effort; never break verify
+        return None
+
+
 def gather_core_drift(actual: Optional[Dict[str, Dict[str, str]]] = None) -> drift.DriftReport:
     """Build the core-stack drift report.
 
@@ -49,7 +85,65 @@ def gather_core_drift(actual: Optional[Dict[str, Dict[str, str]]] = None) -> dri
     expected = _core_compose_expected()
     if actual is None:
         actual = _core_actual_from_docker()
-    return drift.detect_drift("core", expected, actual)
+    report = drift.detect_drift("core", expected, actual)
+
+    # Stale-static-config is a process-level drift the container diff can't see.
+    stale = gather_static_config_drift()
+    if stale is not None:
+        report.items.append(stale)
+    return report
+
+
+def gather_l2_drift() -> Optional[drift.DriftReport]:
+    """Drift report for the Layer 2 set: every installed service should be
+    running its declared image.
+
+    Returns None when no services are installed or docker is unreachable (core
+    drift already reports docker-down); an unloadable manifest surfaces as a
+    MISSING item rather than being silently skipped.
+    """
+    try:
+        from .service_manager import ServiceManager
+        from .service_schema import load_service_definition
+
+        manager = ServiceManager()
+        services_dir = manager.services_dir
+        if not services_dir.exists():
+            return None
+
+        expected: Dict[str, str] = {}
+        container_names: Dict[str, str] = {}
+        for service_dir in sorted(services_dir.iterdir()):
+            manifest = service_dir / "syrvis-service.yaml"
+            if not service_dir.is_dir() or not manifest.exists():
+                continue
+            try:
+                svc = load_service_definition(manifest)
+                expected[svc.name] = svc.image
+                container_names[svc.name] = svc.container_name or svc.name
+            except Exception:  # noqa: BLE001 - broken manifest -> shows as MISSING
+                expected[service_dir.name] = "unloadable-manifest"
+                container_names[service_dir.name] = service_dir.name
+        if not expected:
+            return None
+
+        import docker
+
+        client = docker.from_env()
+        actual: Dict[str, Dict[str, str]] = {}
+        for name, cname in container_names.items():
+            try:
+                container = client.containers.get(cname)
+                actual[name] = {
+                    "status": container.status,
+                    "image": (container.attrs.get("Config") or {}).get("Image") or "Unknown",
+                }
+            except Exception:  # noqa: BLE001 - absent container -> MISSING drift
+                pass
+        # L2 containers outside the declared set are not this scope's concern.
+        return drift.detect_drift("layer2", expected, actual, flag_unexpected=False)
+    except Exception:  # noqa: BLE001 - docker/library unavailable: skip the tier
+        return None
 
 
 def run_validation_reports(smoke: bool) -> List[validators.ValidationReport]:
@@ -108,6 +202,15 @@ def build_report(
     except Exception as e:  # pragma: no cover - defensive
         result["drift"] = {"scope": "core", "error": str(e)}
 
+    # Layer 2 drift — the declared service set, not just the core stack.
+    l2_report = gather_l2_drift()
+    if l2_report is not None:
+        result["l2_drift"] = l2_report.to_dict()
+        if not l2_report.in_sync:
+            result["healthy"] = False
+    else:
+        result["l2_drift"] = None
+
     return result
 
 
@@ -155,10 +258,30 @@ def remediate(smoke: bool) -> List[Dict[str, object]]:
 
     try:
         report = gather_core_drift()
-        if not report.in_sync:
+        stale_static = [i for i in report.items if i.kind is drift.DriftKind.STALE_STATIC]
+        other_failures = [f for f in report.failures if f.kind is not drift.DriftKind.STALE_STATIC]
+        if other_failures:
             ok, msg = _reconcile_core_drift()
             actions.append(
                 {"target": "core-drift", "action": "compose_up", "ok": ok, "message": msg}
+            )
+        if stale_static:
+            # `up -d` won't restart a container for a bind-mounted file change,
+            # so the stale-static remediation is a targeted Traefik restart.
+            from .docker_manager import restart_traefik_if_running
+
+            ok = restart_traefik_if_running()
+            actions.append(
+                {
+                    "target": "traefik-static-config",
+                    "action": "restart_traefik",
+                    "ok": ok,
+                    "message": (
+                        "restarted traefik to load the regenerated static config"
+                        if ok
+                        else "could not restart traefik (not running or docker unreachable)"
+                    ),
+                }
             )
     except DockerConnectionError as e:
         actions.append(
@@ -175,6 +298,29 @@ def remediate(smoke: bool) -> List[Dict[str, object]]:
     except Exception as e:  # pragma: no cover - defensive
         actions.append(
             {"target": "core-drift", "action": "compose_up", "ok": False, "message": str(e)}
+        )
+
+    # Layer 2 drift: (re)start each failing declared service — its per-service
+    # `compose up -d` recreates on spec change, so this also heals image drift.
+    try:
+        l2_report = gather_l2_drift()
+        if l2_report is not None and not l2_report.in_sync:
+            from .service_manager import ServiceManager
+
+            sm = ServiceManager()
+            for item in l2_report.failures:
+                ok, msg = sm.start(item.service)
+                actions.append(
+                    {
+                        "target": "l2:{}".format(item.service),
+                        "action": "service_start",
+                        "ok": ok,
+                        "message": msg,
+                    }
+                )
+    except Exception as e:  # noqa: BLE001 - defensive
+        actions.append(
+            {"target": "l2-drift", "action": "service_start", "ok": False, "message": str(e)}
         )
 
     return actions
@@ -209,6 +355,20 @@ def _render_text(result: Dict[str, object]) -> None:
                         item["service"], item["kind"], item["expected"], item["actual"]
                     )
                 )
+
+    l2_data = result.get("l2_drift")
+    if l2_data and "error" not in l2_data:
+        if l2_data["in_sync"]:
+            click.echo("  L2 services: in sync")
+        else:
+            click.echo("  L2 services: OUT OF SYNC")
+            for item in l2_data["items"]:
+                if item["failure"]:
+                    click.echo(
+                        "    ✗ {} [{}] expected={} actual={}".format(
+                            item["service"], item["kind"], item["expected"], item["actual"]
+                        )
+                    )
 
     remediation_actions = result.get("remediation")
     if remediation_actions:

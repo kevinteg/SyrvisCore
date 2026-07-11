@@ -16,7 +16,7 @@ import shutil
 import tempfile
 import subprocess
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple
 
 import requests
 
@@ -60,22 +60,6 @@ def get_release_by_tag(tag: str) -> Optional[Dict[str, Any]]:
         return None
     except Exception:
         return None
-
-
-def list_releases(limit: int = 10) -> List[Dict[str, Any]]:
-    """List available releases from GitHub."""
-    try:
-        response = requests.get(
-            GITHUB_API_URL,
-            params={"per_page": limit},
-            headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10,
-        )
-        if response.status_code == 200:
-            return response.json()
-        return []
-    except Exception:
-        return []
 
 
 def parse_version(version_str: str) -> Tuple[int, ...]:

@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 import yaml
 
 from . import paths
+from .errors import SyrvisError
 
 STACK_SCHEMA_VERSION = 1
 
@@ -47,8 +48,10 @@ CONTAINER_NAME = {
 }
 
 
-class StackError(Exception):
+class StackError(SyrvisError):
     """Raised on an invalid stack operation (unknown/primordial service, bad file)."""
+
+    code = "stack_invalid"
 
 
 @dataclass

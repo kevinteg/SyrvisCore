@@ -242,3 +242,91 @@ class TestVerifyCommand:
         result = CliRunner().invoke(cli, ["verify"])
         assert result.exit_code == 1
         assert "UNHEALTHY" in result.output
+
+
+class TestStaleStaticConfig:
+    """The STALE_STATIC drift kind: static config newer than the running process."""
+
+    def test_parse_docker_timestamp_nanoseconds(self):
+        # Docker emits RFC3339 with nanosecond fractions Python 3.8 can't parse raw.
+        parsed = drift.parse_docker_timestamp("2026-07-11T15:18:14.123456789Z")
+        assert parsed is not None
+        assert parsed.tzinfo is not None
+        assert (parsed.year, parsed.minute, parsed.second) == (2026, 18, 14)
+
+    def test_parse_docker_timestamp_garbage(self):
+        assert drift.parse_docker_timestamp("") is None
+        assert drift.parse_docker_timestamp("not-a-time") is None
+
+    def test_static_config_is_stale(self):
+        started = "2026-07-11T08:49:59Z"
+        started_epoch = drift.parse_docker_timestamp(started).timestamp()
+        # File written AFTER the process started -> stale.
+        assert drift.static_config_is_stale(started_epoch + 60, started) is True
+        # File written BEFORE the process started -> fine.
+        assert drift.static_config_is_stale(started_epoch - 60, started) is False
+        # Unparseable StartedAt -> unknown (None), never a false positive.
+        assert drift.static_config_is_stale(started_epoch, "garbage") is None
+
+    def test_stale_static_is_a_failing_kind_with_description(self):
+        item = drift.DriftItem(
+            service="traefik",
+            kind=drift.DriftKind.STALE_STATIC,
+            expected="2026-07-11T02:04:07+00:00",
+            actual="2026-07-11T01:49:59Z",
+        )
+        assert item.is_failure
+        assert "restart traefik" in item.describe()
+        assert item.to_dict()["kind"] == "stale_static_config"
+
+
+class TestL2Drift:
+    def test_build_report_includes_l2_drift(self, monkeypatch, tmp_path):
+        """An out-of-sync L2 set flips the report unhealthy."""
+        stub = drift.DriftReport(
+            scope="layer2",
+            items=[
+                drift.DriftItem(
+                    service="wiki", kind=DriftKind.MISSING, expected="ghcr.io/a/wiki:1.0"
+                )
+            ],
+        )
+        monkeypatch.setattr(verify, "gather_l2_drift", lambda: stub)
+        monkeypatch.setattr(verify, "run_validation_reports", lambda smoke: [])
+        monkeypatch.setattr(
+            verify,
+            "gather_core_drift",
+            lambda actual=None: drift.DriftReport(scope="core", items=[]),
+        )
+        result = verify.build_report(smoke=True)
+        assert result["l2_drift"]["in_sync"] is False
+        assert result["healthy"] is False
+
+    def test_remediate_starts_failing_l2_services(self, monkeypatch):
+        stub = drift.DriftReport(
+            scope="layer2",
+            items=[drift.DriftItem(service="wiki", kind=DriftKind.STOPPED, actual="exited")],
+        )
+        monkeypatch.setattr(verify, "gather_l2_drift", lambda: stub)
+        monkeypatch.setattr(verify, "run_validation_reports", lambda smoke: [])
+        monkeypatch.setattr(verify.remediation, "resolve_install_dir", lambda: None)
+        monkeypatch.setattr(
+            verify,
+            "gather_core_drift",
+            lambda actual=None: drift.DriftReport(scope="core", items=[]),
+        )
+
+        started = []
+
+        class FakeSM:
+            def start(self, name):
+                started.append(name)
+                return True, "started"
+
+        import syrviscore.service_manager as sm_mod
+
+        monkeypatch.setattr(sm_mod, "ServiceManager", FakeSM)
+        actions = verify.remediate(smoke=True)
+        assert started == ["wiki"]
+        assert actions[-1]["target"] == "l2:wiki"
+        assert actions[-1]["ok"] is True

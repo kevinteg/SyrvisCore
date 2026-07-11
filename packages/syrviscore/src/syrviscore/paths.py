@@ -21,11 +21,13 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 
+from syrviscore.errors import SyrvisError
 
-class SyrvisHomeError(Exception):
+
+class SyrvisHomeError(SyrvisError):
     """Raised when SYRVIS_HOME is not set or invalid."""
 
-    pass
+    code = "home_not_found"
 
 
 # Schema version for manifest compatibility
@@ -192,19 +194,9 @@ def get_env_path() -> Path:
     return get_config_dir() / ".env"
 
 
-def get_env_template_path() -> Path:
-    """Get path to .env.template file."""
-    return get_config_dir() / ".env.template"
-
-
 def get_docker_compose_path() -> Path:
     """Get path to docker-compose.yaml file."""
     return get_config_dir() / "docker-compose.yaml"
-
-
-def get_traefik_config_dir() -> Path:
-    """Get path to Traefik config directory."""
-    return get_config_dir() / "traefik"
 
 
 # =============================================================================
@@ -220,16 +212,6 @@ def get_data_dir() -> Path:
 def get_traefik_data_dir() -> Path:
     """Get path to Traefik data directory."""
     return get_data_dir() / "traefik"
-
-
-def get_portainer_data_dir() -> Path:
-    """Get path to Portainer data directory."""
-    return get_data_dir() / "portainer"
-
-
-def get_cloudflared_data_dir() -> Path:
-    """Get path to Cloudflared data directory."""
-    return get_data_dir() / "cloudflared"
 
 
 # =============================================================================

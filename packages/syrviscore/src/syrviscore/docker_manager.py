@@ -6,6 +6,7 @@ Manages core services using Docker SDK and docker-compose.
 
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import docker
@@ -13,6 +14,7 @@ from docker.errors import DockerException
 from dotenv import load_dotenv
 
 from syrviscore.compose_cmd import resolve_compose_cmd
+from syrviscore.errors import SyrvisError
 from syrviscore.paths import (
     get_docker_compose_path,
     get_env_path,
@@ -25,16 +27,131 @@ from syrviscore.traefik_config import (
 )
 
 
-class DockerConnectionError(Exception):
+class DockerConnectionError(SyrvisError):
     """Raised when cannot connect to Docker daemon."""
 
-    pass
+    code = "docker_unreachable"
 
 
-class DockerError(Exception):
+class DockerError(SyrvisError):
     """Raised when Docker operations fail."""
 
-    pass
+    code = "docker_error"
+
+
+def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
+    """Write Traefik's static + dynamic config; return whether STATIC config changed.
+
+    This is the single writer of ``traefik.yml`` (static) and ``config/dynamic.yml``
+    (dynamic), plus a one-time ``acme.json`` create. Centralizing it lets every
+    caller enforce the invariant that a STATIC-config change must be followed by a
+    Traefik *restart* — Traefik only parses ``traefik.yml`` at process start, while
+    the file-provider hot-reloads the dynamic ``/config`` dir. Regenerating the
+    static file without restarting is why a change like ``ping: {}`` never took
+    effect (the dashboard then reports "up (API reachable) but /ping returned 404").
+
+    Idempotent. ``acme.json`` is created only if missing (never overwritten, to
+    preserve issued certificates).
+
+    Returns:
+        True if the static ``traefik.yml`` content differed from what was on disk
+        (so the caller should restart Traefik if it is running).
+    """
+    load_dotenv(get_env_path(), override=True)
+
+    home = Path(syrvis_home) if syrvis_home is not None else get_syrvis_home()
+    traefik_data = home / "data" / "traefik"
+    traefik_data.mkdir(parents=True, exist_ok=True)
+
+    static_path = traefik_data / "traefik.yml"
+    new_static = generate_traefik_static_config()
+    old_static = static_path.read_text() if static_path.exists() else None
+    static_changed = old_static != new_static
+    static_path.write_text(new_static)
+    static_path.chmod(0o644)
+
+    config_dir = traefik_data / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    dynamic_path = config_dir / "dynamic.yml"
+    dynamic_path.write_text(generate_traefik_dynamic_config())
+    dynamic_path.chmod(0o644)
+
+    acme_file = traefik_data / "acme.json"
+    if not acme_file.exists():
+        acme_file.touch()
+        acme_file.chmod(0o600)
+
+    return static_changed
+
+
+def remove_disabled_core_containers() -> List[str]:
+    """Stop and remove containers of OPTIONAL core services disabled in the stack.
+
+    ``docker compose up -d`` never removes a service that vanished from the
+    compose file, so ``stack disable <svc> --apply`` + ``syrvis start`` would
+    otherwise leave the disabled container running forever — breaking the
+    declarative promise that stack.yaml is intent the apply reconciles.
+
+    Deliberately narrower than ``--remove-orphans``: only the known OPTIONAL
+    core services (never primordial ones, never L2 or unrelated containers) and
+    only exact container-name matches. Best-effort: returns the names actually
+    removed and never raises.
+    """
+    from . import stack as stack_mod
+
+    removed: List[str] = []
+    try:
+        st = stack_mod.load_stack()
+    except Exception:  # noqa: BLE001 - unreadable stack: do nothing rather than guess
+        return removed
+
+    try:
+        import docker
+
+        client = docker.from_env()
+    except Exception:  # noqa: BLE001 - docker unreachable: nothing to reconcile
+        return removed
+
+    for name in stack_mod.OPTIONAL:
+        if st.is_enabled(name):
+            continue
+        container_name = stack_mod.CONTAINER_NAME[name]
+        try:
+            container = client.containers.get(container_name)
+        except Exception:  # noqa: BLE001 - NotFound or daemon hiccup: skip
+            continue
+        try:
+            container.stop(timeout=10)
+            container.remove()
+            removed.append(container_name)
+        except Exception:  # noqa: BLE001 - best-effort; report only what succeeded
+            pass
+
+    return removed
+
+
+def restart_traefik_if_running(timeout: int = 10) -> bool:
+    """Best-effort restart of the running Traefik container.
+
+    Traefik parses its STATIC config (``traefik.yml``) only at process start, so a
+    regenerated static file is invisible to the live process until it restarts.
+    Callers invoke this after :func:`write_traefik_config_files` reports a static
+    change. No-op (and never raises) if Traefik is absent or Docker is unreachable
+    — the manual fallback is ``docker restart traefik``.
+
+    Returns:
+        True if a restart was actually issued.
+    """
+    try:
+        import docker
+
+        container = docker.from_env().containers.get("traefik")
+        if container.status == "running":
+            container.restart(timeout=timeout)
+            return True
+    except Exception:  # noqa: BLE001 - best-effort; never fail the caller
+        pass
+    return False
 
 
 class DockerManager:
@@ -121,52 +238,32 @@ class DockerManager:
 
         return result
 
-    def _create_traefik_files(self) -> None:
+    def _create_traefik_files(self) -> bool:
         """
-        Create required Traefik files and directories with configuration.
+        Create/refresh required Traefik files and directories.
 
-        Creates/updates:
+        Delegates to :func:`write_traefik_config_files` (the single writer), which
+        creates/updates:
         - data/traefik/traefik.yml (mode 0644) - Static configuration (always updated)
         - data/traefik/config/dynamic.yml (mode 0644) - Dynamic configuration (always updated)
-        - data/traefik/acme.json (mode 0600) - Let's Encrypt certificates (created if missing, never overwritten)
+        - data/traefik/acme.json (mode 0600) - Let's Encrypt certs (created if missing, never overwritten)
 
-        This method is idempotent and safe to call multiple times.
+        Idempotent. Returns True if the STATIC config content changed (the caller
+        must then restart Traefik for it to take effect).
         """
-        # Load .env to get DOMAIN, ACME_EMAIL etc for traefik config
-        load_dotenv(get_env_path(), override=True)
+        return write_traefik_config_files()
 
-        syrvis_home = get_syrvis_home()
-        traefik_data = syrvis_home / "data" / "traefik"
-
-        # Ensure traefik data directory exists
-        traefik_data.mkdir(parents=True, exist_ok=True)
-
-        # Write traefik.yml static configuration (always update)
-        traefik_yml = traefik_data / "traefik.yml"
-        traefik_yml.write_text(generate_traefik_static_config())
-        traefik_yml.chmod(0o644)
-
-        # Create config DIRECTORY for dynamic configuration files
-        config_dir = traefik_data / "config"
-        config_dir.mkdir(parents=True, exist_ok=True)
-
-        # Write dynamic configuration (always update)
-        dynamic_yml = config_dir / "dynamic.yml"
-        dynamic_yml.write_text(generate_traefik_dynamic_config())
-        dynamic_yml.chmod(0o644)
-
-        # Create acme.json ONLY if it doesn't exist (preserves certificates)
-        acme_file = traefik_data / "acme.json"
-        if not acme_file.exists():
-            acme_file.touch()
-            acme_file.chmod(0o600)
-
-    def _ensure_macvlan_shim(self) -> None:
+    def _ensure_macvlan_shim(self) -> Optional[str]:
         """
         Ensure macvlan shim interface exists for host-to-container communication.
 
         This is required because macvlan containers cannot communicate with
         their host directly. The shim allows Traefik to reach NAS services.
+
+        Returns:
+            A warning string if the shim could not be created (services may still
+            work), else None. The library never prints — the caller renders it,
+            so the shared library stays silent for the dashboard/MCP adapters.
         """
         import os
         from . import privileged_ops
@@ -177,7 +274,7 @@ class DockerManager:
         shim_ip = os.getenv("SHIM_IP", "")
 
         if not interface or not traefik_ip:
-            return  # Skip if not configured
+            return None  # Skip if not configured
 
         # If SHIM_IP not set, calculate from traefik_ip + 1 for backwards compatibility
         if not shim_ip:
@@ -186,34 +283,51 @@ class DockerManager:
                 last_octet = int(parts[3])
                 shim_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.{last_octet + 1}"
             except (IndexError, ValueError):
-                return  # Skip if IP format is unexpected
+                return None  # Skip if IP format is unexpected
 
         # Create shim (requires root, but we're already elevated for Docker)
         ok, msg = privileged_ops.ensure_macvlan_shim(interface, traefik_ip, shim_ip)
         if not ok:
-            # Log warning but don't fail - services might still work
-            import sys
+            # Surface as a warning but don't fail — services might still work.
+            return str(msg)
+        return None
 
-            print(f"Warning: {msg}", file=sys.stderr)
-
-    def start_core_services(self) -> None:
+    def start_core_services(self) -> List[str]:
         """
         Start core services using docker-compose.
 
         Creates required Traefik files and macvlan shim before starting services.
 
+        Returns:
+            A list of non-fatal warning strings (e.g. the macvlan shim could not be
+            created). Callers may render them; existing callers safely ignore the
+            return. The library itself never prints.
+
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
             DockerError: If docker-compose fails
         """
-        # Create required Traefik files
-        self._create_traefik_files()
+        warnings: List[str] = []
+
+        # Create required Traefik files (note whether the STATIC config changed)
+        static_changed = self._create_traefik_files()
 
         # Ensure macvlan shim exists for host-to-container communication
-        self._ensure_macvlan_shim()
+        shim_warning = self._ensure_macvlan_shim()
+        if shim_warning:
+            warnings.append(shim_warning)
 
         # Start services
         self._run_compose_command(["up", "-d"])
+
+        # `docker compose up -d` recreates a container only when its compose
+        # definition changes — a bind-mounted STATIC config edit (e.g. adding
+        # `ping: {}` to traefik.yml) is invisible to it. If the static config
+        # changed, restart Traefik so the running process re-reads traefik.yml.
+        if static_changed:
+            restart_traefik_if_running()
+
+        return warnings
 
     def stop_core_services(self) -> None:
         """
@@ -374,19 +488,25 @@ class DockerManager:
 
     def restart_core_services(self) -> None:
         """
-        Restart core services using docker-compose.
+        Restart core services by force-recreating them from compose.
 
-        Ensures Traefik configuration files are valid before restarting.
+        Uses ``up -d --force-recreate`` rather than ``compose restart``: a plain
+        restart re-reads static config but silently ignores compose-spec changes
+        (new image tag, env, mounts), while ``up -d`` alone ignores bind-mounted
+        config edits. Force-recreate converges BOTH, so `syrvis restart` is the
+        one command that reliably applies whatever changed.
+
+        Ensures Traefik configuration files are up-to-date before recreating.
 
         Raises:
             FileNotFoundError: If docker-compose.yaml missing
             DockerError: If docker-compose fails
         """
-        # Ensure Traefik configs exist and are up-to-date before restarting
+        # Ensure Traefik configs exist and are up-to-date before recreating
         self._create_traefik_files()
 
-        # Restart services
-        self._run_compose_command(["restart"])
+        # Recreate services (applies static config AND compose-spec changes)
+        self._run_compose_command(["up", "-d", "--force-recreate"])
 
     def get_container_status(self) -> Dict[str, Dict[str, str]]:
         """

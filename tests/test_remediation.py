@@ -158,6 +158,40 @@ class TestVerifyRemediate:
         assert "recon" not in called
         assert actions == []
 
+    def test_remediate_restarts_traefik_on_stale_static_config(self, monkeypatch):
+        """STALE_STATIC drift gets a targeted Traefik restart, not a compose up
+        (up -d cannot apply a bind-mounted static-config change)."""
+        from syrviscore import drift as drift_mod
+
+        monkeypatch.setattr(verify, "run_validation_reports", lambda smoke: [])
+        monkeypatch.setattr(verify.remediation, "resolve_install_dir", lambda: None)
+        stale = drift_mod.DriftItem(
+            service="traefik",
+            kind=drift_mod.DriftKind.STALE_STATIC,
+            expected="2026-07-11T02:04:07+00:00",
+            actual="2026-07-11T01:49:59Z",
+        )
+        monkeypatch.setattr(
+            verify, "gather_core_drift", lambda: _StubDrift(in_sync=False, items=[stale])
+        )
+
+        called = {}
+        monkeypatch.setattr(
+            verify, "_reconcile_core_drift", lambda: called.setdefault("recon", True) or (True, "x")
+        )
+        import syrviscore.docker_manager as dm
+
+        monkeypatch.setattr(
+            dm, "restart_traefik_if_running", lambda: called.setdefault("restart", True) or True
+        )
+
+        actions = verify.remediate(smoke=True)
+        # Only the stale-static item: no compose reconcile, just the restart.
+        assert "recon" not in called
+        assert called.get("restart")
+        assert actions[-1]["target"] == "traefik-static-config"
+        assert actions[-1]["ok"] is True
+
 
 class TestVerifyFixCommand:
     def test_fix_elevates_and_remediates_when_unhealthy(self, monkeypatch):
@@ -210,5 +244,26 @@ class TestVerifyFixCommand:
 
 
 class _StubDrift:
-    def __init__(self, in_sync):
+    """Stub of drift.DriftReport carrying real DriftItems so kind checks work."""
+
+    def __init__(self, in_sync, items=None):
+        from syrviscore import drift as drift_mod
+
         self.in_sync = in_sync
+        if items is None:
+            items = (
+                []
+                if in_sync
+                else [
+                    drift_mod.DriftItem(
+                        service="traefik",
+                        kind=drift_mod.DriftKind.MISSING,
+                        expected="traefik:v3",
+                    )
+                ]
+            )
+        self.items = items
+
+    @property
+    def failures(self):
+        return [i for i in self.items if i.is_failure]

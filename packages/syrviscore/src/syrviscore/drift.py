@@ -12,7 +12,9 @@ elsewhere), so this whole module is unit-testable without docker and performs
 no privileged operation.
 """
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -27,10 +29,16 @@ class DriftKind(str, Enum):
     STOPPED = "stopped"  # container exists but is not running
     IMAGE_MISMATCH = "image_mismatch"  # running a different image than declared
     UNEXPECTED = "unexpected"  # container exists that nothing declares
+    # Traefik's STATIC config (traefik.yml) is read only at process start; a file
+    # newer than the running container's StartedAt means the live process is
+    # executing a stale config (the /ping-404 class of failure).
+    STALE_STATIC = "stale_static_config"
 
 
 # Which drift kinds represent an unhealthy install (vs. merely informational).
-FAILING_KINDS = frozenset({DriftKind.MISSING, DriftKind.STOPPED, DriftKind.IMAGE_MISMATCH})
+FAILING_KINDS = frozenset(
+    {DriftKind.MISSING, DriftKind.STOPPED, DriftKind.IMAGE_MISMATCH, DriftKind.STALE_STATIC}
+)
 
 
 @dataclass
@@ -53,6 +61,11 @@ class DriftItem:
             return f"{self.service}: exists but status is '{self.actual}' (expected running)"
         if self.kind is DriftKind.IMAGE_MISMATCH:
             return f"{self.service}: running {self.actual}, declared {self.expected}"
+        if self.kind is DriftKind.STALE_STATIC:
+            return (
+                f"{self.service}: static config written {self.expected} but the process "
+                f"started {self.actual} — restart {self.service} to load it"
+            )
         return f"{self.service}: running but not declared in compose"
 
     def to_dict(self) -> Dict[str, Optional[str]]:
@@ -197,3 +210,43 @@ def detect_drift(
                 )
 
     return DriftReport(scope=scope, items=items)
+
+
+def parse_docker_timestamp(value: str) -> Optional[datetime]:
+    """Parse docker's RFC3339 timestamps (e.g. ``State.StartedAt``) to an aware datetime.
+
+    Docker emits nanosecond fractions (``2026-07-11T15:18:14.123456789Z``) which
+    ``datetime.fromisoformat`` cannot parse on Python 3.8, so the fraction is
+    truncated to microseconds first. Returns None on anything unparseable.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    # Truncate a >6-digit fractional-seconds field to microseconds.
+    text = re.sub(r"\.(\d{6})\d+", r".\1", text)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def static_config_is_stale(config_mtime_epoch: float, started_at: str) -> Optional[bool]:
+    """True if a static config file was modified AFTER the process started.
+
+    Args:
+        config_mtime_epoch: the config file's st_mtime (host clock, epoch secs).
+        started_at: docker's ``State.StartedAt`` RFC3339 string.
+
+    Returns:
+        True/False, or None when ``started_at`` can't be parsed (callers should
+        treat None as "unknown — don't flag").
+    """
+    started = parse_docker_timestamp(started_at)
+    if started is None:
+        return None
+    return config_mtime_epoch > started.timestamp()

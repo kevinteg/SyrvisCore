@@ -13,11 +13,13 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Tuple, Optional
 
+from syrviscore.errors import SyrvisError
 
-class PrivilegedOpsError(Exception):
+
+class PrivilegedOpsError(SyrvisError):
     """Error during privileged operation."""
 
-    pass
+    code = "privileged_op_failed"
 
 
 # =============================================================================
@@ -447,23 +449,51 @@ exit 0
             )
 
             if result.returncode == 0:
-                # Interface exists, check if route to traefik_ip exists
+                # Interface exists. Reconcile its assigned address and host route
+                # against the desired values. If TRAEFIK_IP (and thus SHIM_IP)
+                # changed since the shim was created, the stale address/route would
+                # linger and break host->Traefik reachability until reboot, so
+                # tear the shim down and rebuild it cleanly. When the current state
+                # already matches, do nothing extra (stay idempotent).
+                addr_result = subprocess.run(
+                    ["ip", "addr", "show", shim_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                addr_matches = f"inet {shim_ip}/32" in addr_result.stdout
+
                 route_result = subprocess.run(
                     ["ip", "route", "show", f"{traefik_ip}/32"],
                     capture_output=True,
                     text=True,
                     timeout=5,
                 )
-                if traefik_ip in route_result.stdout:
+                route_matches = f"dev {shim_name}" in route_result.stdout
+
+                if addr_matches and route_matches:
                     return True, f"Macvlan shim already configured ({shim_name})"
 
-                # Add route if missing
-                subprocess.run(
-                    ["ip", "route", "add", f"{traefik_ip}/32", "dev", shim_name],
-                    capture_output=True,
-                    timeout=5,
-                )
-                return True, f"Macvlan shim route added for {traefik_ip}"
+                if not addr_matches:
+                    # The shim's IP drifted (TRAEFIK_IP/SHIM_IP changed). Tear it
+                    # down so it can be recreated with the correct address; the
+                    # stale /32 route it carried disappears with the interface.
+                    subprocess.run(["ip", "link", "del", shim_name], capture_output=True, timeout=5)
+                    # Fall through to the create path below to rebuild cleanly.
+                else:
+                    # Address is correct but the route to Traefik is missing or on
+                    # the wrong device. Reconcile the route in place.
+                    subprocess.run(
+                        ["ip", "route", "del", f"{traefik_ip}/32"],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    subprocess.run(
+                        ["ip", "route", "add", f"{traefik_ip}/32", "dev", shim_name],
+                        capture_output=True,
+                        timeout=5,
+                    )
+                    return True, f"Macvlan shim route reconciled for {traefik_ip}"
 
             # Create the shim interface
             # Step 1: Create macvlan interface

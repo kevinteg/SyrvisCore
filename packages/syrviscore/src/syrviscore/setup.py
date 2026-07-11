@@ -398,12 +398,54 @@ def perform_privileged_setup(username: str, install_dir: Path) -> bool:
     return success
 
 
+def _parse_env_file(path: Path) -> dict:
+    """Best-effort parse of an existing .env into a {KEY: value} dict."""
+    values = {}
+    if not path.exists():
+        return values
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            values[key.strip()] = val.strip()
+    except OSError:
+        pass
+    return values
+
+
+def _preserve_existing_values(env_content: str, existing: dict) -> str:
+    """Restore any KEY the freshly generated .env blanked out (``KEY=``) from the
+    prior file. The interactive prompts only manage a subset of keys, so on a
+    setup re-run the unmanaged secrets (DNS-01 / DDNS / tunnel tokens, OIDC
+    secret, dashboard session secret) would otherwise be silently wiped.
+    """
+    if not existing:
+        return env_content
+    out = []
+    for line in env_content.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and stripped.endswith("="):
+            key = stripped[:-1]
+            prior = existing.get(key)
+            if prior:
+                out.append("{}={}".format(key, prior))
+                continue
+        out.append(line)
+    return "\n".join(out) + ("\n" if env_content.endswith("\n") else "")
+
+
 def generate_env_file(config: dict, install_dir: Path, username: str) -> Path:
     """Generate .env configuration file."""
     env_path = paths.get_env_path()
 
     # Ensure config directory exists
     env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot the existing .env so a re-run never blanks operator-set secrets
+    # that the interactive prompts don't manage.
+    existing_env = _parse_env_file(env_path)
 
     tz = get_timezone()
 
@@ -445,7 +487,7 @@ DASHBOARD_SUBDOMAIN={config.get('dashboard_subdomain', 'dash')}
 DASHBOARD_AUTH_MODE={config.get('dashboard_auth_mode', 'none')}
 ENABLE_L2_MUTATIONS={str(config.get('enable_l2_mutations', False)).lower()}
 DASHBOARD_SESSION_SECRET={config.get('dashboard_session_secret', '')}
-SSH_TARGET={config.get('ssh_target', 'nas')}
+SSH_TARGET={config.get('ssh_target') or config.get('nas_ip') or 'nas'}
 
 # Dashboard auth — Cloudflare Access (remote + hairpin)
 CLOUDFLARE_ACCESS_TEAM={config.get('cloudflare_access_team', '')}
@@ -473,8 +515,13 @@ PORTAINER_BIND_PORT=9443
 TZ={tz}
 """
 
+    env_content = _preserve_existing_values(env_content, existing_env)
+
     env_path.write_text(env_content)
-    env_path.chmod(0o644)
+    # 0600: .env holds the tunnel/DNS/DDNS tokens and the OIDC secret. The CLI
+    # runs as the owning user, compose interpolation runs under sudo, and the
+    # dashboard container runs as root (socket model) — all can still read it.
+    env_path.chmod(0o600)
 
     # Change ownership to target user if running as root
     if os.getuid() == 0:
