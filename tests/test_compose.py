@@ -480,8 +480,21 @@ class TestDashboardAndDdns:
         svc = compose["services"]["syrviscore-dashboard"]
         assert svc["container_name"] == "syrviscore-dashboard"
         assert "proxy" in svc["networks"]
-        assert "/var/run/docker.sock:/var/run/docker.sock" in svc["volumes"]
+        # read-only by default: socket + data mounted :ro (safe to expose, no management)
+        assert "/var/run/docker.sock:/var/run/docker.sock:ro" in svc["volumes"]
+        assert "../data:/syrvis/data:ro" in svc["volumes"]
         assert any("dash.${DOMAIN}" in label for label in svc["labels"])
+
+    def test_dashboard_management_makes_socket_rw(self, network_env_vars):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["dashboard"].enabled = True
+        st.services["dashboard"].settings["management"] = True
+        svc = self._gen().generate_compose(stack=st)["services"]["syrviscore-dashboard"]
+        assert "/var/run/docker.sock:/var/run/docker.sock" in svc["volumes"]
+        assert "/var/run/docker.sock:/var/run/docker.sock:ro" not in svc["volumes"]
+        assert "../data:/syrvis/data" in svc["volumes"]
 
     def test_dashboard_absent_when_not_declared(self, network_env_vars):
         from syrviscore import stack as stack_mod
