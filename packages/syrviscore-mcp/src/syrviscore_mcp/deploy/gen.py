@@ -107,12 +107,12 @@ _SLOT_PREDICATE = {
     "version": "is_version",
     "name": "is_name",
     "git_url": "is_giturl",
-    "keep": "is_int",
-    "tail": "is_int",
+    "keep": "is_keep",
+    "tail": "is_tail",
     "image": "is_image",
     "subdomain": "is_subdomain",
     "exposure": "is_exposure",
-    "port": "is_int",
+    "port": "is_port",
 }
 
 
@@ -178,7 +178,14 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "",
         "is_version() { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^v?[0-9]+\\.[0-9]+\\.[0-9]+$'; }",
         "is_name()    { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$'; }",
-        "is_int()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^[0-9]{1,7}$'; }",
+        # Numeric slots are range-checked per kind to match validate.py exactly
+        # (the shim is the independent G13 layer, so its bounds must not be
+        # looser). The {1,7} digit gate keeps values within POSIX sh integer
+        # range before the `-le` arithmetic comparison.
+        "is_num()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^[0-9]{1,7}$'; }",
+        'is_keep() { is_num "$1" && [ "$1" -ge 0 ] && [ "$1" -le 50 ]; }',
+        'is_tail() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 10000 ]; }',
+        'is_port() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }',
         "is_giturl()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:"
         "[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }",

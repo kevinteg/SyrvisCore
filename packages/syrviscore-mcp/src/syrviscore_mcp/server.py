@@ -200,9 +200,13 @@ def service_run(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations={"openWorldHint": True})
 def install(version: Optional[str] = None) -> dict:
-    """Install a service version (latest if omitted; additive; privileged)."""
+    """Install a service version (latest if omitted; additive; privileged).
+
+    Reaches GitHub to download the release, so it carries openWorldHint (matching
+    check_updates); additive/non-destructive, so no destructiveHint.
+    """
     return _call(tools.install, version=version)
 
 

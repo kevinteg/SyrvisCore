@@ -19,7 +19,11 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "fastmcp>=2.0",
+    # Tested range. The server uses `@mcp.tool(annotations=...)`, which fastmcp
+    # 2.2.0 rejects, and the `FastMCP` import surface moved across the 2->3
+    # boundary; a clean install resolves to (and is verified against) 3.x. An
+    # unbounded floor let a co-resolver select a broken 2.x, so pin the major.
+    "fastmcp>=3.0,<4",
 ]
 
 [project.optional-dependencies]

@@ -80,6 +80,25 @@ class NASConfig:
         if self.token_secret_file:
             p = Path(os.path.expanduser(self.token_secret_file))
             if p.is_file():
+                # This file holds the HMAC secret that authorizes destructive
+                # two-call confirmations, so enforce the 0600 the docstring
+                # promises: refuse a group/world-accessible or non-owned file
+                # rather than silently trusting it (mirrors the ControlMaster /
+                # audit-log owner-only hardening in remote.py).
+                st = p.stat()
+                if st.st_mode & 0o077:
+                    raise ConfigError(
+                        "tokens.secret_file {} is group/world-accessible".format(p),
+                        operator_hint="chmod 600 {} so only its owner can read the secret".format(
+                            p
+                        ),
+                    )
+                if hasattr(os, "getuid") and st.st_uid != os.getuid():
+                    raise ConfigError(
+                        "tokens.secret_file {} is not owned by the current user".format(p),
+                        operator_hint="the secret file must be owned (and readable only) by the "
+                        "user running the MCP server",
+                    )
                 data = p.read_text().strip()
                 if data:
                     return data.encode()

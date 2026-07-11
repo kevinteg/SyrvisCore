@@ -224,7 +224,17 @@ class RemoteRunner:
     def _write_audit(self, entry: dict) -> None:
         try:
             self._audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._audit_path, "a") as f:
+            # The audit log records every remote argv (git URLs, image refs) and
+            # rejected/attacked calls — a security record. Keep the dir and file
+            # owner-only, matching the ControlMaster hardening above. Enforce the
+            # file mode at creation via os.open (chmod-after-create leaves a
+            # umask window where the file is briefly world-readable).
+            try:
+                os.chmod(self._audit_path.parent, 0o700)
+            except OSError:
+                pass
+            fd = os.open(str(self._audit_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a") as f:
                 f.write(json.dumps(entry) + "\n")
         except OSError:
             pass  # auditing must never block an operation

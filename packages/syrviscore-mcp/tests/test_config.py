@@ -95,8 +95,21 @@ def test_token_secret_from_file(tmp_path, monkeypatch):
     monkeypatch.delenv("SYRVISCORE_MCP_TOKEN_SECRET", raising=False)
     sf = tmp_path / "token_secret"
     sf.write_text("secret-from-file\n")  # trailing newline is stripped
+    sf.chmod(0o600)  # the loader enforces owner-only perms on the secret file
     cfg = load_config(str(_write(tmp_path, PROD + f'\n[tokens]\nsecret_file = "{sf}"\n')))
     assert cfg.token_secret() == b"secret-from-file"
+
+
+def test_token_secret_file_rejects_loose_permissions(tmp_path, monkeypatch):
+    # The secret authorizes destructive two-call confirmations; a group/world-
+    # accessible file must be refused, not silently trusted.
+    monkeypatch.delenv("SYRVISCORE_MCP_TOKEN_SECRET", raising=False)
+    sf = tmp_path / "token_secret"
+    sf.write_text("secret-from-file")
+    sf.chmod(0o644)  # world-readable
+    cfg = load_config(str(_write(tmp_path, PROD + f'\n[tokens]\nsecret_file = "{sf}"\n')))
+    with pytest.raises(ConfigError):
+        cfg.token_secret()
 
 
 def test_env_secret_wins_over_file(tmp_path, monkeypatch):
