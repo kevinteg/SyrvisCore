@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrviscore-dashboard"
-version = "0.1.2"
+version = "0.1.3"
 description = "SyrvisCore Dashboard - live web observability + safe management for a SyrvisCore instance"
 readme = "README.md"
 authors = [{ name = "Kevin Tegtmeier" }]
