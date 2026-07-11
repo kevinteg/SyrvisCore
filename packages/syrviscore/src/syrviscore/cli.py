@@ -267,6 +267,40 @@ def service_catalog(as_json):
     click.echo("Install one with: syrvis service run <name>")
 
 
+@service.command("adopt")
+@click.argument("name", required=False)
+@click.option("--all", "adopt_all", is_flag=True, help="Adopt every installed service")
+@handle_errors
+def service_adopt(name, adopt_all):
+    """Generate a services.d declaration from an existing install.
+
+    The migration path to declarative loading: an installed service becomes a
+    file in config/services.d/ that `syrvis reconcile` (and home-tech's IaC)
+    owns from then on. The install itself is not touched.
+    """
+    from syrviscore import services_d
+    from syrviscore.service_manager import ServiceManager
+
+    manager = ServiceManager()
+    if adopt_all:
+        rows = manager.list()
+        if not rows:
+            click.echo("No installed services to adopt.")
+            return
+        for row in rows:
+            try:
+                path = services_d.adopt(manager, row["name"])
+                click.echo("Adopted '{}' -> {}".format(row["name"], path))
+            except Exception as e:  # noqa: BLE001 - per-row isolation
+                click.echo("Error adopting '{}': {}".format(row["name"], e), err=True)
+        return
+    if not name:
+        raise SyrvisError("Provide a service NAME or --all")
+    path = services_d.adopt(manager, name)
+    click.echo("Adopted '{}' -> {}".format(name, path))
+    click.echo("It is now managed declaratively; edit the file and run 'syrvis reconcile'.")
+
+
 @service.command("remove")
 @click.argument("name")
 @click.option("--purge", is_flag=True, help="Also remove service data")
@@ -628,6 +662,139 @@ def hello():
 # =============================================================================
 # Compose command group
 # =============================================================================
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Show the plan without applying anything")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable plan/results")
+@click.option(
+    "--prune",
+    type=click.Choice(["stop", "remove", "purge"]),
+    default=None,
+    help="Policy for installed services with NO declaration (default: report as "
+    "unmanaged, touch nothing). remove drops config (data kept); purge drops data.",
+)
+@click.option("--strict", is_flag=True, help="Any invalid file or failed action exits non-zero")
+@click.option(
+    "--boot",
+    is_flag=True,
+    help="Boot mode: best-effort (always exits 0), never prunes, never prompts",
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation of destructive prune actions")
+@handle_errors
+def reconcile(dry_run, as_json, prune, strict, boot, yes):
+    """Converge to the declared services in config/services.d/.
+
+    Loads every declaration with per-file failure isolation (a broken file
+    marks only that service invalid), then converges each service
+    independently (one failure never blocks the rest). Installed services with
+    no declaration are reported as unmanaged and never touched unless --prune.
+
+    Exit code: non-zero for any INVALID declaration file (corrupted intent
+    must never pass silently) or a CRITICAL service's failure; any failure
+    with --strict. --boot is always best-effort and exits 0.
+    """
+    from syrviscore import services_d
+    from syrviscore.service_manager import ServiceManager
+
+    if boot:
+        prune = None  # boot never destroys anything
+    if not dry_run:
+        privilege.ensure_elevated("Reconciling services requires elevated privileges.")
+
+    manager = ServiceManager()
+    try:
+        declarations, invalid = services_d.load_declarations(manager.syrvis_home)
+        plan = services_d.build_reconcile_plan(manager, declarations, invalid, prune=prune)
+    except SyrvisError as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if dry_run:
+        if as_json:
+            click.echo(jsonlib.dumps({"plan": plan, "applied": False}, indent=2))
+        else:
+            _render_reconcile_plan(plan)
+            click.echo("(dry run — nothing applied)")
+        return
+
+    destructive = [a for a in plan["actions"] if a["destructive"]]
+    if destructive and not yes and not boot:
+        if as_json:
+            # Never corrupt the --json contract with prompts/human rendering:
+            # a machine caller must pass -y explicitly for destructive prunes.
+            json_error(
+                SyrvisError(
+                    "destructive prune action(s) require -y in --json mode: {}".format(
+                        ", ".join("{} {}".format(a["kind"], a["name"]) for a in destructive)
+                    )
+                ),
+                indent=2,
+            )
+        _render_reconcile_plan(plan)
+        click.confirm(
+            "Apply {} destructive prune action(s) ({})?".format(
+                len(destructive),
+                ", ".join("{} {}".format(a["kind"], a["name"]) for a in destructive),
+            ),
+            abort=True,
+        )
+
+    results = services_d.apply_reconcile_plan(manager, declarations, plan)
+    ok, reason = services_d.verdict(plan, results, strict=strict)
+
+    if as_json:
+        click.echo(
+            jsonlib.dumps(
+                {"plan": plan, "applied": True, "results": results, "ok": ok, "reason": reason},
+                indent=2,
+            )
+        )
+        if not ok and not boot:
+            raise SystemExit(1)
+        return
+
+    _render_reconcile_plan(plan)
+    if results:
+        click.echo()
+        for r in results:
+            mark = "[+]" if r["ok"] else "[-]"
+            crit = " (critical)" if r.get("critical") and not r["ok"] else ""
+            click.echo("  {} {} {}{}: {}".format(mark, r["kind"], r["name"], crit, r["message"]))
+    click.echo()
+    if ok:
+        click.echo("Reconcile complete.")
+    else:
+        click.echo("Reconcile finished UNHEALTHY: {}".format(reason))
+        if not boot:
+            raise SystemExit(1)
+
+
+def _render_reconcile_plan(plan):
+    click.echo()
+    summary = plan["summary"]
+    click.echo(
+        "Declared: {}  in sync: {}  disabled: {}  unmanaged: {}  invalid: {}".format(
+            summary["declared"],
+            len(plan["in_sync"]),
+            len(plan["disabled"]),
+            len(plan["unmanaged"]),
+            summary["invalid"],
+        )
+    )
+    for row in plan["invalid"]:
+        click.echo("  [!] invalid declaration {}: {}".format(row["file"], row["error"]))
+    for name in plan["unmanaged"]:
+        click.echo("  [?] unmanaged (installed, no declaration): {}".format(name))
+    if not plan["actions"]:
+        click.echo("  Nothing to do.")
+        return
+    click.echo("  Actions:")
+    for action in plan["actions"]:
+        marker = "!" if action["destructive"] else "-"
+        crit = " (critical)" if action.get("critical") else ""
+        click.echo("    {} {} {}{}".format(marker, action["kind"], action["name"], crit))
 
 
 @cli.group()

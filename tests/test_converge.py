@@ -153,12 +153,13 @@ class _FakeManager:
         environment=None,
         description="",
         start=True,
+        preserve_data_on_rollback=False,
     ):
-        self.calls.append(("add_image", name, image))
+        self.calls.append(("add_image", name, image, preserve_data_on_rollback))
         return True, "added {}".format(name)
 
-    def remove(self, name, purge=False):
-        self.calls.append(("remove", name, purge))
+    def remove(self, name, purge=False, keep_declaration=False):
+        self.calls.append(("remove", name, purge, keep_declaration))
         return True, "removed {}".format(name)
 
     def stop(self, name):
@@ -191,9 +192,9 @@ class TestApplyPlan:
             ("service_stop", True),
             ("service_purge", True),
         ]
-        assert ("add_image", "wiki", "a:1") in fake.calls
+        assert ("add_image", "wiki", "a:1", False) in fake.calls
         assert ("stop", "old") in fake.calls
-        assert ("remove", "dead", True) in fake.calls
+        assert ("remove", "dead", True, False) in fake.calls
         assert all(r["changed"] for r in results)
 
     def test_replace_removes_then_adds(self, home):
@@ -214,7 +215,11 @@ class TestApplyPlan:
         }
         fake = _FakeManager()
         apply_plan(plan, manager=fake)
-        assert fake.calls == [("remove", "wiki", False), ("add_image", "wiki", "a:2")]
+        # replace keeps the services.d declaration and preserves pre-existing data
+        assert fake.calls == [
+            ("remove", "wiki", False, True),
+            ("add_image", "wiki", "a:2", True),
+        ]
 
     def test_one_failure_does_not_mask_later_actions(self, home):
         class Flaky(_FakeManager):

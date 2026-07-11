@@ -351,6 +351,21 @@ if [ -n "$NETWORK_INTERFACE" ] && [ -n "$TRAEFIK_IP" ]; then
     fi
 fi
 
+# Wait for the Docker daemon before reconciling. This rc.d hook can run before
+# ContainerManager has started the daemon on DSM 7; without this the reconcile
+# below would find every compose call failing and silently no-op.
+DOCKER_BIN=$(command -v docker || echo /usr/local/bin/docker)
+DOCKER_WAIT=0
+while ! "$DOCKER_BIN" info >/dev/null 2>&1; do
+    DOCKER_WAIT=$((DOCKER_WAIT + 5))
+    [ "$DOCKER_WAIT" -ge 120 ] && break
+    sleep 5
+done
+
+# Reconcile declared Layer 2 services (config/services.d) -- best-effort:
+# a failing declaration or service must never block boot or the core stack.
+"{install_dir}/bin/syrvis" reconcile --boot || true
+
 exit 0
 """
 
@@ -660,6 +675,11 @@ class SimulationOperations(SystemOperations):
 # This script would run at boot on real DSM
 
 echo "Startup script executed for user: {username}"
+
+# Reconcile declared Layer 2 services (config/services.d) -- best-effort:
+# a failing declaration or service must never block boot or the core stack.
+"{install_dir}/bin/syrvis" reconcile --boot || true
+
 exit 0
 """
 

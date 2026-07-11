@@ -141,9 +141,28 @@ flowchart LR
 
 Nothing breaks: `services.d/` starts empty and everything current keeps working.
 
-1. **Phase 1 — engine:** `reconcile` (load/diff/converge/report, `--dry-run`, `--json`,
-   `--prune`, `--boot`), the `enabled`/`critical` schema keys, `service adopt`. CLI
-   `service run/add` dual-write a declaration. Boot hook gains `reconcile --boot`.
+1. **Phase 1 — engine (✅ shipped 2026-07-11):** `syrvis reconcile` (load/diff/converge/
+   report, `--dry-run`, `--json`, `--prune`, `--strict`, `--boot`), the `enabled`/`critical`
+   schema keys, `service adopt [--all]`, dual-write from `service run/add/remove/start/stop`,
+   and the boot hook runs `reconcile --boot` behind a bounded wait-for-docker poll.
+   Decisions hardened by adversarial review during the build:
+   - Orchestration keys live ONLY in declarations: materialized manifests strip them
+     (older/rollback service versions keep parsing manifests; a git repo can never
+     declare itself `critical` or toggle its own enablement — the dual-write preserves
+     the operator's existing orchestration).
+   - The dual-write sits OUTSIDE the install rollback boundary (a declaration-write
+     failure can never tear down a running service), and rollback of a reconcile/converge
+     REPLACE preserves the pre-existing data dir.
+   - An INVALID declaration file is fatal by default (corrupted intent never passes
+     silently) while every other service still converges; `--boot` demotes everything
+     to best-effort.
+   - Reconcile never rewrites the declarations it plans from (no-op enabled flips skip
+     the write), so IaC-authored files don't churn.
+   Known phase-1 seams (deliberate): `stack apply --from` with `on_undeclared: stop`
+   flips declarations to `enabled: false` (the two declarative planes interact — unified
+   in phase 3); the boot/confirm policy lives in the CLI shell, so future adapters must
+   route through the CLI or replicate the gate (library-level policy comes with the
+   phase-2 MCP tools); converge/services_d remain two engines until phase 3.
 2. **Phase 2 — surfaces:** dashboard declared-vs-running view; MCP `service_declare` +
    reconcile tools; `verify` consumes `critical` for degraded-vs-unhealthy.
 3. **Phase 3 — home-tech:** move the live NAS's services into a git-managed `services.d/`

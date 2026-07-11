@@ -61,6 +61,15 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "restart",
         "healthcheck",
         "resources",
+        # Orchestration keys: meaningful ONLY in config/services.d declarations
+        # (`enabled` gates whether reconcile runs it; `critical` affects health
+        # severity). They are accepted anywhere for round-tripping but have NO
+        # effect in a git/catalog manifest: installs ignore them, materialized
+        # manifests strip them, and the dual-written declaration preserves the
+        # OPERATOR's existing orchestration — so an untrusted repo can never
+        # declare itself critical or toggle its own enablement.
+        "enabled",
+        "critical",
     }
 )
 
@@ -329,6 +338,9 @@ class ServiceDefinition:
     restart: str = "unless-stopped"
     healthcheck: Optional[Dict[str, Any]] = None
     resources: Optional[Dict[str, str]] = None
+    # Orchestration (services.d): declared-but-off, and health severity.
+    enabled: bool = True
+    critical: bool = False
     # Source information (set after loading)
     source_path: Optional[Path] = None
     source_url: Optional[str] = None
@@ -433,6 +445,10 @@ class ServiceDefinition:
         if data.get("healthcheck") is not None:
             healthcheck = _validate_healthcheck(data["healthcheck"])
 
+        for flag in ("enabled", "critical"):
+            if flag in data and not isinstance(data[flag], bool):
+                raise ServiceValidationError("{} must be a boolean".format(flag))
+
         resources = None
         if data.get("resources") is not None:
             resources = _validate_resources(data["resources"])
@@ -474,6 +490,8 @@ class ServiceDefinition:
             restart=restart,
             healthcheck=healthcheck,
             resources=resources,
+            enabled=data.get("enabled", True),
+            critical=data.get("critical", False),
         )
 
     @classmethod
@@ -537,8 +555,34 @@ class ServiceDefinition:
             result["healthcheck"] = self.healthcheck
         if self.resources:
             result["resources"] = self.resources
+        if not self.enabled:
+            result["enabled"] = False
+        if self.critical:
+            result["critical"] = True
 
         return result
+
+
+ORCHESTRATION_KEYS = ("enabled", "critical")
+
+
+def dump_definition(
+    service: "ServiceDefinition", path: Path, include_orchestration: bool = True
+) -> Path:
+    """Serialize a definition to ``path`` with the shared secrets policy.
+
+    The ONE writer behind installed manifests (orchestration stripped — they
+    describe the container, and older service versions must keep parsing them)
+    and services.d declarations (orchestration kept — that is where it lives).
+    Files carrying inline env entries are written 0600.
+    """
+    data = service.to_dict()
+    if not include_orchestration:
+        for key in ORCHESTRATION_KEYS:
+            data.pop(key, None)
+    path.write_text(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
+    path.chmod(0o600 if service.environment else 0o644)
+    return path
 
 
 def load_service_definition(path: Path) -> ServiceDefinition:

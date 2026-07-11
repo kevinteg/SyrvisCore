@@ -23,6 +23,7 @@ from .service_schema import (
     load_service_definition,
     validate_service_name,
 )
+from . import services_d
 from .traefik_config import ServiceTraefikConfig, get_domain_from_env
 
 # Core and Layer 2 both resolve the compose command at runtime (v2 plugin or v1
@@ -273,6 +274,7 @@ class ServiceManager:
         env_file: Optional[str] = None,
         description: str = "",
         start: bool = True,
+        preserve_data_on_rollback: bool = False,
     ) -> Tuple[bool, str]:
         """Run a Layer 2 service straight from a published image (no git repo).
 
@@ -335,7 +337,9 @@ class ServiceManager:
         # `list()` / regeneration read the same effective routing.
         service_path.mkdir(parents=True, exist_ok=True)
         self._write_manifest(service, service_path)
-        return self._install_from_definition(service, service_path, start)
+        return self._install_from_definition(
+            service, service_path, start, preserve_data_on_rollback=preserve_data_on_rollback
+        )
 
     def _subdomain_in_use(self, subdomain: str, exclude: Optional[str] = None) -> Optional[str]:
         """Name of an already-installed service routed at ``subdomain``, else None.
@@ -394,21 +398,55 @@ class ServiceManager:
         self._write_manifest(service, service_path)
         return self._install_from_definition(service, service_path, start)
 
+    def install_declaration(
+        self,
+        service: ServiceDefinition,
+        start: bool = True,
+        preserve_data_on_rollback: bool = False,
+    ) -> Tuple[bool, str]:
+        """Materialize a validated in-memory definition (the reconcile add/replace path).
+
+        Phase-1 note: a declaration fully describes an image-first service. A
+        git-sourced service's ``config_templates`` SOURCE files live in its
+        cloned repo, so a reconcile replace re-copies templates only if the
+        sources still exist; already-materialized files in data/<name>/ are
+        preserved either way (remove keeps data).
+        """
+        self._ensure_directories()
+        service_path = self.services_dir / service.name
+        if service_path.exists():
+            return False, "Service '{}' already exists (remove it first, or use update)".format(
+                service.name
+            )
+        if not service.source_url:
+            service.source_url = "services.d:{}".format(service.name)
+        # This input IS operator/declaration-level intent (unlike a repo
+        # manifest), so persist it verbatim first — the post-install dual-write
+        # then preserves these very orchestration keys from the file.
+        services_d.write_declaration(self.syrvis_home, service)
+        service_path.mkdir(parents=True, exist_ok=True)
+        self._write_manifest(service, service_path)
+        return self._install_from_definition(
+            service, service_path, start, preserve_data_on_rollback=preserve_data_on_rollback
+        )
+
     def _write_manifest(self, service: ServiceDefinition, service_path: Path) -> None:
         """Persist the effective manifest; 0600 when it carries inline env entries.
 
-        Inline ``environment:`` values may hold secrets, so such manifests are
-        written owner-only. (``env_file`` is the recommended home for secrets —
-        it always lives 0600 in the service data dir.)
+        Orchestration keys (enabled/critical) are STRIPPED: the manifest
+        describes the container, orchestration lives only in services.d — and
+        older service versions (rollback targets) must keep parsing manifests.
         """
-        manifest = service_path / "syrvis-service.yaml"
-        manifest.write_text(
-            yaml.safe_dump(service.to_dict(), default_flow_style=False, sort_keys=False)
-        )
-        manifest.chmod(0o600 if service.environment else 0o644)
+        from .service_schema import dump_definition
+
+        dump_definition(service, service_path / "syrvis-service.yaml", include_orchestration=False)
 
     def _install_from_definition(
-        self, service: ServiceDefinition, service_path: Path, start: bool
+        self,
+        service: ServiceDefinition,
+        service_path: Path,
+        start: bool,
+        preserve_data_on_rollback: bool = False,
     ) -> Tuple[bool, str]:
         """Materialize + (optionally) start a loaded/synthesized service.
 
@@ -451,13 +489,25 @@ class ServiceManager:
                 if not success:
                     raise RuntimeError(f"failed to start: {msg}")
                 self._reload_traefik()
-                return True, f"Service '{service.name}' added and started{route_note}"
-
-            self._reload_traefik()
-            return True, f"Service '{service.name}' added (not started){route_note}"
+                message = f"Service '{service.name}' added and started{route_note}"
+            else:
+                self._reload_traefik()
+                message = f"Service '{service.name}' added (not started){route_note}"
         except Exception as e:
-            self._rollback_add(service.name)
+            self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
             return False, f"Service '{service.name}' not added ({e})"
+
+        # Dual-write: every successful install leaves a services.d declaration,
+        # so imperative adds are visible to (and owned by) the declarative
+        # layer. Strictly best-effort and OUTSIDE the rollback boundary — a
+        # declaration-write failure must never tear down a running service.
+        # The operator's existing orchestration keys (enabled/critical) are
+        # preserved; a repo manifest can never set them.
+        try:
+            services_d.write_declaration_from_install(self.syrvis_home, service)
+        except Exception as e:  # noqa: BLE001 - never fail the install for this
+            message += " (warning: could not write services.d declaration: {})".format(e)
+        return True, message
 
     @staticmethod
     def _route_note(service: ServiceDefinition) -> str:
@@ -490,8 +540,15 @@ class ServiceManager:
         except Exception:  # noqa: BLE001 - best-effort; never fail the op
             pass
 
-    def _rollback_add(self, name: str) -> None:
-        """Remove every artifact created for a service (best-effort)."""
+    def _rollback_add(self, name: str, keep_data: bool = False) -> None:
+        """Remove every artifact created for a service (best-effort).
+
+        ``keep_data`` is set by the reconcile/converge REPLACE paths: the data
+        dir there predates this install attempt, so a failed re-install must
+        never destroy it (a fresh add's data dir was just created and is safe
+        to drop). services.d declarations are never rollback targets — a failed
+        converge keeps the declared intent so the next reconcile retries.
+        """
         try:
             p = self._service_paths(name)
         except ServiceValidationError:
@@ -500,7 +557,8 @@ class ServiceManager:
             self._stop_service(name, p["compose"])
             p["compose"].unlink()
         self.traefik_config.remove_config(name)
-        for path in (p["service"], p["data"]):
+        doomed = (p["service"],) if keep_data else (p["service"], p["data"])
+        for path in doomed:
             if path.exists():
                 shutil.rmtree(path, ignore_errors=True)
 
@@ -629,12 +687,18 @@ class ServiceManager:
         ok, msg = self._compose(name, compose_path, "down", timeout=60)
         return (True, "Stopped") if ok else (False, msg)
 
-    def remove(self, name: str, purge: bool = False) -> Tuple[bool, str]:
+    def remove(
+        self, name: str, purge: bool = False, keep_declaration: bool = False
+    ) -> Tuple[bool, str]:
         """Remove an installed service.
 
         Args:
             name: Service name
             purge: If True, also remove data directory
+            keep_declaration: Leave the services.d declaration in place (the
+                reconcile REPLACE path removes only the materialization it is
+                about to rebuild). Imperative removes delete the declaration
+                too — otherwise the next reconcile would resurrect the service.
 
         Returns:
             Tuple of (success, message)
@@ -661,6 +725,9 @@ class ServiceManager:
         # Remove service definition
         if service_dir.exists():
             shutil.rmtree(service_dir)
+
+        if not keep_declaration:
+            services_d.remove_declaration(self.syrvis_home, name)
 
         # Remove data if purging
         if purge:
@@ -769,7 +836,12 @@ class ServiceManager:
         if not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
-        return self._start_service(name, compose_path)
+        ok, msg = self._start_service(name, compose_path)
+        if ok:
+            # Imperative start is a file author: a declared-off service becomes
+            # declared-on, so the next reconcile agrees with reality.
+            services_d.set_declared_enabled(self.syrvis_home, name, True)
+        return ok, msg
 
     def stop(self, name: str) -> Tuple[bool, str]:
         """Stop a service.
@@ -787,7 +859,12 @@ class ServiceManager:
         if not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
-        return self._stop_service(name, compose_path)
+        ok, msg = self._stop_service(name, compose_path)
+        if ok:
+            # Imperative stop = declared-but-off (enabled: false), NOT undeclared;
+            # reconcile keeps it stopped instead of restarting it.
+            services_d.set_declared_enabled(self.syrvis_home, name, False)
+        return ok, msg
 
     def update(self, name: str) -> Tuple[bool, str]:
         """Update a service from its git repository.
@@ -846,6 +923,14 @@ class ServiceManager:
             self.traefik_config.write_config(updated, domain)
         except ValueError as e:
             return False, f"Failed to update Traefik config: {e}"
+
+        # Keep the services.d declaration in step with the updated manifest
+        # (content only; the operator's orchestration keys are preserved) —
+        # otherwise the next reconcile would see stale intent and downgrade.
+        try:
+            services_d.write_declaration_from_install(self.syrvis_home, updated)
+        except Exception:  # noqa: BLE001 - best-effort; update result stands
+            pass
 
         # Restart if image changed
         if current.image != updated.image or current_version != updated.version:

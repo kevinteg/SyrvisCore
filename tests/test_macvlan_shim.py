@@ -199,3 +199,33 @@ class TestEnsureMacvlanShimReconcile:
         assert fake.did("ip", "route", "add", f"{traefik_ip}/32", "dev", SHIM)
         # Never tears anything down on a clean create.
         assert not fake.did("ip", "link", "del")
+
+
+class TestStartupScriptReconcile:
+    """The boot startup script must reconcile declared Layer 2 services.
+
+    Running at boot (via the rc.d hook), the script sets up Docker perms and the
+    macvlan shim, then must also reconcile the declared L2 services. That last
+    step is strictly best-effort: a failing declaration must never block boot.
+    """
+
+    def test_dsm_startup_script_runs_reconcile_best_effort(self, tmp_path):
+        install_dir = tmp_path / "install"
+        ok, _ = DsmOperations().ensure_startup_script(install_dir, "syrvisuser")
+        assert ok
+
+        content = (install_dir / "bin" / "syrvis-startup.sh").read_text()
+        reconcile_line = f'"{install_dir}/bin/syrvis" reconcile --boot || true'
+        assert reconcile_line in content
+        # Best-effort: must not be able to fail the boot script.
+        assert "|| true" in content
+        # Placed at the very end, after the macvlan shim setup.
+        assert content.index(reconcile_line) > content.index("SHIM_NAME")
+        assert content.index(reconcile_line) < content.rindex("exit 0")
+
+        # The rc.d hook can run before ContainerManager starts the Docker daemon
+        # on DSM 7, so reconcile must be preceded by a bounded wait-for-docker
+        # poll -- otherwise every compose call no-ops and --boot swallows it.
+        assert 'while ! "$DOCKER_BIN" info >/dev/null 2>&1; do' in content
+        assert "DOCKER_WAIT" in content
+        assert content.index("DOCKER_WAIT") < content.index(reconcile_line)

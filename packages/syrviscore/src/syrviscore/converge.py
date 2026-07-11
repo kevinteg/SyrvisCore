@@ -43,7 +43,7 @@ from . import exposure as exposure_mod
 from . import stack as stack_mod
 from .errors import SyrvisError
 from .service_manager import ServiceManager
-from .service_schema import load_service_definition, validate_service_name
+from .service_schema import validate_service_name
 
 DESIRED_SCHEMA_VERSION = 1
 
@@ -149,25 +149,21 @@ def _current_l2_state(manager: ServiceManager) -> Dict[str, Dict[str, Any]]:
     an exact comparison. A service whose manifest fails to load is reported
     with ``error`` (it will show as needing replacement, never silently equal).
     """
+    from .services_d import _installed_manifests
+
     current: Dict[str, Dict[str, Any]] = {}
-    services_dir = manager.services_dir
-    if not services_dir.exists():
-        return current
-    for service_dir in sorted(services_dir.iterdir()):
-        manifest = service_dir / "syrvis-service.yaml"
-        if not service_dir.is_dir() or not manifest.exists():
+    for name, svc in _installed_manifests(manager).items():
+        if svc is None:
+            # Unloadable/manifest-less install: never silently equal -> replace.
+            current[name] = {"error": "unloadable manifest"}
             continue
-        try:
-            svc = load_service_definition(manifest)
-            current[svc.name] = {
-                "image": svc.image,
-                "subdomain": svc.traefik.subdomain if svc.traefik.enabled else "",
-                "exposure": svc.traefik.exposure if svc.traefik.enabled else None,
-                "port": svc.traefik.port,
-                "environment": sorted(svc.environment),
-            }
-        except Exception as exc:  # noqa: BLE001 - unloadable manifest -> replace
-            current[service_dir.name] = {"error": str(exc)}
+        current[name] = {
+            "image": svc.image,
+            "subdomain": svc.traefik.subdomain if svc.traefik.enabled else "",
+            "exposure": svc.traefik.exposure if svc.traefik.enabled else None,
+            "port": svc.traefik.port,
+            "environment": sorted(svc.environment),
+        }
     return current
 
 
@@ -301,8 +297,11 @@ def apply_plan(
                 )
                 record(action, ok, msg)
             elif kind == "service_replace":
-                # Remove (data preserved) then re-add with the new declaration.
-                ok, msg = manager.remove(action["name"], purge=False)
+                # Remove (data preserved, services.d declaration KEPT — losing
+                # it on a failed re-add would erase intent) then re-add. The
+                # data dir predates this replace, so a failed re-install must
+                # roll back without destroying it.
+                ok, msg = manager.remove(action["name"], purge=False, keep_declaration=True)
                 if ok:
                     ok, msg = manager.add_image(
                         action["name"],
@@ -312,6 +311,7 @@ def apply_plan(
                         port=action["port"],
                         environment=action["environment"],
                         start=True,
+                        preserve_data_on_rollback=True,
                     )
                 record(action, ok, msg)
             elif kind == "service_stop":
