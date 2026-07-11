@@ -1,0 +1,18 @@
+# Bundled catalog template — Gollum wiki (git-backed personal wiki).
+# Installed via: syrvis service run gollum   (override with --subdomain/--exposure/...)
+name: gollum
+version: "5.3.2"
+image: gollum/gollum:v5.3.2
+description: "Personal wiki powered by Git"
+homepage: "https://github.com/gollum/gollum"
+
+traefik:
+  enabled: true
+  subdomain: wiki
+  port: 4567
+  exposure: internal
+
+restart: unless-stopped
+
+volumes:
+  - "wiki:/wiki:rw"

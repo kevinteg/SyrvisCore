@@ -1,23 +1,81 @@
 """SyrvisCore CLI - Main entry point."""
 
+import functools
+import json as jsonlib
 import os
+import sys
 
 import click
 from dotenv import load_dotenv
 
 from syrviscore.__version__ import __version__
+from syrviscore._format import format_row, status_glyph
 from syrviscore.compose import generate_compose_from_config
-from syrviscore.docker_manager import DockerConnectionError, DockerError, DockerManager
-from syrviscore.paths import SyrvisHomeError, get_syrvis_home, get_active_version, get_env_path
-from syrviscore.traefik_config import (
-    generate_traefik_dynamic_config,
-    generate_traefik_static_config,
+from syrviscore.docker_manager import (
+    DockerConnectionError,  # noqa: F401 - re-exported; tests/adapters import from here
+    DockerError,  # noqa: F401 - re-exported; tests/adapters import from here
+    DockerManager,
+    restart_traefik_if_running,
+    write_traefik_config_files,
 )
+from syrviscore.errors import SyrvisError
+from syrviscore.paths import SyrvisHomeError, get_syrvis_home, get_active_version, get_env_path
 from syrviscore.setup import setup
 from syrviscore.doctor import doctor
 from syrviscore.update import update
 from syrviscore.verify import verify
 from syrviscore import privilege
+
+
+# =============================================================================
+# Error handling at the CLI boundary
+# =============================================================================
+
+
+def handle_errors(f):
+    """Render errors cleanly at the CLI boundary (mirror of syrvisctl's).
+
+    Apply as the innermost decorator on a command instead of per-command
+    try/except blocks:
+
+        @cli.command()
+        @handle_errors
+        def mycmd(...): ...
+
+    Behavior:
+    - SyrvisError -> one ``Error: {e}`` line on stderr, exit(e.exit_code).
+    - Unexpected Exception -> ``Error: {e}`` on stderr, exit 1.
+    - Click's own control flow (click.Abort, click.UsageError/ClickException)
+      and SystemExit propagate untouched, so confirmation aborts, usage errors,
+      and explicit exits keep their native rendering.
+
+    Commands with a ``--json`` flag must still emit their ``{"error": ...}``
+    envelope to STDOUT on failure (the MCP contract). Keep that as a small
+    in-command handler that calls :func:`json_error` in json mode and
+    re-raises otherwise — see ``status`` / ``service list`` / ``stack list`` /
+    ``config show`` for the pattern.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except (click.Abort, click.ClickException):
+            raise  # click renders these itself ("Aborted!", usage message)
+        except SyrvisError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(e.exit_code)
+        except Exception as e:  # noqa: BLE001 - last-resort CLI boundary
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+
+    return wrapper
+
+
+def json_error(e, indent=None):
+    """Emit the --json error envelope to stdout and exit 1 (MCP contract)."""
+    click.echo(jsonlib.dumps({"error": str(e)}, indent=indent))
+    raise SystemExit(1)
 
 
 @click.group()
@@ -53,8 +111,10 @@ def service():
     "--exposure",
     type=click.Choice(["internal", "tunnel"]),
     default=None,
-    help="internal = LAN-only; tunnel = remote via Cloudflare",
+    help="internal = LAN-only; tunnel = remote via Cloudflare. "
+    "Default: inherit the manifest's exposure (unlike 'service run', which defaults to internal).",
 )
+@handle_errors
 def service_add(source, no_start, subdomain, exposure):
     """Add a service from a git URL.
 
@@ -66,85 +126,152 @@ def service_add(source, no_start, subdomain, exposure):
         syrvis service add https://github.com/user/svc.git --subdomain wiki --exposure tunnel
     """
     privilege.ensure_elevated("Adding services requires elevated privileges.")
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.add(
-            source, start=not no_start, subdomain=subdomain, exposure=exposure
-        )
-
-        if success:
-            click.echo(message)
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to add service: {e}", err=True)
-        raise click.Abort()
+    manager = ServiceManager()
+    success, message = manager.add(
+        source, start=not no_start, subdomain=subdomain, exposure=exposure
+    )
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
 
 
 @service.command("run")
 @click.argument("name")
-@click.option("--image", required=True, help="Pinned image reference (e.g. a GHCR tag)")
+@click.option(
+    "--image",
+    default=None,
+    help="Pinned image reference (e.g. a GHCR tag). Omit to resolve NAME from "
+    "the service catalog ('syrvis service catalog' lists templates).",
+)
 @click.option("--subdomain", default=None, help="Subdomain to route at (defaults to NAME)")
 @click.option(
     "--exposure",
     type=click.Choice(["internal", "tunnel"]),
-    default="internal",
-    help="internal = LAN-only; tunnel = remote via Cloudflare",
+    default=None,
+    help="internal = LAN-only; tunnel = remote via Cloudflare. Default: internal "
+    "for --image runs; the template's exposure for catalog runs.",
 )
-@click.option("--port", type=int, default=80, help="Container port Traefik forwards to")
+@click.option(
+    "--port",
+    type=int,
+    default=None,
+    help="Container port Traefik forwards to (default: 80, or the template's port)",
+)
 @click.option("--env", "env_vars", multiple=True, help="KEY=VALUE runtime env (repeatable)")
+@click.option(
+    "--volume",
+    "volumes",
+    multiple=True,
+    help="Volume mount (repeatable): named volume or a path relative to the "
+    "service's data dir, e.g. 'data:/app/data:rw'. Only with --image.",
+)
+@click.option(
+    "--env-file",
+    "env_file",
+    default=None,
+    help="A data-dir-relative env file for secrets (created 0600 if absent). " "Only with --image.",
+)
 @click.option("--description", default="", help="Human description")
 @click.option("--no-start", is_flag=True, help="Create but don't start the service")
-def service_run(name, image, subdomain, exposure, port, env_vars, description, no_start):
-    """Run a Layer 2 service straight from a published image (no git repo).
+@handle_errors
+def service_run(
+    name, image, subdomain, exposure, port, env_vars, volumes, env_file, description, no_start
+):
+    """Run a Layer 2 service from a published image or a catalog template.
 
-    The image-first path: hand SyrvisCore an image + how to route it, and it
-    synthesizes a validated manifest and runs it. This is what home-tech drives
-    over MCP for image-only services.
+    With --image: the image-first path — hand SyrvisCore an image + how to
+    route it, and it synthesizes a validated manifest and runs it. This is what
+    home-tech drives over MCP for image-only services.
+
+    Without --image: NAME is resolved from the service catalog (bundled
+    templates + $SYRVIS_HOME/catalog/), and any --subdomain/--exposure/--port/
+    --env override the template.
 
     Examples:
+        syrvis service run gollum
         syrvis service run cyberquill --image ghcr.io/acme/cyberquill:1.4.0 \\
             --exposure tunnel --port 8080
     """
     privilege.ensure_elevated("Running services requires elevated privileges.")
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.add_image(
+    manager = ServiceManager()
+    if image is None:
+        if volumes or env_file:
+            raise SyrvisError(
+                "--volume/--env-file apply to --image runs; a catalog template "
+                "declares its own volumes (override them in the template instead)"
+            )
+        success, message = manager.add_from_catalog(
             name,
-            image,
             subdomain=subdomain,
             exposure=exposure,
             port=port,
             environment=list(env_vars),
+            start=not no_start,
+        )
+    else:
+        success, message = manager.add_image(
+            name,
+            image,
+            subdomain=subdomain,
+            exposure=exposure or "internal",
+            port=port if port is not None else 80,
+            environment=list(env_vars),
+            volumes=list(volumes),
+            env_file=env_file,
             description=description,
             start=not no_start,
         )
-        if success:
-            click.echo(message)
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to run service: {e}", err=True)
-        raise click.Abort()
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
+@service.command("catalog")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def service_catalog(as_json):
+    """List the service catalog (bundled + site-local templates)."""
+    from syrviscore.catalog import list_templates
+
+    entries = list_templates()
+    if as_json:
+        click.echo(jsonlib.dumps({"templates": entries}, indent=2))
+        return
+    if not entries:
+        click.echo("No catalog templates found.")
+        return
+    click.echo()
+    click.echo(format_row([("NAME", 16), ("IMAGE", 40), ("EXPOSURE", 10), ("SOURCE", 0)]))
+    click.echo("-" * 76)
+    for entry in entries:
+        if "error" in entry:
+            click.echo(format_row([(entry["name"], 16), ("INVALID: " + entry["error"], 0)]))
+            continue
+        click.echo(
+            format_row(
+                [
+                    (entry["name"], 16),
+                    (entry["image"], 40),
+                    (entry.get("exposure") or "-", 10),
+                    (entry["source"], 0),
+                ]
+            )
+        )
+    click.echo()
+    click.echo("Install one with: syrvis service run <name>")
 
 
 @service.command("remove")
 @click.argument("name")
 @click.option("--purge", is_flag=True, help="Also remove service data")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@handle_errors
 def service_remove(name, purge, yes):
     """Remove an installed service.
 
@@ -161,28 +288,19 @@ def service_remove(name, purge, yes):
             click.echo("Aborted")
             return
 
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.remove(name, purge=purge)
-
-        if success:
-            click.echo(message)
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to remove service: {e}", err=True)
-        raise click.Abort()
+    manager = ServiceManager()
+    success, message = manager.remove(name, purge=purge)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
 
 
 @service.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
 def service_list(as_json):
     """List all installed services."""
     try:
@@ -192,113 +310,78 @@ def service_list(as_json):
         services = manager.list()
 
         if as_json:
-            import json as jsonlib
-
             click.echo(jsonlib.dumps({"services": services}, indent=2, default=str))
             return
-
-        if not services:
-            click.echo("No services installed")
-            click.echo()
-            click.echo("Add a service with: syrvis service add <git-url>")
-            return
-
-        click.echo()
-        click.echo(f"{'NAME':<20} {'VERSION':<10} {'STATUS':<12} {'URL'}")
-        click.echo("-" * 70)
-
-        for svc in services:
-            status_icon = "[+]" if svc["status"] == "running" else "[-]"
-            click.echo(
-                f"{status_icon} {svc['name']:<17} {svc['version']:<10} "
-                f"{svc['status']:<12} {svc['url']}"
-            )
-
-        click.echo()
-
     except Exception as e:
         if as_json:
-            import json as jsonlib
+            json_error(e, indent=2)
+        raise
 
-            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
-            raise SystemExit(1)
-        click.echo(f"Failed to list services: {e}", err=True)
-        raise click.Abort()
+    if not services:
+        click.echo("No services installed")
+        click.echo()
+        click.echo("Add a service with: syrvis service add <git-url>")
+        return
+
+    widths = (20, 10, 12, 0)
+    click.echo()
+    click.echo(format_row(list(zip(("NAME", "VERSION", "STATUS", "URL"), widths))))
+    click.echo("-" * 70)
+
+    for svc in services:
+        glyph = status_glyph(svc["status"])
+        cells = (f"{glyph} {svc['name']}", svc["version"], svc["status"], svc["url"])
+        click.echo(format_row(list(zip(cells, widths))))
+
+    click.echo()
 
 
 @service.command("start")
 @click.argument("name")
+@handle_errors
 def service_start(name):
     """Start a service."""
     privilege.ensure_elevated("Starting services requires elevated privileges.")
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.start(name)
-
-        if success:
-            click.echo(f"Service '{name}' started")
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to start service: {e}", err=True)
-        raise click.Abort()
+    manager = ServiceManager()
+    success, message = manager.start(name)
+    if success:
+        click.echo(f"Service '{name}' started")
+    else:
+        raise SyrvisError(message)
 
 
 @service.command("stop")
 @click.argument("name")
+@handle_errors
 def service_stop(name):
     """Stop a service."""
     privilege.ensure_elevated("Stopping services requires elevated privileges.")
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.stop(name)
-
-        if success:
-            click.echo(f"Service '{name}' stopped")
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to stop service: {e}", err=True)
-        raise click.Abort()
+    manager = ServiceManager()
+    success, message = manager.stop(name)
+    if success:
+        click.echo(f"Service '{name}' stopped")
+    else:
+        raise SyrvisError(message)
 
 
 @service.command("update")
 @click.argument("name")
+@handle_errors
 def service_update(name):
     """Update a service from its git repository."""
     privilege.ensure_elevated("Updating services requires elevated privileges.")
-    try:
-        from syrviscore.service_manager import ServiceManager
+    from syrviscore.service_manager import ServiceManager
 
-        manager = ServiceManager()
-        success, message = manager.update(name)
-
-        if success:
-            click.echo(message)
-        else:
-            click.echo(f"Error: {message}", err=True)
-            raise click.Abort()
-
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to update service: {e}", err=True)
-        raise click.Abort()
+    manager = ServiceManager()
+    success, message = manager.update(name)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
 
 
 # =============================================================================
@@ -308,6 +391,7 @@ def service_update(name):
 
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
 def status(as_json):
     """Show status of all services (alias for 'core status')."""
     try:
@@ -316,163 +400,104 @@ def status(as_json):
         active = get_active_version()
 
         if as_json:
-            import json as jsonlib
-
             click.echo(
                 jsonlib.dumps({"version": active, "services": statuses}, indent=2, default=str)
             )
             return
-
-        if not statuses:
-            click.echo("No services found")
-            click.echo("Run 'syrvis setup' to complete installation")
-            return
-
-        click.echo()
-        click.echo("SyrvisCore Status")
-        click.echo("=" * 60)
-
-        # Show version info
-        if active:
-            click.echo(f"Version: {active}")
-        click.echo()
-
-        click.echo(f"{'Service':<15} {'Status':<12} {'Uptime':<20}")
-        click.echo("-" * 50)
-
-        for service_name, info in statuses.items():
-            status_icon = "[+]" if info["status"] == "running" else "[-]"
-            click.echo(
-                f"{status_icon} {service_name:<12} {info['status']:<12} {info['uptime']:<20}"
-            )
-
-        click.echo()
-
-    except (SyrvisHomeError, DockerConnectionError) as e:
-        if as_json:
-            import json as jsonlib
-
-            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
-            raise SystemExit(1)
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
     except Exception as e:
         if as_json:
-            import json as jsonlib
+            json_error(e, indent=2)
+        raise
 
-            click.echo(jsonlib.dumps({"error": str(e)}, indent=2))
-            raise SystemExit(1)
-        click.echo(f"Failed to get status: {e}", err=True)
-        raise click.Abort()
+    if not statuses:
+        click.echo("No services found")
+        click.echo("Run 'syrvis setup' to complete installation")
+        return
+
+    click.echo()
+    click.echo("SyrvisCore Status")
+    click.echo("=" * 60)
+
+    # Show version info
+    if active:
+        click.echo(f"Version: {active}")
+    click.echo()
+
+    widths = (15, 12, 0)
+    click.echo(format_row(list(zip(("Service", "Status", "Uptime"), widths))))
+    click.echo("-" * 50)
+
+    for service_name, info in statuses.items():
+        glyph = status_glyph(info["status"])
+        cells = (f"{glyph} {service_name}", info["status"], info["uptime"])
+        click.echo(format_row(list(zip(cells, widths))))
+
+    click.echo()
 
 
 @cli.command()
 @click.argument("service", required=False)
 @click.option("--follow", "-f", is_flag=True, help="Follow log output")
 @click.option("--tail", "-n", default=100, help="Number of lines to show")
+@handle_errors
 def logs(service, follow, tail):
     """View service logs (alias for 'core logs')."""
-    try:
-        manager = DockerManager()
+    # Unknown-service ValueError from get_container_logs carries the
+    # available-services list; the boundary renders it as "Error: ...".
+    manager = DockerManager()
 
-        if follow:
-            if service:
-                click.echo(f"Following logs for {service}... (Ctrl+C to stop)")
-            else:
-                click.echo("Following logs for all services... (Ctrl+C to stop)")
-            manager.get_container_logs(service=service, follow=True, tail=tail)
+    if follow:
+        if service:
+            click.echo(f"Following logs for {service}... (Ctrl+C to stop)")
         else:
-            log_output = manager.get_container_logs(service=service, follow=False, tail=tail)
-            click.echo(log_output)
-
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to get logs: {e}", err=True)
-        raise click.Abort()
+            click.echo("Following logs for all services... (Ctrl+C to stop)")
+        manager.get_container_logs(service=service, follow=True, tail=tail)
+    else:
+        log_output = manager.get_container_logs(service=service, follow=False, tail=tail)
+        click.echo(log_output)
 
 
 @cli.command()
+@handle_errors
 def start():
     """Start all services (alias for 'core start')."""
     privilege.ensure_elevated("Starting services requires elevated privileges.")
-    try:
-        click.echo("Starting services...")
-        manager = DockerManager()
-        manager.start_core_services()
-        click.echo("Services started")
-        click.echo("Run 'syrvis status' to verify")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to start services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Starting services...")
+    manager = DockerManager()
+    warnings = manager.start_core_services()
+    for warning in warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    click.echo("Services started")
+    click.echo("Run 'syrvis status' to verify")
 
 
 @cli.command()
+@handle_errors
 def stop():
     """Stop all services (alias for 'core stop')."""
     privilege.ensure_elevated("Stopping services requires elevated privileges.")
-    try:
-        click.echo("Stopping services...")
-        manager = DockerManager()
-        manager.stop_core_services()
-        click.echo("Services stopped")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to stop services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Stopping services...")
+    manager = DockerManager()
+    manager.stop_core_services()
+    click.echo("Services stopped")
 
 
 @cli.command()
+@handle_errors
 def restart():
     """Restart all services (alias for 'core restart')."""
     privilege.ensure_elevated("Restarting services requires elevated privileges.")
-    try:
-        click.echo("Restarting services...")
-        manager = DockerManager()
-        manager.restart_core_services()
-        click.echo("Services restarted")
-        click.echo("Run 'syrvis status' to verify")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to restart services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Restarting services...")
+    manager = DockerManager()
+    manager.restart_core_services()
+    click.echo("Services restarted")
+    click.echo("Run 'syrvis status' to verify")
 
 
 @cli.command()
 @click.option("--volumes", "-v", is_flag=True, help="Also remove named volumes")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@handle_errors
 def clean(volumes, yes):
     """Remove all SyrvisCore containers and networks.
 
@@ -492,52 +517,45 @@ def clean(volumes, yes):
             click.echo("Aborted")
             return
 
-    try:
-        click.echo("Cleaning up containers and networks...")
-        manager = DockerManager()
-        results = manager.clean_core_services(remove_volumes=volumes)
+    click.echo("Cleaning up containers and networks...")
+    manager = DockerManager()
+    results = manager.clean_core_services(remove_volumes=volumes)
 
-        click.echo()
-        click.echo("Cleanup Results:")
+    click.echo()
+    click.echo("Cleanup Results:")
 
-        # Show containers
-        if results.get("containers_stopped"):
-            click.echo(f"  Containers stopped: {', '.join(results['containers_stopped'])}")
+    # Show containers
+    if results.get("containers_stopped"):
+        click.echo(f"  Containers stopped: {', '.join(results['containers_stopped'])}")
+    else:
+        click.echo("  Containers stopped: (none)")
+
+    # Show networks
+    if results.get("networks_cleaned"):
+        click.echo(f"  Networks removed:   {', '.join(results['networks_cleaned'])}")
+    else:
+        click.echo("  Networks removed:   (none)")
+
+    # Show volumes if requested
+    if volumes:
+        if results.get("volumes_cleaned"):
+            click.echo(f"  Volumes removed:    {', '.join(results['volumes_cleaned'])}")
         else:
-            click.echo("  Containers stopped: (none)")
+            click.echo("  Volumes removed:    (none)")
 
-        # Show networks
-        if results.get("networks_cleaned"):
-            click.echo(f"  Networks removed:   {', '.join(results['networks_cleaned'])}")
-        else:
-            click.echo("  Networks removed:   (none)")
-
-        # Show volumes if requested
-        if volumes:
-            if results.get("volumes_cleaned"):
-                click.echo(f"  Volumes removed:    {', '.join(results['volumes_cleaned'])}")
-            else:
-                click.echo("  Volumes removed:    (none)")
-
-        if results["errors"]:
-            click.echo()
-            click.echo("Warnings:", err=True)
-            for error in results["errors"]:
-                click.echo(f"  - {error}", err=True)
-
+    if results["errors"]:
         click.echo()
-        click.echo("Cleanup complete")
+        click.echo("Warnings:", err=True)
+        for error in results["errors"]:
+            click.echo(f"  - {error}", err=True)
 
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to clean: {e}", err=True)
-        raise click.Abort()
+    click.echo()
+    click.echo("Cleanup complete")
 
 
 @cli.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@handle_errors
 def reset(yes):
     """Clean everything and start services fresh.
 
@@ -568,45 +586,30 @@ def reset(yes):
             click.echo("Aborted")
             return
 
-    try:
-        click.echo()
-        click.echo("Resetting services...")
-        click.echo()
-        click.echo("[1/2] Cleaning up...")
-        manager = DockerManager()
-        results = manager.reset_core_services()
+    click.echo()
+    # reset_core_services() cleans AND starts in one synchronous call, so the
+    # start has already happened by the time this returns — report what it did
+    # rather than staging fake "[1/2]/[2/2]" steps around a single library call.
+    click.echo("Resetting services (removing containers/networks, then starting fresh)...")
+    manager = DockerManager()
+    results = manager.reset_core_services()
 
-        # Show what was stopped/removed
-        if results.get("containers_stopped"):
-            click.echo(f"      Stopped: {', '.join(results['containers_stopped'])}")
-        if results.get("networks_cleaned"):
-            click.echo(f"      Removed networks: {', '.join(results['networks_cleaned'])}")
+    # Show what was stopped/removed
+    if results.get("containers_stopped"):
+        click.echo(f"  Stopped: {', '.join(results['containers_stopped'])}")
+    if results.get("networks_cleaned"):
+        click.echo(f"  Removed networks: {', '.join(results['networks_cleaned'])}")
 
-        if results["errors"]:
-            click.echo("      Warnings:", err=True)
-            for error in results["errors"]:
-                click.echo(f"        - {error}", err=True)
+    if results["errors"]:
+        click.echo("  Warnings:", err=True)
+        for error in results["errors"]:
+            click.echo(f"    - {error}", err=True)
 
-        click.echo()
-        click.echo("[2/2] Starting services...")
-        # Show what's being started
-        click.echo(f"      Starting: {', '.join(DockerManager.CORE_SERVICES)}")
+    if results.get("started"):
+        click.echo(f"  Started: {', '.join(DockerManager.CORE_SERVICES)}")
 
-        click.echo()
-        click.echo("Reset complete. Run 'syrvis status' to verify.")
-
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to reset: {e}", err=True)
-        raise click.Abort()
+    click.echo()
+    click.echo("Reset complete. Run 'syrvis status' to verify.")
 
 
 # =============================================================================
@@ -637,8 +640,9 @@ def compose():
 @click.option(
     "--config",
     "-c",
-    default="build/config.yaml",
-    help="Path to build configuration file (uses defaults if missing)",
+    default=None,
+    help="Explicit build-config file. Default: the active version's bundled "
+    "config.yaml if present, else the built-in pinned image versions.",
     type=click.Path(),
 )
 @click.option(
@@ -648,72 +652,64 @@ def compose():
     help="Path for output docker-compose file",
     type=click.Path(),
 )
+@handle_errors
 def generate(config, output):
     """Generate docker-compose.yaml and Traefik configuration files."""
     from pathlib import Path
 
-    try:
-        # Load .env from SYRVIS_HOME/config/.env
-        env_path = get_env_path()
-        if env_path.exists():
-            load_dotenv(env_path, override=True)
-        else:
-            click.echo(f"Warning: No .env file found at {env_path}", err=True)
-            click.echo("Run 'syrvis setup' to configure first.", err=True)
-            raise click.Abort()
-
-        if Path(config).exists():
-            click.echo(f"Reading build config from: {config}")
-        else:
-            click.echo("Using default Docker image versions")
-        compose = generate_compose_from_config(config_path=config, output_path=output)
-
-        click.echo(f"Generated docker-compose.yaml at: {output}")
-        click.echo()
-        click.echo("Services configured:")
-        for service_name in compose["services"].keys():
-            service = compose["services"][service_name]
-            click.echo(f"  {service_name:<15} {service['image']}")
-
-        # Show Traefik's dedicated IP
-        traefik_networks = compose["services"]["traefik"]["networks"]
-        if isinstance(traefik_networks, dict) and "syrvis-macvlan" in traefik_networks:
-            traefik_ip = traefik_networks["syrvis-macvlan"]["ipv4_address"]
-            click.echo()
-            click.echo("Network Configuration:")
-            click.echo(f"  Traefik IP: {traefik_ip}")
-            click.echo(
-                f"  Interface:  {compose['networks']['syrvis-macvlan']['driver_opts']['parent']}"
-            )
-
-        # Also regenerate Traefik configuration files
-        click.echo()
-        click.echo("Regenerating Traefik configuration...")
-        syrvis_home = get_syrvis_home()
-        traefik_data = syrvis_home / "data" / "traefik"
-        traefik_data.mkdir(parents=True, exist_ok=True)
-        config_dir = traefik_data / "config"
-        config_dir.mkdir(exist_ok=True)
-
-        static_config_path = traefik_data / "traefik.yml"
-        static_config_path.write_text(generate_traefik_static_config())
-        static_config_path.chmod(0o644)
-        click.echo(f"  Generated: {static_config_path}")
-
-        dynamic_config_path = config_dir / "dynamic.yml"
-        dynamic_config_path.write_text(generate_traefik_dynamic_config())
-        dynamic_config_path.chmod(0o644)
-        click.echo(f"  Generated: {dynamic_config_path}")
-
-        click.echo()
-        click.echo("Run 'syrvis start' to start services.")
-
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
+    # Load .env from SYRVIS_HOME/config/.env
+    env_path = get_env_path()
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+    else:
+        click.echo(f"Warning: No .env file found at {env_path}", err=True)
+        click.echo("Run 'syrvis setup' to configure first.", err=True)
         raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to generate compose file: {e}", err=True)
-        raise click.Abort()
+
+    if config and Path(config).exists():
+        click.echo(f"Reading build config from: {config}")
+    else:
+        click.echo(
+            "Using the active version's bundled config.yaml if present, "
+            "else built-in pinned image versions"
+        )
+    compose = generate_compose_from_config(config_path=config, output_path=output)
+
+    click.echo(f"Generated docker-compose.yaml at: {output}")
+    click.echo()
+    click.echo("Services configured:")
+    for service_name in compose["services"].keys():
+        service = compose["services"][service_name]
+        click.echo(f"  {service_name:<15} {service['image']}")
+
+    # Show Traefik's dedicated IP
+    traefik_networks = compose["services"]["traefik"]["networks"]
+    if isinstance(traefik_networks, dict) and "syrvis-macvlan" in traefik_networks:
+        traefik_ip = traefik_networks["syrvis-macvlan"]["ipv4_address"]
+        click.echo()
+        click.echo("Network Configuration:")
+        click.echo(f"  Traefik IP: {traefik_ip}")
+        click.echo(
+            f"  Interface:  {compose['networks']['syrvis-macvlan']['driver_opts']['parent']}"
+        )
+
+    # Also regenerate Traefik configuration files (single writer)
+    click.echo()
+    click.echo("Regenerating Traefik configuration...")
+    syrvis_home = get_syrvis_home()
+    static_changed = write_traefik_config_files(syrvis_home)
+    traefik_data = syrvis_home / "data" / "traefik"
+    click.echo(f"  Generated: {traefik_data / 'traefik.yml'}")
+    click.echo(f"  Generated: {traefik_data / 'config' / 'dynamic.yml'}")
+
+    # A STATIC config change (traefik.yml) only takes effect on a Traefik
+    # restart — `up -d` won't pick up a bind-mounted file edit. Restart the
+    # running Traefik now so the change (e.g. `ping: {}`) applies immediately.
+    if static_changed and restart_traefik_if_running():
+        click.echo("  Static config changed — restarted Traefik to apply it.")
+
+    click.echo()
+    click.echo("Run 'syrvis start' to start services.")
 
 
 # =============================================================================
@@ -733,24 +729,37 @@ def _regenerate_compose():
         if env_path.exists():
             load_dotenv(env_path, override=True)
 
+        # None lets the generator resolve: active version's bundled config.yaml
+        # if present, else the built-in pinned image versions.
         versioned = None
         try:
             versioned = p.get_config_path()
         except Exception:
             versioned = None
-        config_path = str(versioned) if versioned and versioned.exists() else "build/config.yaml"
+        config_path = str(versioned) if versioned and versioned.exists() else None
 
         out = str(p.get_docker_compose_path())
         compose = generate_compose_from_config(config_path=config_path, output_path=out)
 
-        # Keep Traefik static/dynamic config in sync too.
-        traefik_data = p.get_syrvis_home() / "data" / "traefik"
-        (traefik_data / "config").mkdir(parents=True, exist_ok=True)
-        (traefik_data / "traefik.yml").write_text(generate_traefik_static_config())
-        (traefik_data / "config" / "dynamic.yml").write_text(generate_traefik_dynamic_config())
+        # Keep Traefik static/dynamic config in sync too (single writer). A static
+        # change only applies on a Traefik restart, so restart it if it's running.
+        static_changed = write_traefik_config_files(p.get_syrvis_home())
+        restarted = static_changed and restart_traefik_if_running()
+
+        # Reconcile disabled optional core services: `up -d` never removes a
+        # container that dropped out of the compose file, so stop/remove them
+        # here (exact-name matches of known optional services only).
+        from syrviscore.docker_manager import remove_disabled_core_containers
+
+        removed = remove_disabled_core_containers()
 
         names = ", ".join(sorted(compose["services"].keys()))
-        return True, "Regenerated {} ({} services: {})".format(out, len(compose["services"]), names)
+        msg = "Regenerated {} ({} services: {})".format(out, len(compose["services"]), names)
+        if restarted:
+            msg += " — restarted Traefik to apply static config change"
+        if removed:
+            msg += " — stopped disabled: {}".format(", ".join(removed))
+        return True, msg
     except Exception as e:  # noqa: BLE001
         return False, str(e)
 
@@ -773,10 +782,9 @@ def stack():
 
 @stack.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
 def stack_list(as_json):
     """Show declared core services and whether they're running."""
-    import json as jsonlib
-
     from syrviscore import stack as stack_mod
 
     # Load .env so the "token not set" hint reflects the configured tokens, not
@@ -791,8 +799,11 @@ def stack_list(as_json):
     try:
         st = stack_mod.load_stack()
     except stack_mod.StackError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
+        # Honor the read-command --json contract on the error path too: a machine
+        # consumer must get an {"error": ...} envelope, never click's 'Aborted!'.
+        if as_json:
+            json_error(e)
+        raise
 
     running = {}
     try:
@@ -831,11 +842,13 @@ def stack_list(as_json):
     click.echo()
     click.echo("SyrvisCore stack (config/stack.yaml)")
     click.echo("=" * 52)
+    widths = (20, 9, 0)
     for r in rows:
-        mark = "●" if r["enabled"] else "○"
+        glyph = status_glyph(r["enabled"])
         tag = " [primordial]" if r["primordial"] else ""
         state = "enabled" if r["enabled"] else "disabled"
-        click.echo("  {} {:<16} {:<9} {}{}".format(mark, r["service"], state, r["running"], tag))
+        cells = ("{} {}".format(glyph, r["service"]), state, "{}{}".format(r["running"], tag))
+        click.echo("  " + format_row(list(zip(cells, widths))))
         if r["note"]:
             click.echo("      ! {}".format(r["note"]))
     click.echo()
@@ -851,6 +864,7 @@ def stack_list(as_json):
     help="internal = LAN-only; tunnel = remote via Cloudflare",
 )
 @click.option("--apply", "do_apply", is_flag=True, help="Regenerate compose immediately")
+@handle_errors
 def stack_enable(name, subdomain, exposure, do_apply):
     """Declare a core service enabled."""
     from syrviscore import stack as stack_mod
@@ -860,11 +874,7 @@ def stack_enable(name, subdomain, exposure, do_apply):
         settings["subdomain"] = subdomain
     if exposure:
         settings["exposure"] = exposure
-    try:
-        stack_mod.set_enabled(name, True, settings or None)
-    except stack_mod.StackError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
+    stack_mod.set_enabled(name, True, settings or None)
     click.echo("Enabled '{}' in the stack.".format(name))
     _post_stack_change(do_apply)
 
@@ -872,28 +882,147 @@ def stack_enable(name, subdomain, exposure, do_apply):
 @stack.command("disable")
 @click.argument("name")
 @click.option("--apply", "do_apply", is_flag=True, help="Regenerate compose immediately")
+@handle_errors
 def stack_disable(name, do_apply):
     """Declare a core service disabled (primordial services cannot be disabled)."""
     from syrviscore import stack as stack_mod
 
-    try:
-        stack_mod.set_enabled(name, False)
-    except stack_mod.StackError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
+    stack_mod.set_enabled(name, False)
     click.echo("Disabled '{}' in the stack.".format(name))
     _post_stack_change(do_apply)
 
 
 @stack.command("apply")
-def stack_apply():
-    """Regenerate docker-compose.yaml from the declared stack."""
-    ok, msg = _regenerate_compose()
-    if not ok:
-        click.echo(f"Error: {msg}", err=True)
-        raise click.Abort()
-    click.echo(msg)
-    click.echo("Run 'syrvis start' to bring the stack up (or 'syrvis restart').")
+@click.option(
+    "--from",
+    "desired_file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Converge the WHOLE instance (core stack + complete L2 set) to a "
+    "desired-state YAML: add/replace/remove services to match it.",
+)
+@click.option("--dry-run", is_flag=True, help="Show the plan without applying anything")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable plan/results")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation of destructive actions")
+@handle_errors
+def stack_apply(desired_file, dry_run, as_json, yes):
+    """Regenerate compose from the declared stack, or converge to a desired file.
+
+    Without --from: regenerates docker-compose.yaml + Traefik config from the
+    on-NAS config/stack.yaml (existing behavior).
+
+    With --from FILE: whole-set convergence — diff the desired document against
+    the instance and add/replace/stop/remove core + Layer 2 services to match.
+    Destructive actions (remove/purge of undeclared services) require -y or an
+    interactive confirmation. --dry-run prints the plan and changes nothing.
+    """
+    if desired_file is None:
+        if dry_run:
+            raise SyrvisError("--dry-run requires --from (there is no plan to preview)")
+        ok, msg = _regenerate_compose()
+        if not ok:
+            raise SyrvisError(msg)
+        click.echo(msg)
+        click.echo("Run 'syrvis start' to bring the stack up (or 'syrvis restart').")
+        return
+
+    from pathlib import Path as _Path
+
+    from syrviscore import converge as converge_mod
+
+    try:
+        desired = converge_mod.load_desired(_Path(desired_file))
+        plan = converge_mod.build_plan(desired)
+    except SyrvisError as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if dry_run:
+        if as_json:
+            click.echo(jsonlib.dumps({"plan": plan, "applied": False}, indent=2))
+        else:
+            _render_plan(plan)
+            click.echo("(dry run — nothing applied)")
+        return
+
+    if plan["summary"]["destructive"] and not yes:
+        _render_plan(plan)
+        destructive = [a for a in plan["actions"] if a["destructive"]]
+        click.confirm(
+            "Apply {} destructive action(s) ({})?".format(
+                len(destructive),
+                ", ".join("{} {}".format(a["kind"], a["name"]) for a in destructive),
+            ),
+            abort=True,
+        )
+
+    privilege.ensure_elevated("Converging services requires elevated privileges.")
+    results = converge_mod.apply_plan(plan)
+
+    # Stack enablement changed -> regenerate compose (and restart Traefik on a
+    # static change) so the converged declaration is materialized.
+    stack_changed = any(r["kind"].startswith("stack_") and r["ok"] for r in results)
+    regen_msg = None
+    if stack_changed:
+        ok, regen_msg = _regenerate_compose()
+        if not ok:
+            regen_msg = "(compose not regenerated: {})".format(regen_msg)
+
+    if as_json:
+        click.echo(
+            jsonlib.dumps(
+                {"plan": plan, "applied": True, "results": results, "regen": regen_msg},
+                indent=2,
+            )
+        )
+        if any(not r["ok"] for r in results):
+            raise SystemExit(1)
+        return
+
+    click.echo()
+    for r in results:
+        mark = "[+]" if r["ok"] else "[-]"
+        click.echo("  {} {} {}: {}".format(mark, r["kind"], r["name"], r["message"]))
+    if regen_msg:
+        click.echo("  {}".format(regen_msg))
+    failed = [r for r in results if not r["ok"]]
+    click.echo()
+    if failed:
+        click.echo("Converge finished with {} failure(s).".format(len(failed)))
+        raise SystemExit(1)
+    if stack_changed:
+        click.echo("Converged. Run 'syrvis start' to bring newly-enabled core services up.")
+    else:
+        click.echo("Converged.")
+
+
+def _render_plan(plan):
+    click.echo()
+    if not plan["actions"]:
+        click.echo("In sync — no actions needed.")
+        return
+    click.echo(
+        "Plan ({} action(s), {} destructive):".format(
+            plan["summary"]["total"], plan["summary"]["destructive"]
+        )
+    )
+    for action in plan["actions"]:
+        marker = "!" if action["destructive"] else "-"
+        target = action.get("name") or action.get("service")
+        detail = ""
+        if action["kind"] == "service_replace":
+            detail = " ({})".format(
+                ", ".join(
+                    "{}: {} -> {}".format(k, v["from"], v["to"])
+                    for k, v in action.get("changes", {}).items()
+                )
+            )
+        elif action["kind"] == "service_add":
+            detail = " ({} at {}, {})".format(
+                action["image"], action["subdomain"], action["exposure"]
+            )
+        click.echo("  {} {} {}{}".format(marker, action["kind"], target, detail))
 
 
 @stack.command("hostnames")
@@ -904,6 +1033,7 @@ def stack_apply():
     default=None,
     help="Only show hosts with this exposure",
 )
+@handle_errors
 def stack_hostnames(as_json, exposure):
     """Report the external DNS / tunnel state this instance needs.
 
@@ -911,8 +1041,6 @@ def stack_hostnames(as_json, exposure):
     must create: a LAN DNS A record for 'internal', a Cloudflare Tunnel route +
     Access policy for 'tunnel'. This is the seam home-tech reconciles against.
     """
-    import json as jsonlib
-
     from syrviscore import hostnames as hostnames_mod
 
     # Load .env so DOMAIN / TRAEFIK_IP reflect the configured instance.
@@ -976,152 +1104,87 @@ def core():
 
 
 @core.command("start")
+@handle_errors
 def core_start():
     """Start core services."""
     privilege.ensure_elevated("Starting services requires elevated privileges.")
-    try:
-        click.echo("Starting core services...")
-        manager = DockerManager()
-        manager.start_core_services()
-        click.echo("Start initiated for core services")
-        click.echo("Run 'syrvis status' to verify")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to start services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Starting core services...")
+    manager = DockerManager()
+    warnings = manager.start_core_services()
+    for warning in warnings:
+        click.echo(f"Warning: {warning}", err=True)
+    click.echo("Start initiated for core services")
+    click.echo("Run 'syrvis status' to verify")
 
 
 @core.command("stop")
+@handle_errors
 def core_stop():
     """Stop core services."""
     privilege.ensure_elevated("Stopping services requires elevated privileges.")
-    try:
-        click.echo("Stopping core services...")
-        manager = DockerManager()
-        manager.stop_core_services()
-        click.echo("Stop initiated for core services")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to stop services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Stopping core services...")
+    manager = DockerManager()
+    manager.stop_core_services()
+    click.echo("Stop initiated for core services")
 
 
 @core.command("restart")
+@handle_errors
 def core_restart():
     """Restart core services."""
     privilege.ensure_elevated("Restarting services requires elevated privileges.")
-    try:
-        click.echo("Restarting core services...")
-        manager = DockerManager()
-        manager.restart_core_services()
-        click.echo("Restart initiated for core services")
-        click.echo("Run 'syrvis status' to verify")
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to restart services: {e}", err=True)
-        raise click.Abort()
+    click.echo("Restarting core services...")
+    manager = DockerManager()
+    manager.restart_core_services()
+    click.echo("Restart initiated for core services")
+    click.echo("Run 'syrvis status' to verify")
 
 
 @core.command("status")
+@handle_errors
 def core_status():
     """Show status of core services."""
-    try:
-        manager = DockerManager()
-        statuses = manager.get_container_status()
+    manager = DockerManager()
+    statuses = manager.get_container_status()
 
-        if not statuses:
-            click.echo("No core services found")
-            click.echo("Run 'syrvis start' to start services")
-            return
+    if not statuses:
+        click.echo("No core services found")
+        click.echo("Run 'syrvis start' to start services")
+        return
 
-        click.echo()
-        click.echo("Core Services Status:")
-        click.echo()
-        click.echo(f"{'Service':<15} {'Status':<12} {'Uptime':<20} {'Image'}")
-        click.echo("-" * 80)
+    click.echo()
+    click.echo("Core Services Status:")
+    click.echo()
+    widths = (15, 12, 20, 0)
+    click.echo(format_row(list(zip(("Service", "Status", "Uptime", "Image"), widths))))
+    click.echo("-" * 80)
 
-        for service_name, info in statuses.items():
-            status_icon = "[+]" if info["status"] == "running" else "[-]"
-            click.echo(
-                f"{status_icon} {service_name:<12} {info['status']:<12} "
-                f"{info['uptime']:<20} {info['image']}"
-            )
-
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to get status: {e}", err=True)
-        raise click.Abort()
+    for service_name, info in statuses.items():
+        glyph = status_glyph(info["status"])
+        cells = (f"{glyph} {service_name}", info["status"], info["uptime"], info["image"])
+        click.echo(format_row(list(zip(cells, widths))))
 
 
 @core.command("logs")
 @click.argument("service", required=False)
 @click.option("--follow", "-f", is_flag=True, help="Follow log output")
 @click.option("--tail", "-n", default=100, help="Number of lines to show from end")
+@handle_errors
 def core_logs(service, follow, tail):
     """View logs from core services."""
-    try:
-        manager = DockerManager()
+    # Unknown-service ValueError from get_container_logs carries the
+    # available-services list; the boundary renders it as "Error: ...".
+    manager = DockerManager()
 
-        if follow:
-            if service:
-                click.echo(f"Following logs for {service}... (Ctrl+C to stop)")
-            else:
-                click.echo("Following logs for all services... (Ctrl+C to stop)")
-            manager.get_container_logs(service=service, follow=True, tail=tail)
+    if follow:
+        if service:
+            click.echo(f"Following logs for {service}... (Ctrl+C to stop)")
         else:
-            log_output = manager.get_container_logs(service=service, follow=False, tail=tail)
-            click.echo(log_output)
-
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except DockerConnectionError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except ValueError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to get logs: {e}", err=True)
-        raise click.Abort()
+            click.echo("Following logs for all services... (Ctrl+C to stop)")
+        manager.get_container_logs(service=service, follow=True, tail=tail)
+    else:
+        log_output = manager.get_container_logs(service=service, follow=False, tail=tail)
+        click.echo(log_output)
 
 
 # =============================================================================
@@ -1136,78 +1199,70 @@ def config():
 
 
 @config.command()
+@handle_errors
 def generate_traefik():
     """Generate Traefik configuration files."""
-    try:
-        load_dotenv()
+    load_dotenv()
 
-        import os
-
-        domain = os.getenv("DOMAIN")
-        if not domain:
-            click.echo("Warning: DOMAIN environment variable not set", err=True)
-            click.echo("  Using default: example.com", err=True)
-            click.echo("  Set DOMAIN in .env file for production use", err=True)
-            click.echo()
-
-        syrvis_home = get_syrvis_home()
-        traefik_data = syrvis_home / "data" / "traefik"
-
-        traefik_data.mkdir(parents=True, exist_ok=True)
-        config_dir = traefik_data / "config"
-        config_dir.mkdir(exist_ok=True)
-
-        static_config_path = traefik_data / "traefik.yml"
-        static_config = generate_traefik_static_config()
-        static_config_path.write_text(static_config)
-        static_config_path.chmod(0o644)
-        click.echo(f"Generated static config: {static_config_path}")
-
-        dynamic_config_path = config_dir / "dynamic.yml"
-        dynamic_config = generate_traefik_dynamic_config()
-        dynamic_config_path.write_text(dynamic_config)
-        dynamic_config_path.chmod(0o644)
-        click.echo(f"Generated dynamic config: {dynamic_config_path}")
-
+    domain = os.getenv("DOMAIN")
+    if not domain:
+        click.echo("Warning: DOMAIN environment variable not set", err=True)
+        click.echo("  Using default: example.com", err=True)
+        click.echo("  Set DOMAIN in .env file for production use", err=True)
         click.echo()
-        click.echo("Configuration files created successfully!")
 
-    except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
-    except Exception as e:
-        click.echo(f"Failed to generate config: {e}", err=True)
-        raise click.Abort()
+    syrvis_home = get_syrvis_home()
+    traefik_data = syrvis_home / "data" / "traefik"
+
+    static_changed = write_traefik_config_files(syrvis_home)
+    click.echo(f"Generated static config: {traefik_data / 'traefik.yml'}")
+    click.echo(f"Generated dynamic config: {traefik_data / 'config' / 'dynamic.yml'}")
+
+    # Static config only applies on a Traefik restart (up -d ignores a
+    # bind-mounted file edit); restart the running container if it changed.
+    if static_changed and restart_traefik_if_running():
+        click.echo("Restarted Traefik to apply the static config change.")
+
+    click.echo()
+    click.echo("Configuration files created successfully!")
 
 
 @config.command()
-def show():
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def show(as_json):
     """Show current configuration."""
-    try:
-        from .config_reader import read_config
+    from .config_reader import read_config
 
+    try:
         cfg = read_config()
 
-        click.echo()
-        click.echo("SyrvisCore Configuration")
-        click.echo("=" * 60)
-        click.echo()
-        click.echo(f"Install path:  {cfg.install_path or 'unknown'}")
-        click.echo(f"Active version: {cfg.active_version or 'unknown'}")
-        click.echo()
-
-        if cfg.values:
-            click.echo(f"Configuration ({cfg.env_path}):")
-            click.echo("-" * 60)
-            for key, value in cfg.values.items():
-                click.echo(f"  {key}={value}")
-        else:
-            click.echo("No .env file found")
-            click.echo("Run 'syrvis setup' to create configuration")
-
+        if as_json:
+            # read_config() redacts secrets by default, so the JSON view is safe
+            # for the MCP/dashboard adapter contract.
+            click.echo(jsonlib.dumps(cfg.to_dict(), indent=2))
+            return
     except SyrvisHomeError as e:
-        click.echo(f"Error: {e}", err=True)
-        raise click.Abort()
+        if as_json:
+            json_error(e)
+        raise
+
+    click.echo()
+    click.echo("SyrvisCore Configuration")
+    click.echo("=" * 60)
+    click.echo()
+    click.echo(f"Install path:  {cfg.install_path or 'unknown'}")
+    click.echo(f"Active version: {cfg.active_version or 'unknown'}")
+    click.echo()
+
+    if cfg.values:
+        click.echo(f"Configuration ({cfg.env_path}):")
+        click.echo("-" * 60)
+        for key, value in cfg.values.items():
+            click.echo(f"  {key}={value}")
+    else:
+        click.echo("No .env file found")
+        click.echo("Run 'syrvis setup' to create configuration")
 
 
 if __name__ == "__main__":

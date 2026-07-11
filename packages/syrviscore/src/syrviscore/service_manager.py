@@ -257,9 +257,7 @@ class ServiceManager:
             except (ServiceValidationError, ValueError) as e:
                 shutil.rmtree(service_path, ignore_errors=True)
                 return False, "Invalid override: {}".format(e)
-            (service_path / "syrvis-service.yaml").write_text(
-                yaml.safe_dump(service.to_dict(), default_flow_style=False, sort_keys=False)
-            )
+            self._write_manifest(service, service_path)
 
         return self._install_from_definition(service, service_path, start)
 
@@ -271,6 +269,8 @@ class ServiceManager:
         exposure: str = exposure_mod.DEFAULT,
         port: int = 80,
         environment: Optional[List[str]] = None,
+        volumes: Optional[List[str]] = None,
+        env_file: Optional[str] = None,
         description: str = "",
         start: bool = True,
     ) -> Tuple[bool, str]:
@@ -314,6 +314,10 @@ class ServiceManager:
             manifest["description"] = description
         if environment:
             manifest["environment"] = list(environment)
+        if volumes:
+            manifest["volumes"] = list(volumes)
+        if env_file:
+            manifest["env_file"] = env_file
         manifest["traefik"] = {
             "enabled": True,
             "subdomain": (subdomain or name).strip().lower(),
@@ -330,10 +334,78 @@ class ServiceManager:
         # Persist the synthesized manifest so the install is self-describing and
         # `list()` / regeneration read the same effective routing.
         service_path.mkdir(parents=True, exist_ok=True)
-        (service_path / "syrvis-service.yaml").write_text(
+        self._write_manifest(service, service_path)
+        return self._install_from_definition(service, service_path, start)
+
+    def _subdomain_in_use(self, subdomain: str, exclude: Optional[str] = None) -> Optional[str]:
+        """Name of an already-installed service routed at ``subdomain``, else None.
+
+        Two services claiming the same host each write a Traefik router for it, and
+        Traefik's behavior for a duplicate host on one entrypoint is nondeterministic
+        (last-loaded wins). Catch the collision at add time instead.
+        """
+        for info in self.list():
+            if exclude and info.get("name") == exclude:
+                continue
+            if info.get("subdomain") and info.get("subdomain") == subdomain:
+                return info.get("name")
+        return None
+
+    def add_from_catalog(
+        self,
+        name: str,
+        subdomain: Optional[str] = None,
+        exposure: Optional[str] = None,
+        port: Optional[int] = None,
+        environment: Optional[List[str]] = None,
+        start: bool = True,
+    ) -> Tuple[bool, str]:
+        """Install a service from a vetted catalog template (``service run <name>``
+        with no ``--image``). Overrides apply on top of the template, and the
+        effective manifest is persisted like every other install path.
+        """
+        from .catalog import CatalogError, resolve
+
+        self._ensure_directories()
+        try:
+            service = resolve(name)
+        except CatalogError as e:
+            return False, str(e)
+
+        service_path = self.services_dir / name
+        if service_path.exists():
+            return False, "Service '{}' already exists (remove it first, or use update)".format(
+                name
+            )
+
+        try:
+            self._apply_overrides(service, subdomain, exposure)
+            if port is not None:
+                if not isinstance(port, int) or not 1 <= port <= 65535:
+                    raise ServiceValidationError("Invalid port {!r}: must be 1-65535".format(port))
+                service.traefik.port = port
+            if environment:
+                service.environment = list(service.environment) + list(environment)
+        except (ServiceValidationError, ValueError) as e:
+            return False, "Invalid override: {}".format(e)
+
+        service.source_url = "catalog:{}".format(name)
+        service_path.mkdir(parents=True, exist_ok=True)
+        self._write_manifest(service, service_path)
+        return self._install_from_definition(service, service_path, start)
+
+    def _write_manifest(self, service: ServiceDefinition, service_path: Path) -> None:
+        """Persist the effective manifest; 0600 when it carries inline env entries.
+
+        Inline ``environment:`` values may hold secrets, so such manifests are
+        written owner-only. (``env_file`` is the recommended home for secrets —
+        it always lives 0600 in the service data dir.)
+        """
+        manifest = service_path / "syrvis-service.yaml"
+        manifest.write_text(
             yaml.safe_dump(service.to_dict(), default_flow_style=False, sort_keys=False)
         )
-        return self._install_from_definition(service, service_path, start)
+        manifest.chmod(0o600 if service.environment else 0o644)
 
     def _install_from_definition(
         self, service: ServiceDefinition, service_path: Path, start: bool
@@ -344,6 +416,15 @@ class ServiceManager:
         leaves partial state that blocks a retry. Shared by the git-sourced
         :meth:`add` and the image-first :meth:`add_image`.
         """
+        # Reject a subdomain already claimed by another installed service before
+        # writing any Traefik config (last-writer-wins is a silent footgun).
+        if service.traefik.enabled and service.traefik.subdomain:
+            owner = self._subdomain_in_use(service.traefik.subdomain, exclude=service.name)
+            if owner:
+                self._rollback_add(service.name)
+                return False, "subdomain {!r} is already routed by service {!r}".format(
+                    service.traefik.subdomain, owner
+                )
         try:
             service_data_dir = self.data_dir / service.name
             service_data_dir.mkdir(parents=True, exist_ok=True)
@@ -364,18 +445,34 @@ class ServiceManager:
             except ValueError as e:
                 raise RuntimeError(f"Failed to configure Traefik: {e}")
 
+            route_note = self._route_note(service)
             if start:
                 success, msg = self._start_service(service.name, compose_path)
                 if not success:
                     raise RuntimeError(f"failed to start: {msg}")
                 self._reload_traefik()
-                return True, f"Service '{service.name}' added and started"
+                return True, f"Service '{service.name}' added and started{route_note}"
 
             self._reload_traefik()
-            return True, f"Service '{service.name}' added (not started)"
+            return True, f"Service '{service.name}' added (not started){route_note}"
         except Exception as e:
             self._rollback_add(service.name)
             return False, f"Service '{service.name}' not added ({e})"
+
+    @staticmethod
+    def _route_note(service: ServiceDefinition) -> str:
+        """A one-line reachability hint appended to a successful add.
+
+        Makes the two declaration paths give honest, consistent feedback: an
+        unrouted service (git manifest with no ``traefik:`` block) says so, and a
+        routed one points at the exact external record ``stack hostnames`` reports.
+        """
+        if not service.traefik.enabled or not service.traefik.subdomain:
+            return " (installed but NOT routed — no traefik block; unreachable via Traefik)"
+        return (
+            " — reachable once its DNS/tunnel record exists; "
+            "run 'syrvis stack hostnames' for the exact record"
+        )
 
     def _reload_traefik(self) -> None:
         """Restart Traefik so it loads a newly written / removed L2 dynamic config.
@@ -461,8 +558,38 @@ class ServiceManager:
 
             svc["volumes"] = processed_volumes
 
-        if service.depends_on:
-            svc["depends_on"] = service.depends_on
+        # NB: depends_on is rejected at schema-validation time (a single-service
+        # compose project cannot depend on another), so it is never emitted here.
+
+        # env_file: a data-dir-relative file holding secrets (kept out of the
+        # manifest). Materialize an empty 0600 file if absent so the first
+        # `up -d` doesn't fail before the operator fills it in, and clamp an
+        # existing one to 0600 (it holds secrets by definition).
+        if service.env_file:
+            env_file_path = Path(
+                os.path.realpath(str((self.data_dir / service.name) / service.env_file))
+            )
+            data_root = os.path.realpath(str(self.data_dir / service.name))
+            if not str(env_file_path).startswith(data_root + os.sep):
+                raise ServiceValidationError(
+                    "env_file {!r} escapes the service data directory".format(service.env_file)
+                )
+            env_file_path.parent.mkdir(parents=True, exist_ok=True)
+            if not env_file_path.exists():
+                env_file_path.touch()
+            env_file_path.chmod(0o600)
+            svc["env_file"] = [str(env_file_path)]
+
+        # Audited healthcheck subset (test/interval/timeout/retries/start_period).
+        if service.healthcheck:
+            svc["healthcheck"] = dict(service.healthcheck)
+
+        # Resource guardrails: compose-spec service-level limits.
+        if service.resources:
+            if "cpus" in service.resources:
+                svc["cpus"] = service.resources["cpus"]
+            if "memory" in service.resources:
+                svc["mem_limit"] = service.resources["memory"]
 
         compose_path = self._service_paths(service.name)["compose"]
         with open(compose_path, "w") as f:
@@ -564,7 +691,9 @@ class ServiceManager:
 
             try:
                 service = load_service_definition(yaml_path)
-                status = self._get_service_status(service.name)
+                # Inspect by container_name — it defaults to the service name but
+                # a manifest may override it, and the container is what has status.
+                status = self._get_service_status(service.container_name or service.name)
                 url = ""
                 if service.traefik.enabled and service.traefik.subdomain:
                     try:
@@ -600,22 +729,27 @@ class ServiceManager:
     def _get_service_status(self, name: str) -> str:
         """Get the status of a service container.
 
+        Uses the Docker SDK over the socket rather than shelling out to the
+        `docker` binary: on Synology the binary lives at /usr/local/bin (not on a
+        non-login shell's PATH), and inside the dashboard container it doesn't
+        exist at all — both environments were reporting every service "unknown".
+        The socket is present in both.
+
         Args:
-            name: Service name (container name)
+            name: Container name
 
         Returns:
-            Status string: running, stopped, or unknown
+            Docker's status string (running, exited, created, paused, ...),
+            "stopped" if no such container exists, or "unknown" if the Docker
+            daemon can't be reached.
         """
         try:
-            result = subprocess.run(
-                ["docker", "inspect", "-f", "{{.State.Status}}", name],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return "stopped"
+            import docker
+
+            try:
+                return docker.from_env().containers.get(name).status
+            except docker.errors.NotFound:
+                return "stopped"
         except Exception:
             return "unknown"
 

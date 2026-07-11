@@ -99,6 +99,14 @@ class TestServiceDefinitionSecurity:
         with pytest.raises(ServiceValidationError):
             ServiceDefinition.from_dict(base_service(cap_add=["SYS_ADMIN"]))
 
+    def test_depends_on_rejected_as_unsupported(self):
+        # Each service is its own compose project, so depends_on can never work;
+        # it must fail loudly at parse time, not silently no-op at run time.
+        with pytest.raises(ServiceValidationError, match="depends_on is not supported"):
+            ServiceDefinition.from_dict(base_service(depends_on=["db"]))
+        # An empty/absent depends_on remains valid.
+        assert ServiceDefinition.from_dict(base_service(depends_on=[])).depends_on == []
+
     @pytest.mark.parametrize("image", ["nginx", "nginx:latest", "nginx:", "has space:1.0"])
     def test_unpinned_or_latest_image_rejected(self, image):
         with pytest.raises(ServiceValidationError):
@@ -193,3 +201,62 @@ class TestElevationPreservesHome:
         # SYRVIS_HOME must appear before the interpreter so sudo treats it as env
         home_idx = captured["args"].index("SYRVIS_HOME=/volume1/syrviscore")
         assert home_idx == 1
+
+
+class TestSchemaV2Fields:
+    """healthcheck / env_file / resources — audited, strictly sub-validated."""
+
+    def test_healthcheck_valid(self):
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                healthcheck={
+                    "test": ["CMD", "curl", "-f", "http://localhost:8080/healthz"],
+                    "interval": "30s",
+                    "timeout": "5s",
+                    "retries": 3,
+                }
+            )
+        )
+        assert svc.healthcheck["retries"] == 3
+
+    @pytest.mark.parametrize(
+        "hc",
+        [
+            {"test": "curl localhost"},  # not a list
+            {"test": ["SHELL", "x"]},  # bad first token
+            {"test": ["CMD", "x"], "interval": "30 seconds"},  # bad duration
+            {"test": ["CMD", "x"], "retries": 0},  # out of range
+            {"test": ["CMD", "x"], "disable": True},  # unknown key
+        ],
+    )
+    def test_healthcheck_invalid_rejected(self, hc):
+        with pytest.raises(ServiceValidationError):
+            ServiceDefinition.from_dict(base_service(healthcheck=hc))
+
+    def test_env_file_relative_only(self):
+        svc = ServiceDefinition.from_dict(base_service(env_file="secrets.env"))
+        assert svc.env_file == "secrets.env"
+        for bad in ("/etc/passwd", "../outside.env"):
+            with pytest.raises(ServiceValidationError):
+                ServiceDefinition.from_dict(base_service(env_file=bad))
+
+    def test_resources_valid_and_invalid(self):
+        svc = ServiceDefinition.from_dict(base_service(resources={"cpus": "1.5", "memory": "512m"}))
+        assert svc.resources == {"cpus": "1.5", "memory": "512m"}
+        for bad in ({"cpus": "lots"}, {"memory": "512q"}, {"gpu": 1}, {}):
+            with pytest.raises(ServiceValidationError):
+                ServiceDefinition.from_dict(base_service(resources=bad))
+
+    def test_v2_fields_round_trip_to_dict(self):
+        data = base_service(
+            healthcheck={"test": ["CMD", "true"]},
+            env_file="secrets.env",
+            resources={"memory": "256m"},
+        )
+        svc = ServiceDefinition.from_dict(data)
+        out = svc.to_dict()
+        assert out["healthcheck"] == {"test": ["CMD", "true"]}
+        assert out["env_file"] == "secrets.env"
+        assert out["resources"] == {"memory": "256m"}
+        # and the round-tripped dict re-validates
+        ServiceDefinition.from_dict(out)

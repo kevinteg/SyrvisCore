@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from syrviscore.errors import SyrvisError
+
 from . import exposure as exposure_mod
 
 # Safe identifier: what we allow as a service/container/network name.
@@ -51,17 +53,34 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "container_name",
         "traefik",
         "environment",
+        "env_file",
         "volumes",
         "networks",
         "depends_on",
         "config_templates",
         "restart",
+        "healthcheck",
+        "resources",
     }
 )
 
+# healthcheck sub-schema (audited subset of compose's healthcheck)
+ALLOWED_HEALTHCHECK_KEYS = frozenset({"test", "interval", "timeout", "retries", "start_period"})
+DURATION_RE = re.compile(r"^\d+(s|m|h)$")
 
-class ServiceValidationError(ValueError):
-    """A syrvis-service.yaml failed validation (unsafe or malformed)."""
+# resources sub-schema (service-level compose limits)
+ALLOWED_RESOURCE_KEYS = frozenset({"cpus", "memory"})
+CPUS_RE = re.compile(r"^\d+(\.\d+)?$")
+MEMORY_RE = re.compile(r"^\d+(b|k|m|g)$", re.IGNORECASE)
+
+
+class ServiceValidationError(SyrvisError, ValueError):
+    """A syrvis-service.yaml failed validation (unsafe or malformed).
+
+    Also a ValueError so existing ``except ValueError`` call sites keep catching it.
+    """
+
+    code = "service_invalid"
 
 
 def validate_service_name(name: str, what: str = "name") -> str:
@@ -122,6 +141,75 @@ def _validate_image(image: str) -> str:
             "Image {!r} uses :latest — pin a specific version tag".format(image)
         )
     return image
+
+
+def _validate_healthcheck(data: Any) -> Dict[str, Any]:
+    """Validate an audited subset of compose's healthcheck.
+
+    Allowed: test (a list whose first element is CMD or CMD-SHELL), interval,
+    timeout, start_period (``\\d+(s|m|h)``), retries (1-10). Anything else is
+    rejected — same allowlist philosophy as the top-level keys.
+    """
+    if not isinstance(data, dict):
+        raise ServiceValidationError("healthcheck must be a mapping")
+    unknown = set(data.keys()) - ALLOWED_HEALTHCHECK_KEYS
+    if unknown:
+        raise ServiceValidationError(
+            "healthcheck: unknown keys {} (allowed: {})".format(
+                ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_HEALTHCHECK_KEYS))
+            )
+        )
+
+    test = data.get("test")
+    if (
+        not isinstance(test, list)
+        or not test
+        or test[0] not in ("CMD", "CMD-SHELL")
+        or not all(isinstance(part, str) for part in test)
+    ):
+        raise ServiceValidationError(
+            "healthcheck.test must be a list starting with CMD or CMD-SHELL"
+        )
+
+    for key in ("interval", "timeout", "start_period"):
+        if key in data:
+            value = data[key]
+            if not isinstance(value, str) or not DURATION_RE.match(value):
+                raise ServiceValidationError(
+                    "healthcheck.{} must match <number>(s|m|h), got {!r}".format(key, value)
+                )
+
+    if "retries" in data:
+        retries = data["retries"]
+        if not isinstance(retries, int) or isinstance(retries, bool) or not 1 <= retries <= 10:
+            raise ServiceValidationError("healthcheck.retries must be an integer 1-10")
+
+    return dict(data)
+
+
+def _validate_resources(data: Any) -> Dict[str, str]:
+    """Validate resource limits: cpus (decimal) and/or memory (<n>(b|k|m|g))."""
+    if not isinstance(data, dict):
+        raise ServiceValidationError("resources must be a mapping")
+    unknown = set(data.keys()) - ALLOWED_RESOURCE_KEYS
+    if unknown:
+        raise ServiceValidationError(
+            "resources: unknown keys {} (allowed: cpus, memory)".format(", ".join(sorted(unknown)))
+        )
+    out: Dict[str, str] = {}
+    if "cpus" in data:
+        cpus = str(data["cpus"])
+        if not CPUS_RE.match(cpus):
+            raise ServiceValidationError("resources.cpus must be a decimal, e.g. '1.5'")
+        out["cpus"] = cpus
+    if "memory" in data:
+        memory = str(data["memory"])
+        if not MEMORY_RE.match(memory):
+            raise ServiceValidationError("resources.memory must be <number>(b|k|m|g), e.g. '512m'")
+        out["memory"] = memory
+    if not out:
+        raise ServiceValidationError("resources must declare cpus and/or memory")
+    return out
 
 
 def _validate_volume(vol: str) -> str:
@@ -231,11 +319,16 @@ class ServiceDefinition:
     container_name: str = ""
     traefik: TraefikConfig = field(default_factory=TraefikConfig)
     environment: List[str] = field(default_factory=list)
+    # A data-dir-relative env file (installed 0600) — the recommended home for
+    # secrets, keeping them out of this manifest.
+    env_file: str = ""
     volumes: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)
     depends_on: List[str] = field(default_factory=list)
     config_templates: List[ConfigTemplate] = field(default_factory=list)
     restart: str = "unless-stopped"
+    healthcheck: Optional[Dict[str, Any]] = None
+    resources: Optional[Dict[str, str]] = None
     # Source information (set after loading)
     source_path: Optional[Path] = None
     source_url: Optional[str] = None
@@ -310,6 +403,18 @@ class ServiceDefinition:
         depends_on = data.get("depends_on", [])
         if not isinstance(depends_on, list):
             raise ServiceValidationError("depends_on must be a list")
+        if depends_on:
+            # Each Layer-2 service runs as its OWN single-service compose project
+            # (-p syrvis-<name>), so compose `depends_on` — which only orders
+            # services WITHIN one project — can never reference another Syrvis
+            # service. Reject it clearly instead of writing a silent no-op that
+            # fails at docker-run time. (Sidecars need a real multi-container
+            # manifest, which the schema does not yet support.)
+            raise ServiceValidationError(
+                "depends_on is not supported: each service is its own compose "
+                "project, so it cannot depend on another Syrvis service. Remove "
+                "the depends_on block (multi-container manifests are not yet supported)."
+            )
         for dep in depends_on:
             validate_service_name(dep, "depends_on entry")
 
@@ -319,6 +424,18 @@ class ServiceDefinition:
             _validate_relative_subpath(template.source, "config template source")
             _validate_relative_subpath(template.dest, "config template dest")
             templates.append(template)
+
+        env_file = data.get("env_file", "")
+        if env_file:
+            _validate_relative_subpath(env_file, "env_file")
+
+        healthcheck = None
+        if data.get("healthcheck") is not None:
+            healthcheck = _validate_healthcheck(data["healthcheck"])
+
+        resources = None
+        if data.get("resources") is not None:
+            resources = _validate_resources(data["resources"])
 
         traefik = TraefikConfig.from_dict(data.get("traefik"))
         if traefik.enabled:
@@ -349,11 +466,14 @@ class ServiceDefinition:
             container_name=container_name,
             traefik=traefik,
             environment=environment,
+            env_file=env_file,
             volumes=volumes,
             networks=networks,
             depends_on=depends_on,
             config_templates=templates,
             restart=restart,
+            healthcheck=healthcheck,
+            resources=resources,
         )
 
     @classmethod
@@ -401,6 +521,8 @@ class ServiceDefinition:
 
         if self.environment:
             result["environment"] = self.environment
+        if self.env_file:
+            result["env_file"] = self.env_file
         if self.volumes:
             result["volumes"] = self.volumes
         if self.networks:
@@ -411,6 +533,10 @@ class ServiceDefinition:
             result["config_templates"] = [
                 {"source": t.source, "dest": t.dest} for t in self.config_templates
             ]
+        if self.healthcheck:
+            result["healthcheck"] = self.healthcheck
+        if self.resources:
+            result["resources"] = self.resources
 
         return result
 

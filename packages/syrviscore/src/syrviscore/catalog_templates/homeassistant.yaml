@@ -1,0 +1,22 @@
+# Bundled catalog template — Home Assistant (home automation).
+# LAN-only by default; TZ is set via environment (absolute host binds like
+# /etc/localtime are rejected by the schema).
+name: homeassistant
+version: "2024.12.5"
+image: ghcr.io/home-assistant/home-assistant:2024.12.5
+description: "Open source home automation"
+homepage: "https://www.home-assistant.io/"
+
+traefik:
+  enabled: true
+  subdomain: ha
+  port: 8123
+  exposure: internal
+
+restart: unless-stopped
+
+volumes:
+  - "config:/config:rw"
+
+environment:
+  - "TZ=UTC"

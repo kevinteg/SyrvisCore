@@ -89,6 +89,47 @@ class TestAddImage:
         ok, msg = sm.add_image("svc", "ghcr.io/a/b:1.0", start=False)
         assert not ok and "already exists" in msg
 
+    def test_subdomain_collision_rejected(self, home):
+        """Two services claiming the same subdomain must fail at add time, not
+        silently produce two Traefik routers for one host (last-writer-wins)."""
+        sm = _manager(home)
+        assert sm.add_image("first", "ghcr.io/a/b:1.0", subdomain="dash", start=False)[0]
+        ok, msg = sm.add_image("second", "ghcr.io/a/c:1.0", subdomain="dash", start=False)
+        assert not ok
+        assert "already routed by service 'first'" in msg
+        # the rejected install left nothing behind
+        assert not (home / "services" / "second").exists()
+
+    def test_added_message_reports_reachability(self, home):
+        ok, msg = _manager(home).add_image("svc", "ghcr.io/a/b:1.0", start=False)
+        assert ok
+        assert "stack hostnames" in msg
+
+
+class TestExamplesStayValid:
+    """The shipped example service definitions must keep parsing through the real
+    schema so they can't drift away from the current syrvis-service.yaml contract
+    (e.g. when a new required field or exposure rule lands)."""
+
+    def _examples(self):
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "examples"
+        return sorted(root.glob("*/syrvis-service.yaml"))
+
+    def test_examples_exist(self):
+        assert self._examples(), "no example service definitions found"
+
+    def test_every_example_parses_and_declares_exposure(self):
+        from syrviscore import exposure as exposure_mod
+
+        for path in self._examples():
+            data = yaml.safe_load(path.read_text())
+            svc = ServiceDefinition.from_dict(data)  # raises on any schema violation
+            # Every example must teach the exposure field explicitly (not defaulted).
+            assert "exposure" in (data.get("traefik") or {}), f"{path} omits traefik.exposure"
+            assert exposure_mod.is_valid(svc.traefik.exposure), path
+
 
 class TestApplyOverrides:
     def _svc(self):

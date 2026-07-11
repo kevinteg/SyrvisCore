@@ -1,0 +1,18 @@
+# Bundled catalog template — Uptime Kuma (self-hosted status/monitoring page).
+# A natural `tunnel` service: check status from anywhere, behind Cloudflare Access.
+name: uptime-kuma
+version: "1.23.16"
+image: louislam/uptime-kuma:1.23.16
+description: "Self-hosted uptime monitor"
+homepage: "https://github.com/louislam/uptime-kuma"
+
+traefik:
+  enabled: true
+  subdomain: status
+  port: 3001
+  exposure: tunnel
+
+restart: unless-stopped
+
+volumes:
+  - "data:/app/data:rw"
