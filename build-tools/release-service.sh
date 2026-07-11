@@ -135,6 +135,16 @@ RELEASE_FILES=("$WHEEL_FILE")
 [ -n "$CONFIG_FILE" ] && RELEASE_FILES+=("$CONFIG_FILE")
 [ -n "$ENV_TEMPLATE" ] && RELEASE_FILES+=("$ENV_TEMPLATE")
 
+# Generate SHA256SUMS — the manager's downloader verifies asset checksums by
+# default and refuses to install assets not listed here.
+SUMS_FILE="$PROJECT_ROOT/dist/SHA256SUMS"
+: > "$SUMS_FILE"
+for f in "${RELEASE_FILES[@]}"; do
+    ( cd "$(dirname "$f")" && shasum -a 256 "$(basename "$f")" ) >> "$SUMS_FILE"
+done
+RELEASE_FILES+=("$SUMS_FILE")
+log_info "Generated SHA256SUMS for $(( ${#RELEASE_FILES[@]} - 1 )) asset(s)"
+
 log_info "Creating release with ${#RELEASE_FILES[@]} files..."
 
 gh release create "$TAG" \
