@@ -422,11 +422,18 @@ class DockerManager:
             else:
                 uptime = "Unknown"
 
+            # Use the image reference the container was created with (Config.Image),
+            # not image.tags[0] — a pulled image can carry several tags and tags[0]
+            # may not be the one compose declared (causes false image_mismatch drift).
+            configured_image = container.attrs.get("Config", {}).get("Image")
+            if not configured_image:
+                configured_image = container.image.tags[0] if container.image.tags else "Unknown"
+
             status_dict[service_name] = {
                 "name": container.name,
                 "status": container.status,
                 "uptime": uptime,
-                "image": container.image.tags[0] if container.image.tags else "Unknown",
+                "image": configured_image,
             }
 
         return status_dict

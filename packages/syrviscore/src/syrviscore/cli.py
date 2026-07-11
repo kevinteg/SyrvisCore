@@ -715,6 +715,15 @@ def stack_list(as_json):
 
     from syrviscore import stack as stack_mod
 
+    # Load .env so the "token not set" hint reflects the configured tokens, not
+    # just whatever happens to be in the invoking shell's environment.
+    try:
+        env_path = get_env_path()
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    except Exception:
+        pass
+
     try:
         st = stack_mod.load_stack()
     except stack_mod.StackError as e:
