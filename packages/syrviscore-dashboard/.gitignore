@@ -1,0 +1,6 @@
+# SPA build output is produced in the Docker build stage, never committed.
+src/syrviscore_dashboard/static/
+frontend/node_modules/
+frontend/dist/
+*.egg-info/
+__pycache__/
