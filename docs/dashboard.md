@@ -78,6 +78,38 @@ cd packages/syrviscore-dashboard/frontend && npm install && npm run dev      # V
 make build-dashboard                 # WITH_L2_TOOLS=true PUSH=1 to enable L2 / push GHCR
 ```
 
-Released images are pinned in `build/config.yaml` (`docker_images.dashboard`);
-`syrvis compose generate` then emits the `syrviscore-dashboard` service (and, when a
-`CLOUDFLARE_API_TOKEN` is set, `cloudflare-ddns`).
+Released images are pinned in `build/config.yaml` (`docker_images.dashboard`).
+
+## Declaring + bootstrapping the container
+
+Which core-tier containers run is **declared** in `config/stack.yaml` (see
+`syrviscore/stack.py`). `traefik` + `portainer` are **primordial** (always on);
+`cloudflared`, `dashboard`, and `cloudflare_ddns` are **opt-in**. The compose
+generator only emits a service when it's declared enabled.
+
+```bash
+# CLI bootstraps the primordial containers the first time
+sudo syrvis setup            # writes config/stack.yaml + .env, privileged setup
+syrvis start                 # brings up the declared stack (+ macvlan shim)
+
+# then declare + start the dashboard
+syrvis stack enable dashboard --subdomain dash
+syrvis stack apply           # regenerate docker-compose.yaml from the stack
+syrvis start                 # bring the dashboard up
+
+syrvis stack list            # declared vs running, with config hints
+```
+
+Once the dashboard is up you use it directly; it can restart core containers, but
+the *initial* create + macvlan shim stays with the CLI (host-root, chicken-and-egg).
+`config/stack.yaml`:
+
+```yaml
+version: 1
+services:
+  traefik:   { enabled: true }     # primordial
+  portainer: { enabled: true }     # primordial
+  cloudflared: { enabled: true }
+  dashboard: { enabled: true, subdomain: dash }
+  cloudflare_ddns: { enabled: false }
+```

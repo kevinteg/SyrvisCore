@@ -485,6 +485,41 @@ TZ={tz}
     return env_path
 
 
+def write_stack_file(config: dict, install_dir: Path, username: str) -> Path:
+    """Write config/stack.yaml — the declarative set of core-tier services.
+
+    Primordial (traefik, portainer) are always on. cloudflared is enabled when a
+    tunnel token was configured, DDNS when an API token was configured, and the
+    dashboard when explicitly requested. Everything else is opt-in — the user can
+    toggle later with ``syrvis stack enable/disable``.
+    """
+    from . import stack as stack_mod
+
+    stack = stack_mod.default_stack()
+    if config.get("cloudflare_token"):
+        stack.services["cloudflared"].enabled = True
+    if config.get("cloudflare_api_token"):
+        stack.services["cloudflare_ddns"].enabled = True
+    if config.get("dashboard_enabled"):
+        stack.services["dashboard"].enabled = True
+
+    path = install_dir / "config" / "stack.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(stack.to_yaml())
+    path.chmod(0o644)
+
+    if os.getuid() == 0:
+        try:
+            import pwd
+
+            user_info = pwd.getpwnam(username)
+            os.chown(path, user_info.pw_uid, user_info.pw_gid)
+        except Exception:
+            pass
+
+    return path
+
+
 def create_portainer_password_file(config: dict, install_dir: Path, username: str) -> bool:
     """Create Portainer admin password file with secure permissions.
 
@@ -822,6 +857,9 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
 
     env_path = generate_env_file(config, install_dir, username)
     click.echo(f"      Created: {env_path}")
+
+    stack_path = write_stack_file(config, install_dir, username)
+    click.echo(f"      Created: {stack_path}")
 
     if create_portainer_password_file(config, install_dir, username):
         click.echo(f"      Created: {install_dir}/config/.portainer-password")
