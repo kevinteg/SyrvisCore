@@ -184,6 +184,20 @@ Nothing breaks: `services.d/` starts empty and everything current keeps working.
      drift; declared-disabled is skipped; unmanaged installs still watched) and honors
      `critical`: a critical failure → UNHEALTHY (exit 1); non-critical → DEGRADED (exit 0,
      new `degraded` field in the --json envelope).
-3. **Phase 3 — home-tech:** move the live NAS's services into a git-managed `services.d/`
-   (via `service adopt`), wire the rsync+reconcile deploy step, and let `stack apply --from`
-   defer its `services:` section to the directory when present.
+3. **Phase 3 — home-tech + unification (✅ code shipped 2026-07-11):**
+   - **One engine.** `stack apply --from`'s `services:` section is now a PROJECTION onto
+     `services.d/`: applying it syncs declarations (`declare` / `declare_update` /
+     `declare_disable` / `declare_delete` per `on_undeclared`) and then runs the exact
+     `services_d` reconcile engine. converge.py's duplicate L2 machinery is gone — the two
+     declarative planes cannot diverge because there is only one.
+   - **A doc WITHOUT a `services:` key does not manage Layer 2 at all** — the phase-1
+     review footgun (a core-only doc stopping every service) is structurally closed.
+     Doc entries accept `enabled`/`critical` like any declaration.
+   - **`syrvis setup` provisions `config/services.d/` owned by the setup USER** (0755):
+     declarations are validated intent, never executed directly, so user ownership is
+     safe — and it is exactly what lets home-tech push files with plain `rsync` before
+     `sudo syrvis reconcile`.
+   - **home-tech wiring:** `syrvis/services.d/` (git-managed declarations seeded from the
+     live NAS), `syrvis/deploy.sh` (rsync + ssh reconcile with --dry-run plan first), and
+     the README updated to the services.d flow. Live-NAS migration steps (operator
+     re-provision + one-time dir ownership + adopt) are the remaining manual block.

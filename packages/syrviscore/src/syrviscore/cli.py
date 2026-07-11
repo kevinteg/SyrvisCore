@@ -1256,20 +1256,18 @@ def _render_plan(plan):
             plan["summary"]["total"], plan["summary"]["destructive"]
         )
     )
+    declarations = plan.get("declarations") or {}
     for action in plan["actions"]:
         marker = "!" if action["destructive"] else "-"
         target = action.get("name") or action.get("service")
         detail = ""
-        if action["kind"] == "service_replace":
-            detail = " ({})".format(
-                ", ".join(
-                    "{}: {} -> {}".format(k, v["from"], v["to"])
-                    for k, v in action.get("changes", {}).items()
-                )
-            )
-        elif action["kind"] == "service_add":
+        declared = declarations.get(target) or {}
+        if action["kind"] in ("declare", "declare_update", "add", "replace") and declared:
+            traefik = declared.get("traefik") or {}
             detail = " ({} at {}, {})".format(
-                action["image"], action["subdomain"], action["exposure"]
+                declared.get("image"),
+                traefik.get("subdomain"),
+                traefik.get("exposure"),
             )
         click.echo("  {} {} {}{}".format(marker, action["kind"], target, detail))
 

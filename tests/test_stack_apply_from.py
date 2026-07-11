@@ -47,9 +47,11 @@ class TestStackApplyFrom:
         assert result.exit_code == 0, result.output
         body = json.loads(result.output)
         assert body["applied"] is False
-        assert body["plan"]["actions"][0]["kind"] == "service_add"
-        # dry run installed nothing
+        # unified engine: the doc's service becomes a declaration + an add
+        assert [a["kind"] for a in body["plan"]["actions"]] == ["declare", "add"]
+        # dry run installed nothing and declared nothing
         assert not (home / "services" / "wiki").exists()
+        assert not (home / "config" / "services.d" / "wiki.yaml").exists()
 
     def test_invalid_desired_yields_json_error_envelope(self, home, tmp_path):
         desired = _desired(tmp_path, {"nonsense": True})

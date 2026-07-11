@@ -1,9 +1,11 @@
-"""Tests for whole-set convergence (syrvis stack apply --from)."""
+"""Tests for whole-set convergence (`stack apply --from`), unified onto the
+services.d engine: the doc's `services:` section is a projection that syncs
+declarations and then runs the same reconcile planner as `syrvis reconcile`."""
 
 import pytest
 import yaml
 
-from syrviscore import converge
+from syrviscore import converge, services_d
 from syrviscore.converge import ConvergeError, apply_plan, build_plan, validate_desired
 from syrviscore.service_manager import ServiceManager
 
@@ -30,11 +32,29 @@ def _manager(home):
     return ServiceManager(syrvis_home=home)
 
 
+def _running(monkeypatch, status="running"):
+    monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, name: status)
+
+
 class TestValidateDesired:
     def test_minimal_valid(self):
         out = validate_desired({"services": {"wiki": {"image": "ghcr.io/a/wiki:1.0"}}})
         assert out["on_undeclared"] == "stop"
+        assert out["manages_services"] is True
         assert "wiki" in out["services"]
+
+    def test_absent_services_key_does_not_manage_l2(self):
+        out = validate_desired({"stack": {"dashboard": {"enabled": True}}})
+        assert out["manages_services"] is False
+
+    def test_empty_services_mapping_still_manages_l2(self):
+        assert validate_desired({"services": {}})["manages_services"] is True
+
+    def test_orchestration_keys_accepted_in_doc(self):
+        out = validate_desired(
+            {"services": {"wiki": {"image": "a/b:1.0", "critical": True, "enabled": False}}}
+        )
+        assert out["services"]["wiki"]["critical"] is True
 
     def test_unknown_top_level_key_rejected(self):
         with pytest.raises(ConvergeError, match="Unknown keys"):
@@ -60,67 +80,77 @@ class TestValidateDesired:
         with pytest.raises(ConvergeError, match="'image' is required"):
             validate_desired({"services": {"wiki": {"subdomain": "wiki"}}})
 
-    def test_bad_service_name_rejected(self):
-        with pytest.raises(Exception):
-            validate_desired({"services": {"../evil": {"image": "a:1"}}})
-
 
 class TestBuildPlan:
-    def test_add_missing_service(self, home):
+    def test_missing_service_yields_declare_plus_add(self, home, monkeypatch):
+        _running(monkeypatch, "unknown")
         desired = validate_desired(
             {"services": {"wiki": {"image": "ghcr.io/a/wiki:1.0", "port": 4567}}}
         )
         plan = build_plan(desired, manager=_manager(home))
-        kinds = [(a["kind"], a.get("name") or a.get("service")) for a in plan["actions"]]
-        assert ("service_add", "wiki") in kinds
-        assert plan["changed"] is True
+        kinds = [(a["kind"], a.get("name")) for a in plan["actions"]]
+        assert kinds == [("declare", "wiki"), ("add", "wiki")]
+        assert plan["manages_services"] is True
+        assert "wiki" in plan["declarations"]
         assert plan["summary"]["destructive"] == 0
 
-    def test_in_sync_is_a_no_op(self, home):
+    def test_in_sync_is_a_no_op(self, home, monkeypatch):
         sm = _manager(home)
         assert sm.add_image("wiki", "ghcr.io/a/wiki:1.0", port=4567, start=False)[0]
+        _running(monkeypatch)  # installed, declaration dual-written, running
         desired = validate_desired(
             {"services": {"wiki": {"image": "ghcr.io/a/wiki:1.0", "port": 4567}}}
         )
         plan = build_plan(desired, manager=sm)
-        assert plan["changed"] is False
         assert plan["actions"] == []
+        assert plan["changed"] is False
 
-    def test_changed_image_yields_replace_with_diff(self, home):
+    def test_changed_image_yields_declare_update_plus_replace(self, home, monkeypatch):
         sm = _manager(home)
         assert sm.add_image("wiki", "ghcr.io/a/wiki:1.0", port=4567, start=False)[0]
+        _running(monkeypatch)
         desired = validate_desired(
             {"services": {"wiki": {"image": "ghcr.io/a/wiki:2.0", "port": 4567}}}
         )
         plan = build_plan(desired, manager=sm)
-        (action,) = plan["actions"]
-        assert action["kind"] == "service_replace"
-        assert action["changes"]["image"] == {
-            "from": "ghcr.io/a/wiki:1.0",
-            "to": "ghcr.io/a/wiki:2.0",
-        }
-        assert action["destructive"] is False
+        kinds = [a["kind"] for a in plan["actions"]]
+        assert kinds == ["declare_update", "replace"]
 
-    @pytest.mark.parametrize(
-        "policy,kind,destructive",
-        [
-            ("stop", "service_stop", False),
-            ("remove", "service_remove", True),
-            ("purge", "service_purge", True),
-        ],
-    )
-    def test_undeclared_service_follows_policy(self, home, policy, kind, destructive):
+    def test_doc_without_services_key_never_touches_l2(self, home, monkeypatch):
+        """The phase-1 review footgun, closed: a core-stack-only doc leaves
+        installed services and their declarations completely alone."""
         sm = _manager(home)
         assert sm.add_image("old", "ghcr.io/a/old:1.0", start=False)[0]
+        _running(monkeypatch)
+        desired = validate_desired({"stack": {"dashboard": {"enabled": True}}})
+        plan = build_plan(desired, manager=sm)
+        kinds = {a["kind"] for a in plan["actions"]}
+        assert kinds == {"stack_enable"}
+        assert plan["manages_services"] is False
+
+    @pytest.mark.parametrize(
+        "policy,sync_kind,engine_kind,destructive",
+        [
+            ("stop", "declare_disable", "stop", False),
+            ("remove", "declare_delete", "prune_remove", True),
+            ("purge", "declare_delete", "prune_purge", True),
+        ],
+    )
+    def test_undeclared_service_follows_policy(
+        self, home, monkeypatch, policy, sync_kind, engine_kind, destructive
+    ):
+        sm = _manager(home)
+        assert sm.add_image("old", "ghcr.io/a/old:1.0", start=False)[0]
+        _running(monkeypatch)
         desired = validate_desired({"services": {}, "on_undeclared": policy})
         plan = build_plan(desired, manager=sm)
-        (action,) = plan["actions"]
-        assert action["kind"] == kind
-        assert action["name"] == "old"
-        assert action["destructive"] is destructive
+        kinds = [(a["kind"], a.get("name")) for a in plan["actions"]]
+        assert (sync_kind, "old") in kinds
+        assert (engine_kind, "old") in kinds
         assert plan["summary"]["destructive"] == (1 if destructive else 0)
 
-    def test_stack_enable_disable_diffed(self, home):
+    def test_stack_enable_disable_diffed(self, home, monkeypatch):
+        _running(monkeypatch)
         desired = validate_desired(
             {
                 "stack": {
@@ -137,114 +167,88 @@ class TestBuildPlan:
         assert not any(a.get("service") == "portainer" for a in plan["actions"])
 
 
-class _FakeManager:
-    """Records apply_plan's dispatch without touching docker/disk."""
-
-    def __init__(self):
-        self.calls = []
-
-    def add_image(
-        self,
-        name,
-        image,
-        subdomain=None,
-        exposure="internal",
-        port=80,
-        environment=None,
-        description="",
-        start=True,
-        preserve_data_on_rollback=False,
-    ):
-        self.calls.append(("add_image", name, image, preserve_data_on_rollback))
-        return True, "added {}".format(name)
-
-    def remove(self, name, purge=False, keep_declaration=False):
-        self.calls.append(("remove", name, purge, keep_declaration))
-        return True, "removed {}".format(name)
-
-    def stop(self, name):
-        self.calls.append(("stop", name))
-        return True, "stopped {}".format(name)
-
-
 class TestApplyPlan:
-    def test_dispatch_and_results(self, home):
-        plan = {
-            "actions": [
-                {
-                    "kind": "service_add",
-                    "name": "wiki",
-                    "image": "a:1",
-                    "subdomain": "wiki",
-                    "exposure": "internal",
-                    "port": 80,
-                    "environment": [],
-                    "destructive": False,
-                },
-                {"kind": "service_stop", "name": "old", "destructive": False},
-                {"kind": "service_purge", "name": "dead", "destructive": True},
-            ]
-        }
-        fake = _FakeManager()
-        results = apply_plan(plan, manager=fake)
-        assert [(r["kind"], r["ok"]) for r in results] == [
-            ("service_add", True),
-            ("service_stop", True),
-            ("service_purge", True),
-        ]
-        assert ("add_image", "wiki", "a:1", False) in fake.calls
-        assert ("stop", "old") in fake.calls
-        assert ("remove", "dead", True, False) in fake.calls
-        assert all(r["changed"] for r in results)
+    """Integration-style: real home + declarations, docker faked at the edges."""
 
-    def test_replace_removes_then_adds(self, home):
-        plan = {
-            "actions": [
-                {
-                    "kind": "service_replace",
-                    "name": "wiki",
-                    "image": "a:2",
-                    "subdomain": "wiki",
-                    "exposure": "internal",
-                    "port": 80,
-                    "environment": [],
-                    "changes": {},
-                    "destructive": False,
-                },
-            ]
-        }
-        fake = _FakeManager()
-        apply_plan(plan, manager=fake)
-        # replace keeps the services.d declaration and preserves pre-existing data
-        assert fake.calls == [
-            ("remove", "wiki", False, True),
-            ("add_image", "wiki", "a:2", True),
-        ]
+    def test_apply_syncs_declarations_and_runs_the_engine(self, home, monkeypatch):
+        _running(monkeypatch, "unknown")
+        installed = []
+        monkeypatch.setattr(
+            ServiceManager,
+            "install_declaration",
+            lambda self, service, start=True, preserve_data_on_rollback=False: (
+                installed.append((service.name, service.image)) or (True, "installed")
+            ),
+        )
+        desired = validate_desired(
+            {"services": {"wiki": {"image": "ghcr.io/a/wiki:1.0", "critical": True}}}
+        )
+        sm = _manager(home)
+        plan = build_plan(desired, manager=sm)
+        results = apply_plan(plan, manager=sm)
 
-    def test_one_failure_does_not_mask_later_actions(self, home):
-        class Flaky(_FakeManager):
-            def stop(self, name):
+        assert [(r["kind"], r["ok"]) for r in results] == [("declare", True), ("add", True)]
+        assert installed == [("wiki", "ghcr.io/a/wiki:1.0")]
+        # the declaration landed with the doc's orchestration intact
+        decl = yaml.safe_load(services_d.declaration_path(home, "wiki").read_text())
+        assert decl["critical"] is True
+
+    def test_apply_purge_policy_deletes_declaration_and_prunes(self, home, monkeypatch):
+        sm = _manager(home)
+        assert sm.add_image("old", "ghcr.io/a/old:1.0", start=False)[0]
+        _running(monkeypatch)
+        removed = []
+        monkeypatch.setattr(
+            ServiceManager,
+            "remove",
+            lambda self, name, purge=False, keep_declaration=False: (
+                removed.append((name, purge)) or (True, "removed")
+            ),
+        )
+        desired = validate_desired({"services": {}, "on_undeclared": "purge"})
+        plan = build_plan(desired, manager=sm)
+        results = apply_plan(plan, manager=sm)
+
+        assert not services_d.declaration_path(home, "old").exists()
+        assert ("old", True) in removed  # prune_purge via the engine
+        assert all(r["ok"] for r in results)
+
+    def test_one_failure_does_not_mask_later_actions(self, home, monkeypatch):
+        _running(monkeypatch, "unknown")
+
+        def flaky_install(self, service, start=True, preserve_data_on_rollback=False):
+            if service.name == "flaky":
                 raise RuntimeError("docker went away")
+            return True, "installed"
 
-        plan = {
-            "actions": [
-                {"kind": "service_stop", "name": "a", "destructive": False},
-                {"kind": "service_remove", "name": "b", "destructive": True},
-            ]
-        }
-        results = apply_plan(plan, manager=Flaky())
-        assert results[0]["ok"] is False and "docker went away" in results[0]["message"]
-        assert results[1]["ok"] is True  # later action still ran
+        monkeypatch.setattr(ServiceManager, "install_declaration", flaky_install)
+        desired = validate_desired(
+            {
+                "services": {
+                    "flaky": {"image": "ghcr.io/a/flaky:1.0"},
+                    "steady": {"image": "ghcr.io/a/steady:1.0"},
+                }
+            }
+        )
+        sm = _manager(home)
+        plan = build_plan(desired, manager=sm)
+        results = apply_plan(plan, manager=sm)
+        by_name = {(r["kind"], r["name"]): r["ok"] for r in results}
+        assert by_name[("add", "flaky")] is False
+        assert by_name[("add", "steady")] is True
 
 
 class TestConvergeDryRun:
-    def test_dry_run_is_pure(self, home, tmp_path):
+    def test_dry_run_is_pure(self, home, tmp_path, monkeypatch):
         sm = _manager(home)
         assert sm.add_image("old", "ghcr.io/a/old:1.0", start=False)[0]
+        _running(monkeypatch)
         desired_file = tmp_path / "desired.yaml"
         desired_file.write_text(yaml.safe_dump({"services": {}, "on_undeclared": "purge"}))
         plan, results = converge.converge(desired_file, dry_run=True, manager=sm)
         assert results is None
-        assert plan["actions"][0]["kind"] == "service_purge"
-        # nothing actually happened
+        kinds = {a["kind"] for a in plan["actions"]}
+        assert kinds == {"declare_delete", "prune_purge"}
+        # nothing actually happened: install AND declaration both intact
         assert (home / "services" / "old").exists()
+        assert services_d.declaration_path(home, "old").exists()

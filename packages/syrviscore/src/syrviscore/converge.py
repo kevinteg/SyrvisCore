@@ -27,11 +27,15 @@ Design rules:
 - Pure plan/apply split: :func:`build_plan` is read-only and returns a JSON-ready
   plan; :func:`apply_plan` executes one. A dry-run is therefore side-effect-free
   by construction.
-- Everything routes through the existing audited primitives (`stack.set_enabled`,
-  `ServiceManager.add_image/remove/stop`), so the schema trust boundary and
-  rollback behavior are inherited, never reimplemented.
-- Destructive actions (remove/purge) are marked ``destructive: true`` in the
-  plan so callers (CLI confirm, MCP two-call handshake) can gate them.
+- ONE reconciler (phase 3 unification): the ``services:`` section is a
+  PROJECTION onto ``config/services.d/`` — applying it syncs the declarations
+  (write / update / disable / delete per ``on_undeclared``) and then runs the
+  exact same :mod:`syrviscore.services_d` engine `syrvis reconcile` uses. The
+  two declarative planes can no longer diverge, because there is only one.
+- A document WITHOUT a ``services:`` key does not manage Layer 2 at all — a
+  core-stack-only doc can never stop or prune your services.
+- Destructive actions are marked ``destructive: true`` in the plan so callers
+  (CLI confirm, MCP two-call handshake) can gate them.
 """
 
 from pathlib import Path
@@ -50,9 +54,19 @@ DESIRED_SCHEMA_VERSION = 1
 ALLOWED_TOP_LEVEL = frozenset({"version", "stack", "services", "on_undeclared"})
 ON_UNDECLARED = ("stop", "remove", "purge")
 
-# Per-service keys accepted in a desired doc entry (image-first vocabulary).
+# Per-service keys accepted in a desired doc entry (image-first vocabulary +
+# the services.d orchestration keys).
 ALLOWED_SERVICE_KEYS = frozenset(
-    {"image", "subdomain", "exposure", "port", "environment", "description"}
+    {
+        "image",
+        "subdomain",
+        "exposure",
+        "port",
+        "environment",
+        "description",
+        "enabled",
+        "critical",
+    }
 )
 
 
@@ -116,6 +130,10 @@ def validate_desired(data: Any) -> Dict[str, Any]:
         if name in stack_mod.PRIMORDIAL and entry.get("enabled") is False:
             raise ConvergeError("'{}' is primordial and cannot be disabled".format(name))
 
+    # A doc WITHOUT a `services:` key does not manage Layer 2 at all (so a
+    # core-stack-only doc can never stop/prune anything). A PRESENT key —
+    # even an empty mapping — claims the complete set.
+    manages_services = "services" in data
     services = data.get("services") or {}
     if not isinstance(services, dict):
         raise ConvergeError("'services' must be a mapping of Layer 2 services")
@@ -138,47 +156,85 @@ def validate_desired(data: Any) -> Dict[str, Any]:
         "version": DESIRED_SCHEMA_VERSION,
         "stack": stack_section,
         "services": services,
+        "manages_services": manages_services,
         "on_undeclared": on_undeclared,
     }
 
 
-def _current_l2_state(manager: ServiceManager) -> Dict[str, Dict[str, Any]]:
-    """Installed Layer 2 services with their full effective routing.
+def _doc_declarations(desired: Dict[str, Any]):
+    """Materialize the doc's ``services:`` entries as full declarations.
 
-    ``list()`` lacks port/environment, so each installed manifest is loaded for
-    an exact comparison. A service whose manifest fails to load is reported
-    with ``error`` (it will show as needing replacement, never silently equal).
+    Uses the same builder as ``syrvis service declare``, so the doc entry and
+    the flag vocabulary produce byte-identical intent.
     """
-    from .services_d import _installed_manifests
+    from . import services_d
 
-    current: Dict[str, Dict[str, Any]] = {}
-    for name, svc in _installed_manifests(manager).items():
-        if svc is None:
-            # Unloadable/manifest-less install: never silently equal -> replace.
-            current[name] = {"error": "unloadable manifest"}
+    declarations = {}
+    for name, entry in (desired.get("services") or {}).items():
+        declarations[name] = services_d.build_declaration(
+            name,
+            entry["image"],
+            subdomain=entry.get("subdomain"),
+            exposure=entry.get("exposure"),
+            port=int(entry.get("port", 80)),
+            environment=entry.get("environment"),
+            description=entry.get("description", ""),
+            enabled=bool(entry.get("enabled", True)),
+            critical=bool(entry.get("critical", False)),
+        )
+    return declarations
+
+
+def _effective_declarations(desired: Dict[str, Any], current_declarations):
+    """The services.d state applying this doc would produce.
+
+    Doc entries win; declarations ABSENT from the doc follow ``on_undeclared``:
+    ``stop`` keeps them declared-but-off (enabled: false), ``remove``/``purge``
+    drop the declaration (their installs are then pruned by the engine).
+    Also returns the declaration-sync actions the apply step must perform.
+    """
+    import copy
+
+    doc_declarations = _doc_declarations(desired)
+    policy = desired.get("on_undeclared", "stop")
+
+    sync_actions: List[Dict[str, Any]] = []
+    effective = dict(doc_declarations)
+
+    for name, declared in doc_declarations.items():
+        existing = current_declarations.get(name)
+        if existing is None:
+            sync_actions.append({"kind": "declare", "name": name, "destructive": False})
+        elif existing.to_dict() != declared.to_dict():
+            sync_actions.append({"kind": "declare_update", "name": name, "destructive": False})
+
+    for name, existing in current_declarations.items():
+        if name in doc_declarations:
             continue
-        current[name] = {
-            "image": svc.image,
-            "subdomain": svc.traefik.subdomain if svc.traefik.enabled else "",
-            "exposure": svc.traefik.exposure if svc.traefik.enabled else None,
-            "port": svc.traefik.port,
-            "environment": sorted(svc.environment),
-        }
-    return current
+        if policy == "stop":
+            softened = copy.copy(existing)
+            softened.enabled = False
+            effective[name] = softened
+            if existing.enabled:
+                sync_actions.append({"kind": "declare_disable", "name": name, "destructive": False})
+        else:
+            # remove/purge: intent is deleted; the reconcile prune (destructive,
+            # gated) handles the installed artifacts.
+            sync_actions.append({"kind": "declare_delete", "name": name, "destructive": False})
 
-
-def _desired_entry_normalized(name: str, entry: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "image": entry["image"],
-        "subdomain": (entry.get("subdomain") or name).strip().lower(),
-        "exposure": exposure_mod.normalize(entry.get("exposure")),
-        "port": int(entry.get("port", 80)),
-        "environment": sorted(entry.get("environment") or []),
-    }
+    return effective, sync_actions, doc_declarations
 
 
 def build_plan(desired: Dict[str, Any], manager: Optional[ServiceManager] = None) -> Dict[str, Any]:
-    """Diff desired vs actual into an ordered, JSON-ready action plan (read-only)."""
+    """Diff desired vs actual into an ordered, JSON-ready action plan (read-only).
+
+    The Layer 2 portion is computed by the ONE reconcile engine
+    (:func:`syrviscore.services_d.build_reconcile_plan`) against the
+    declarations this doc would produce — `stack apply --from` and
+    `syrvis reconcile` can never plan different outcomes for the same intent.
+    """
+    from . import services_d
+
     manager = manager or ServiceManager()
     actions: List[Dict[str, Any]] = []
 
@@ -201,50 +257,30 @@ def build_plan(desired: Dict[str, Any], manager: Optional[ServiceManager] = None
                 }
             )
 
-    # --- Layer 2 set ---
-    current = _current_l2_state(manager)
-    desired_services = {
-        name: _desired_entry_normalized(name, entry)
-        for name, entry in (desired.get("services") or {}).items()
-    }
-
-    for name, want in desired_services.items():
-        have = current.get(name)
-        if have is None:
-            actions.append({"kind": "service_add", "name": name, "destructive": False, **want})
-        elif have.get("error") or any(have.get(k) != want[k] for k in want):
-            changes = {
-                k: {"from": have.get(k), "to": want[k]} for k in want if have.get(k) != want[k]
-            }
-            actions.append(
-                {
-                    "kind": "service_replace",
-                    "name": name,
-                    "changes": changes,
-                    "destructive": False,  # data dir is preserved across replace
-                    **want,
-                }
-            )
-
-    on_undeclared = desired.get("on_undeclared", "stop")
-    for name in sorted(set(current) - set(desired_services)):
-        kind = {
-            "stop": "service_stop",
-            "remove": "service_remove",
-            "purge": "service_purge",
-        }[on_undeclared]
-        actions.append(
-            {
-                "kind": kind,
-                "name": name,
-                # stop is reversible; remove drops config (data kept); purge drops data
-                "destructive": on_undeclared != "stop",
-            }
+    # --- Layer 2: a projection onto services.d, via the one engine ---
+    reconcile_plan = None
+    declaration_dump: Dict[str, Any] = {}
+    if desired.get("manages_services"):
+        current_declarations, _invalid = services_d.load_declarations(manager.syrvis_home)
+        effective, sync_actions, _doc = _effective_declarations(desired, current_declarations)
+        policy = desired.get("on_undeclared", "stop")
+        reconcile_plan = services_d.build_reconcile_plan(
+            manager, effective, invalid=[], prune=policy
         )
+        actions.extend(sync_actions)
+        actions.extend(reconcile_plan["actions"])
+        # Serialize the effective declarations so apply_plan is self-contained
+        # (pure plan/apply split survives a plan crossing a process boundary).
+        declaration_dump = {name: svc.to_dict() for name, svc in effective.items()}
 
     return {
         "changed": bool(actions),
         "actions": actions,
+        "manages_services": bool(desired.get("manages_services")),
+        "declarations": declaration_dump,
+        "reconcile": (
+            {k: v for k, v in reconcile_plan.items() if k != "actions"} if reconcile_plan else None
+        ),
         "summary": {
             "total": len(actions),
             "destructive": sum(1 for a in actions if a["destructive"]),
@@ -255,14 +291,23 @@ def build_plan(desired: Dict[str, Any], manager: Optional[ServiceManager] = None
 def apply_plan(
     plan: Dict[str, Any], manager: Optional[ServiceManager] = None
 ) -> List[Dict[str, Any]]:
-    """Execute a plan's actions in order, via the existing audited primitives.
+    """Execute a plan's actions in order.
 
-    Returns one result row per action: {kind, name, ok, message, changed}.
-    Never raises mid-plan for a single action's failure — each row reports its
-    own outcome so a partial failure is visible, not masking later actions.
+    Stack actions route through ``stack.set_enabled``; declaration-sync actions
+    write/adjust ``services.d`` intent; every converge action is executed by
+    :func:`syrviscore.services_d.apply_reconcile_plan` — the same engine as
+    ``syrvis reconcile``. One failure never masks later actions.
     """
+    from . import services_d
+    from .service_schema import ServiceDefinition
+
     manager = manager or ServiceManager()
     results: List[Dict[str, Any]] = []
+
+    declarations = {
+        name: ServiceDefinition.from_dict(data)
+        for name, data in (plan.get("declarations") or {}).items()
+    }
 
     def record(action: Dict[str, Any], ok: bool, message: str, changed: bool = True) -> None:
         results.append(
@@ -275,6 +320,7 @@ def apply_plan(
             }
         )
 
+    reconcile_actions: List[Dict[str, Any]] = []
     for action in plan.get("actions", []):
         kind = action["kind"]
         try:
@@ -285,48 +331,28 @@ def apply_plan(
                     settings=action.get("settings") or None,
                 )
                 record(action, True, "{}d".format(kind.replace("_", " ")))
-            elif kind == "service_add":
-                ok, msg = manager.add_image(
-                    action["name"],
-                    action["image"],
-                    subdomain=action["subdomain"],
-                    exposure=action["exposure"],
-                    port=action["port"],
-                    environment=action["environment"],
-                    start=True,
+            elif kind in ("declare", "declare_update"):
+                path = services_d.write_declaration(
+                    manager.syrvis_home, declarations[action["name"]]
                 )
-                record(action, ok, msg)
-            elif kind == "service_replace":
-                # Remove (data preserved, services.d declaration KEPT — losing
-                # it on a failed re-add would erase intent) then re-add. The
-                # data dir predates this replace, so a failed re-install must
-                # roll back without destroying it.
-                ok, msg = manager.remove(action["name"], purge=False, keep_declaration=True)
-                if ok:
-                    ok, msg = manager.add_image(
-                        action["name"],
-                        action["image"],
-                        subdomain=action["subdomain"],
-                        exposure=action["exposure"],
-                        port=action["port"],
-                        environment=action["environment"],
-                        start=True,
-                        preserve_data_on_rollback=True,
-                    )
-                record(action, ok, msg)
-            elif kind == "service_stop":
-                ok, msg = manager.stop(action["name"])
-                record(action, ok, msg)
-            elif kind == "service_remove":
-                ok, msg = manager.remove(action["name"], purge=False)
-                record(action, ok, msg)
-            elif kind == "service_purge":
-                ok, msg = manager.remove(action["name"], purge=True)
-                record(action, ok, msg)
+                record(action, True, "declaration written: {}".format(path))
+            elif kind == "declare_disable":
+                services_d.set_declared_enabled(manager.syrvis_home, action["name"], False)
+                record(action, True, "declaration set enabled: false")
+            elif kind == "declare_delete":
+                removed = services_d.remove_declaration(manager.syrvis_home, action["name"])
+                record(action, True, "declaration removed" if removed else "no declaration")
             else:
-                record(action, False, "unknown action kind {!r}".format(kind), changed=False)
+                # Everything else is a reconcile-engine action; batch them so
+                # the engine runs them with its own per-service isolation.
+                reconcile_actions.append(action)
         except Exception as exc:  # noqa: BLE001 - report, don't mask later actions
             record(action, False, str(exc), changed=False)
+
+    if reconcile_actions:
+        results.extend(
+            services_d.apply_reconcile_plan(manager, declarations, {"actions": reconcile_actions})
+        )
 
     return results
 

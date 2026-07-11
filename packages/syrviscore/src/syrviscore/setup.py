@@ -559,12 +559,22 @@ def write_stack_file(config: dict, install_dir: Path, username: str) -> Path:
     path.write_text(stack.to_yaml())
     path.chmod(0o644)
 
+    # The declarative Layer 2 intent dir (services.d) is deliberately owned by
+    # the setup USER, not root: it holds validated intent (never executed
+    # directly — reconcile re-validates every file through the schema trust
+    # boundary), and user ownership is what lets an IaC repo (home-tech) push
+    # declarations with plain `rsync` + then `sudo syrvis reconcile`.
+    services_d_dir = install_dir / "config" / "services.d"
+    services_d_dir.mkdir(parents=True, exist_ok=True)
+    services_d_dir.chmod(0o755)
+
     if os.getuid() == 0:
         try:
             import pwd
 
             user_info = pwd.getpwnam(username)
             os.chown(path, user_info.pw_uid, user_info.pw_gid)
+            os.chown(services_d_dir, user_info.pw_uid, user_info.pw_gid)
         except Exception:
             pass
 
