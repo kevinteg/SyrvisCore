@@ -85,8 +85,10 @@ class TestStaticConfig:
             acme_email = parsed["certificatesResolvers"]["letsencrypt"]["acme"]["email"]
             assert acme_email == "admin@example.com"
 
-    def test_static_config_lets_encrypt(self):
-        """Test Let's Encrypt configuration."""
+    def test_static_config_lets_encrypt(self, monkeypatch):
+        """Default (no Cloudflare DNS token) uses the HTTP-01 challenge."""
+        monkeypatch.delenv("CLOUDFLARE_DNS_API_TOKEN", raising=False)
+        monkeypatch.delenv("TRAEFIK_ACME_CHALLENGE", raising=False)
         config = generate_traefik_static_config()
         parsed = yaml.safe_load(config)
 
@@ -94,6 +96,18 @@ class TestStaticConfig:
         assert letsencrypt["storage"] == "/acme.json"
         assert "httpChallenge" in letsencrypt
         assert letsencrypt["httpChallenge"]["entryPoint"] == "web"
+
+    def test_static_config_dns01_when_cf_token_set(self, monkeypatch):
+        """A Cloudflare DNS token switches Traefik to the DNS-01 challenge.
+
+        Required for internal / private-IP (split-horizon) names to get + renew certs.
+        """
+        monkeypatch.setenv("CLOUDFLARE_DNS_API_TOKEN", "cf-dns-token")
+        parsed = yaml.safe_load(generate_traefik_static_config())
+        letsencrypt = parsed["certificatesResolvers"]["letsencrypt"]["acme"]
+        assert "dnsChallenge" in letsencrypt
+        assert letsencrypt["dnsChallenge"]["provider"] == "cloudflare"
+        assert "httpChallenge" not in letsencrypt
 
 
 class TestDynamicConfig:

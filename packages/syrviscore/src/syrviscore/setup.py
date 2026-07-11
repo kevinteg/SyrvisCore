@@ -432,8 +432,12 @@ SYNOLOGY_PHOTOS_ENABLED={str(config.get('synology_photos', False)).lower()}
 # Domain & SSL
 DOMAIN={config['domain']}
 ACME_EMAIL={config['email']}
+# Cloudflare DNS-01 challenge token (Zone:DNS:Edit) — required for valid certs on
+# internal/private-IP (split-horizon) names like dsm/portainer/dash. When set,
+# Traefik issues + auto-renews via DNS instead of HTTP-01.
+CLOUDFLARE_DNS_API_TOKEN={config.get('cloudflare_dns_api_token', '')}
 
-# Cloudflare Tunnel (optional)
+# Cloudflare Tunnel (optional — remote access without port-forwarding)
 CLOUDFLARE_TUNNEL_TOKEN={config.get('cloudflare_token', '')}
 
 # SyrvisCore Dashboard (web UI at DASHBOARD_SUBDOMAIN.DOMAIN)

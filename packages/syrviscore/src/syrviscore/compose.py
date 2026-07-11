@@ -192,7 +192,12 @@ class ComposeGenerator:
                 "proxy": {},
             },
             # No port bindings needed - traefik has its own IP via macvlan
-            "environment": ["TZ=UTC"],
+            "environment": [
+                "TZ=UTC",
+                # Cloudflare DNS-01 challenge token (lego reads CF_DNS_API_TOKEN).
+                # Enables cert issuance/renewal for internal names on a private IP.
+                "CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:-}",
+            ],
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
                 "../data/traefik/traefik.yml:/traefik.yml:ro",
