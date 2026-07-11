@@ -163,8 +163,27 @@ Nothing breaks: `services.d/` starts empty and everything current keeps working.
    in phase 3); the boot/confirm policy lives in the CLI shell, so future adapters must
    route through the CLI or replicate the gate (library-level policy comes with the
    phase-2 MCP tools); converge/services_d remain two engines until phase 3.
-2. **Phase 2 — surfaces:** dashboard declared-vs-running view; MCP `service_declare` +
-   reconcile tools; `verify` consumes `critical` for degraded-vs-unhealthy.
+2. **Phase 2 — surfaces (✅ shipped 2026-07-11):**
+   - **CLI authoring:** `syrvis service declare NAME --image … [--subdomain/--exposure/
+     --port/--enabled BOOL/--critical BOOL] [--json]` writes a declaration through the
+     full trust boundary WITHOUT applying it (reconcile applies later); `service adopt`
+     gained `--json`. This flag-vocabulary is what makes declarations MCP-transportable
+     through the forced-command shim's argv charset (no file blobs needed).
+   - **MCP tools (31 total now):** `reconcile_plan` (read-only dry-run; sudo only so 0600
+     declarations are readable), `reconcile` (privileged, non-destructive), `reconcile_prune`
+     (destructive — two-call confirm token whose state hash binds the policy + the full
+     dry-run plan, so any change between calls voids it), `service_declare` (same
+     fail-closed image-registry allowlist as service_run), `service_adopt`. New shim slot
+     kinds `prune_policy`/`boolean` with G13-identical bounds; sudoers + shim regenerated
+     (`gen check` green). NOTE: the live operator needs a re-provision to use these.
+   - **Dashboard:** `GET /api/declarations` (union of declared+installed with per-service
+     state `in_sync | pending_<action> | disabled | unmanaged`, invalid-file rows, plan
+     summary; never-500), a declarations card in the Services panel (Declared/Unmanaged/
+     Disabled/Critical badges + drift pills), and a `sudo syrvis reconcile` ssh-action.
+   - **verify:** L2 drift is now DECLARATION-driven (declared-enabled-but-missing is real
+     drift; declared-disabled is skipped; unmanaged installs still watched) and honors
+     `critical`: a critical failure → UNHEALTHY (exit 1); non-critical → DEGRADED (exit 0,
+     new `degraded` field in the --json envelope).
 3. **Phase 3 — home-tech:** move the live NAS's services into a git-managed `services.d/`
    (via `service adopt`), wire the rsync+reconcile deploy step, and let `stack apply --from`
    defer its `services:` section to the directory when present.

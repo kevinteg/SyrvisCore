@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from . import (
     config_routes,
     core,
+    declarations,
     events,
     health,
     links,
@@ -20,6 +21,7 @@ api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(config_routes.router)
 api_router.include_router(services.router)
+api_router.include_router(declarations.router)
 api_router.include_router(core.router)
 api_router.include_router(system.router)
 api_router.include_router(events.router)

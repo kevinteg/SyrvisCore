@@ -320,6 +320,46 @@ def adopt(manager, name: str) -> Path:
     return write_declaration(manager.syrvis_home, service)
 
 
+def build_declaration(
+    name: str,
+    image: str,
+    subdomain: Optional[str] = None,
+    exposure: Optional[str] = None,
+    port: int = 80,
+    environment: Optional[List[str]] = None,
+    description: str = "",
+    enabled: bool = True,
+    critical: bool = False,
+) -> ServiceDefinition:
+    """Author a declaration from image-first vocabulary (the trust boundary applies).
+
+    The builder behind ``syrvis service declare`` and the MCP ``service_declare``
+    tool: it only AUTHORS intent — nothing is installed or started until a
+    reconcile applies it.
+    """
+    from . import exposure as exposure_mod
+    from .service_manager import _image_tag  # lazy: service_manager imports us
+
+    manifest: Dict[str, Any] = {
+        "name": name,
+        "version": _image_tag(image),
+        "image": image,
+        "traefik": {
+            "enabled": True,
+            "subdomain": (subdomain or name).strip().lower(),
+            "port": port,
+            "exposure": exposure_mod.normalize(exposure),
+        },
+        "enabled": enabled,
+        "critical": critical,
+    }
+    if description:
+        manifest["description"] = description
+    if environment:
+        manifest["environment"] = list(environment)
+    return ServiceDefinition.from_dict(manifest)
+
+
 def write_declaration(syrvis_home: Path, service: ServiceDefinition) -> Path:
     """Persist a declaration file for ``service`` verbatim (orchestration kept)."""
     from .service_schema import dump_definition

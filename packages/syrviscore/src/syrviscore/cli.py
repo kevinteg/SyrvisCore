@@ -267,11 +267,77 @@ def service_catalog(as_json):
     click.echo("Install one with: syrvis service run <name>")
 
 
+@service.command("declare")
+@click.argument("name")
+@click.option("--image", required=True, help="Pinned image reference (never :latest)")
+@click.option("--subdomain", default=None, help="Subdomain to route at (defaults to NAME)")
+@click.option(
+    "--exposure",
+    type=click.Choice(["internal", "tunnel"]),
+    default="internal",
+    help="internal = LAN-only (default); tunnel = remote via Cloudflare",
+)
+@click.option("--port", type=int, default=80, help="Container port Traefik forwards to")
+@click.option(
+    "--enabled",
+    type=click.BOOL,
+    default=True,
+    help="true (default) = reconcile runs it; false = declared-but-off",
+)
+@click.option(
+    "--critical",
+    type=click.BOOL,
+    default=False,
+    help="true = a failure of this service makes reconcile/verify unhealthy",
+)
+@click.option("--env", "env_vars", multiple=True, help="KEY=VALUE runtime env (repeatable)")
+@click.option("--description", default="", help="Human description")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def service_declare(
+    name, image, subdomain, exposure, port, enabled, critical, env_vars, description, as_json
+):
+    """Author (or update) a services.d declaration WITHOUT applying it.
+
+    Writes config/services.d/NAME.yaml through the full schema trust boundary.
+    Nothing is installed or started — run 'syrvis reconcile' (or wait for the
+    next boot/IaC reconcile) to converge to the declared intent.
+    """
+    privilege.ensure_elevated("Writing declarations requires elevated privileges.")
+    from syrviscore import services_d
+    from syrviscore.paths import get_syrvis_home as _home
+
+    try:
+        service_def = services_d.build_declaration(
+            name,
+            image,
+            subdomain=subdomain,
+            exposure=exposure,
+            port=port,
+            environment=list(env_vars),
+            description=description,
+            enabled=enabled,
+            critical=critical,
+        )
+        path = services_d.write_declaration(_home(), service_def)
+    except SyrvisError as e:
+        if as_json:
+            json_error(e)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps({"ok": True, "name": name, "path": str(path), "applied": False}))
+        return
+    click.echo("Declared '{}' -> {}".format(name, path))
+    click.echo("Apply it with: sudo syrvis reconcile")
+
+
 @service.command("adopt")
 @click.argument("name", required=False)
 @click.option("--all", "adopt_all", is_flag=True, help="Adopt every installed service")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
 @handle_errors
-def service_adopt(name, adopt_all):
+def service_adopt(name, adopt_all, as_json):
     """Generate a services.d declaration from an existing install.
 
     The migration path to declarative loading: an installed service becomes a
@@ -284,19 +350,35 @@ def service_adopt(name, adopt_all):
     manager = ServiceManager()
     if adopt_all:
         rows = manager.list()
-        if not rows:
-            click.echo("No installed services to adopt.")
-            return
+        adopted, errors = [], []
         for row in rows:
             try:
                 path = services_d.adopt(manager, row["name"])
-                click.echo("Adopted '{}' -> {}".format(row["name"], path))
+                adopted.append({"name": row["name"], "path": str(path)})
+                if not as_json:
+                    click.echo("Adopted '{}' -> {}".format(row["name"], path))
             except Exception as e:  # noqa: BLE001 - per-row isolation
-                click.echo("Error adopting '{}': {}".format(row["name"], e), err=True)
+                errors.append({"name": row["name"], "error": str(e)})
+                if not as_json:
+                    click.echo("Error adopting '{}': {}".format(row["name"], e), err=True)
+        if as_json:
+            click.echo(jsonlib.dumps({"ok": not errors, "adopted": adopted, "errors": errors}))
+            if errors:
+                raise SystemExit(1)
+        elif not rows:
+            click.echo("No installed services to adopt.")
         return
     if not name:
         raise SyrvisError("Provide a service NAME or --all")
-    path = services_d.adopt(manager, name)
+    try:
+        path = services_d.adopt(manager, name)
+    except SyrvisError as e:
+        if as_json:
+            json_error(e)
+        raise
+    if as_json:
+        click.echo(jsonlib.dumps({"ok": True, "adopted": [{"name": name, "path": str(path)}]}))
+        return
     click.echo("Adopted '{}' -> {}".format(name, path))
     click.echo("It is now managed declaratively; edit the file and run 'syrvis reconcile'.")
 

@@ -43,6 +43,8 @@ _KIND_VALIDATORS = {
     "subdomain": lambda v, cfg: validate.validate_subdomain(v),
     "exposure": lambda v, cfg: validate.validate_exposure(v),
     "port": lambda v, cfg: str(validate.validate_port(v)),
+    "prune_policy": lambda v, cfg: validate.validate_prune_policy(v),
+    "boolean": lambda v, cfg: validate.validate_bool_flag(v),
 }
 
 

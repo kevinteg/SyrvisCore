@@ -86,6 +86,14 @@ def logs(service: Optional[str] = None, tail: int = 100) -> dict:
 
 
 @mcp.tool(annotations=RO)
+def reconcile_plan() -> dict:
+    """Dry-run reconcile plan: what converging to config/services.d would do
+    (per-service actions, invalid declarations, unmanaged installs). Read-only
+    by construction — nothing is applied."""
+    return _call(tools.reconcile_plan)
+
+
+@mcp.tool(annotations=RO)
 def versions_list() -> dict:
     """Installed service versions and which is active."""
     return _call(tools.versions_list)
@@ -147,6 +155,47 @@ def stack_apply() -> dict:
     """Regenerate docker-compose.yaml from the declared stack (privileged;
     idempotent). Run start/restart afterward to apply the new compose."""
     return _call(tools.stack_apply)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def reconcile() -> dict:
+    """Converge to the config/services.d declarations (privileged). WITHOUT a
+    prune policy it never removes anything — use reconcile_prune for that.
+    Returns the CLI's plan/results/ok verdict."""
+    return _call(tools.reconcile)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def service_declare(
+    name: str,
+    image: str,
+    subdomain: str = "",
+    exposure: str = "internal",
+    port: int = 80,
+    enabled: bool = True,
+    critical: bool = False,
+) -> dict:
+    """Author (or update) a services.d declaration WITHOUT applying it —
+    reconcile converges later (privileged; idempotent: same intent twice is the
+    same file). subdomain defaults to name. Fails closed unless the image's
+    registry is in safety.image_allowed_registries."""
+    return _call(
+        tools.service_declare,
+        name=name,
+        image=image,
+        subdomain=subdomain or None,
+        exposure=exposure,
+        port=port,
+        enabled=enabled,
+        critical=critical,
+    )
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def service_adopt(name: str) -> dict:
+    """Generate a services.d declaration from an existing installed service
+    (privileged; the install is not touched). Core services cannot be adopted."""
+    return _call(tools.service_adopt, name=name)
 
 
 @mcp.tool
@@ -241,6 +290,14 @@ def cleanup(keep: int = 2, confirm: str = "") -> dict:
     """Remove old versions, keeping the newest N. Two-call handshake.
     (privileged, destructive)."""
     return _call(tools.cleanup, keep=keep, confirm=confirm)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def reconcile_prune(prune: str, confirm: str = "") -> dict:
+    """Reconcile AND prune installed-but-undeclared services. prune is one of
+    stop|remove|purge (remove/purge are destructive). Two-call: first returns
+    the dry-run plan + a token; re-call with confirm=<token> to apply."""
+    return _call(tools.reconcile_prune, prune=prune, confirm=confirm)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)

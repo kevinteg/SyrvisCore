@@ -170,3 +170,35 @@ export interface RoutesResponse {
 }
 
 export const getRoutes = () => api<RoutesResponse>("/api/routes");
+
+// Declared services (config/services.d) vs installed reality — read-only drift.
+export type DeclarationState = "in_sync" | "disabled" | "unmanaged" | `pending_${string}`;
+
+export interface DeclarationItem {
+  name: string;
+  declared: boolean;
+  installed: boolean;
+  enabled: boolean | null;
+  critical: boolean | null;
+  image: string | null;
+  subdomain: string;
+  exposure: string | null;
+  status: string;
+  state: DeclarationState;
+}
+
+export interface DeclarationsSummary {
+  declared: number;
+  invalid: number;
+  total_actions: number;
+  destructive: number;
+}
+
+export interface DeclarationsResponse {
+  services: DeclarationItem[];
+  invalid: { file: string; error: string }[];
+  summary?: DeclarationsSummary;
+  error?: string;
+}
+
+export const getDeclarations = () => api<DeclarationsResponse>("/api/declarations");

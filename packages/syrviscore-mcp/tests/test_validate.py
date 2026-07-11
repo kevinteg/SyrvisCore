@@ -108,6 +108,39 @@ class TestUnicodeDigits:
             validate.validate_version("१.२.३")
 
 
+class TestPrunePolicy:
+    @pytest.mark.parametrize("p", ["stop", "remove", "purge"])
+    def test_valid(self, p):
+        assert validate.validate_prune_policy(p) == p
+
+    @pytest.mark.parametrize(
+        "p", INJECTION_CORPUS + ["Stop", "REMOVE", "everything", "purge ", "stop;id"]
+    )
+    def test_invalid_rejected(self, p):
+        with pytest.raises(ValidationError):
+            validate.validate_prune_policy(p)
+
+
+class TestBoolFlag:
+    @pytest.mark.parametrize("b", ["true", "false"])
+    def test_valid(self, b):
+        assert validate.validate_bool_flag(b) == b
+
+    @pytest.mark.parametrize(
+        "b", INJECTION_CORPUS + ["True", "FALSE", "1", "0", "yes", "no", "true "]
+    )
+    def test_invalid_rejected(self, b):
+        with pytest.raises(ValidationError):
+            validate.validate_bool_flag(b)
+
+    @pytest.mark.parametrize("b", [True, False, 1, None])
+    def test_non_string_rejected(self, b):
+        # the MCP tool renders Python bools lowercase BEFORE this boundary;
+        # the slot validator itself only ever accepts the two strings
+        with pytest.raises(ValidationError):
+            validate.validate_bool_flag(b)
+
+
 class TestInts:
     def test_tail_bounds(self):
         assert validate.validate_tail(100) == 100

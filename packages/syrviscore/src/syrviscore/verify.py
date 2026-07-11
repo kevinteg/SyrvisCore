@@ -95,35 +95,48 @@ def gather_core_drift(actual: Optional[Dict[str, Dict[str, str]]] = None) -> dri
 
 
 def gather_l2_drift() -> Optional[drift.DriftReport]:
-    """Drift report for the Layer 2 set: every installed service should be
-    running its declared image.
+    """Drift report for the Layer 2 set, driven by services.d declarations.
 
-    Returns None when no services are installed or docker is unreachable (core
-    drift already reports docker-down); an unloadable manifest surfaces as a
-    MISSING item rather than being silently skipped.
+    The expected set is the union of enabled declarations (declared intent —
+    a declared-but-never-installed service is real MISSING drift) and
+    installed manifests (unmanaged installs still have health worth watching).
+    Declared-disabled services are skipped (stopped is their desired state),
+    and each item carries the declaration's ``critical`` flag so the caller
+    can distinguish unhealthy from merely degraded.
+
+    Returns None when there is nothing to check or docker is unreachable
+    (core drift already reports docker-down).
     """
     try:
+        from . import services_d
         from .service_manager import ServiceManager
-        from .service_schema import load_service_definition
 
         manager = ServiceManager()
-        services_dir = manager.services_dir
-        if not services_dir.exists():
-            return None
+        declarations, _invalid = services_d.load_declarations(manager.syrvis_home)
+        installed = services_d._installed_manifests(manager)
 
         expected: Dict[str, str] = {}
         container_names: Dict[str, str] = {}
-        for service_dir in sorted(services_dir.iterdir()):
-            manifest = service_dir / "syrvis-service.yaml"
-            if not service_dir.is_dir() or not manifest.exists():
+        critical_map: Dict[str, bool] = {}
+
+        for name, declared in declarations.items():
+            if not declared.enabled:
+                continue  # declared-off: stopped IS the desired state
+            expected[name] = declared.image
+            container_names[name] = declared.container_name or name
+            critical_map[name] = declared.critical
+
+        for name, manifest in installed.items():
+            if name in expected or (name in declarations and not declarations[name].enabled):
                 continue
-            try:
-                svc = load_service_definition(manifest)
-                expected[svc.name] = svc.image
-                container_names[svc.name] = svc.container_name or svc.name
-            except Exception:  # noqa: BLE001 - broken manifest -> shows as MISSING
-                expected[service_dir.name] = "unloadable-manifest"
-                container_names[service_dir.name] = service_dir.name
+            if manifest is None:
+                expected[name] = "unloadable-manifest"
+                container_names[name] = name
+            else:
+                expected[name] = manifest.image
+                container_names[name] = manifest.container_name or name
+            critical_map.setdefault(name, False)
+
         if not expected:
             return None
 
@@ -141,7 +154,10 @@ def gather_l2_drift() -> Optional[drift.DriftReport]:
             except Exception:  # noqa: BLE001 - absent container -> MISSING drift
                 pass
         # L2 containers outside the declared set are not this scope's concern.
-        return drift.detect_drift("layer2", expected, actual, flag_unexpected=False)
+        report = drift.detect_drift("layer2", expected, actual, flag_unexpected=False)
+        for item in report.items:
+            item.critical = critical_map.get(item.service, False)
+        return report
     except Exception:  # noqa: BLE001 - docker/library unavailable: skip the tier
         return None
 
@@ -203,11 +219,18 @@ def build_report(
         result["drift"] = {"scope": "core", "error": str(e)}
 
     # Layer 2 drift — the declared service set, not just the core stack.
+    # Severity honors services.d `critical`: a critical service's failure makes
+    # the report UNHEALTHY; non-critical failures only DEGRADE it (the design's
+    # "a non-critical syrvis must not block").
+    result["degraded"] = False
     l2_report = gather_l2_drift()
     if l2_report is not None:
         result["l2_drift"] = l2_report.to_dict()
-        if not l2_report.in_sync:
+        failures = l2_report.failures
+        if any(item.critical for item in failures):
             result["healthy"] = False
+        elif failures:
+            result["degraded"] = True
     else:
         result["l2_drift"] = None
 
@@ -364,9 +387,14 @@ def _render_text(result: Dict[str, object]) -> None:
             click.echo("  L2 services: OUT OF SYNC")
             for item in l2_data["items"]:
                 if item["failure"]:
+                    severity = "CRITICAL" if item.get("critical") else "non-critical"
                     click.echo(
-                        "    ✗ {} [{}] expected={} actual={}".format(
-                            item["service"], item["kind"], item["expected"], item["actual"]
+                        "    ✗ {} [{}] ({}) expected={} actual={}".format(
+                            item["service"],
+                            item["kind"],
+                            severity,
+                            item["expected"],
+                            item["actual"],
                         )
                     )
 
@@ -379,7 +407,10 @@ def _render_text(result: Dict[str, object]) -> None:
             click.echo("  {} {}: {}".format(mark, action["target"], action["message"]))
 
     click.echo()
-    click.echo("Result: {}".format("HEALTHY" if result["healthy"] else "UNHEALTHY"))
+    if result["healthy"] and result.get("degraded"):
+        click.echo("Result: DEGRADED (non-critical services down; exit 0)")
+    else:
+        click.echo("Result: {}".format("HEALTHY" if result["healthy"] else "UNHEALTHY"))
 
 
 @click.command()

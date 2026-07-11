@@ -4,17 +4,116 @@ import { Play, Plus, RefreshCw, RotateCw, Square, Trash2 } from "lucide-react";
 import {
   addService,
   coreAction,
+  getDeclarations,
   getServices,
   removeService,
   serviceAction,
+  type DeclarationItem,
   type ServiceItem,
 } from "../lib/api";
+import { StatusPill } from "./StatusPill";
 import { Button, Card, ErrorNote, Spinner } from "./ui";
 
 function dot(status?: string) {
   if (status === "running") return "bg-emerald-400";
   if (status === "exited" || status === "stopped") return "bg-rose-500";
   return "bg-slate-500";
+}
+
+const BADGE_TONES = {
+  slate: "bg-base-700 text-slate-400",
+  sky: "bg-sky-500/15 text-sky-300",
+  amber: "bg-amber-500/15 text-amber-300",
+  rose: "bg-rose-500/15 text-rose-300",
+} as const;
+
+function Badge({ tone = "slate", children }: { tone?: keyof typeof BADGE_TONES; children: ReactNode }) {
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${BADGE_TONES[tone]}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+// Drift pill: in_sync green, pending_* amber (named after the plan action),
+// unmanaged/disabled gray — mirrors the /api/declarations `state` field.
+function driftPill(state: string) {
+  if (state === "in_sync") return <StatusPill status="ok" label="In sync" />;
+  if (state.startsWith("pending_"))
+    return <StatusPill status="degraded" label={`Pending: ${state.slice("pending_".length)}`} />;
+  if (state === "disabled") return <StatusPill status="not_configured" label="Disabled" />;
+  return <StatusPill status="not_configured" label="Unmanaged" />;
+}
+
+function DeclarationsCard() {
+  const { data } = useQuery({
+    queryKey: ["declarations"],
+    queryFn: getDeclarations,
+    refetchInterval: 15000,
+  });
+  if (!data) return null;
+
+  const items = data.services ?? [];
+  const invalid = data.invalid ?? [];
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between border-b border-base-700 px-4 py-3">
+        <span className="text-sm font-semibold text-slate-200">Declared services (services.d)</span>
+        {data.summary && (
+          <span className="text-xs text-slate-500">
+            {data.summary.declared} declared · {data.summary.total_actions} pending
+          </span>
+        )}
+      </div>
+      {data.error && (
+        <div className="px-4 py-3">
+          <ErrorNote error={data.error} />
+        </div>
+      )}
+      {items.map((d: DeclarationItem) => (
+        <div
+          key={d.name}
+          className="flex flex-col gap-2 border-b border-base-700 px-4 py-3 last:border-0 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className={`h-2 w-2 shrink-0 rounded-full ${dot(d.status)}`} />
+              <span className="font-medium text-slate-100">{d.name}</span>
+              {d.declared ? <Badge tone="sky">Declared</Badge> : <Badge>Unmanaged</Badge>}
+              {d.enabled === false && <Badge tone="amber">Disabled</Badge>}
+              {d.critical && <Badge tone="rose">Critical</Badge>}
+              <span className="text-xs text-slate-500">{d.status}</span>
+            </div>
+            {(d.image || d.subdomain) && (
+              <div className="truncate pl-4 font-mono text-xs text-slate-500">
+                {d.image ?? ""}
+                {d.subdomain && ` → ${d.subdomain}${d.exposure ? ` (${d.exposure})` : ""}`}
+              </div>
+            )}
+          </div>
+          <div className="shrink-0 pl-4 sm:pl-0">{driftPill(d.state)}</div>
+        </div>
+      ))}
+      {items.length === 0 && !data.error && (
+        <div className="px-4 py-3 text-sm text-slate-500">No services declared.</div>
+      )}
+      {invalid.length > 0 && (
+        <div className="border-t border-base-700 px-4 py-3">
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+            <div className="mb-1 font-semibold">Invalid declaration files</div>
+            {invalid.map((row) => (
+              <div key={row.file} className="font-mono">
+                {row.file}: {row.error}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
 }
 
 export function ServicesPanel() {
@@ -143,6 +242,8 @@ export function ServicesPanel() {
           </Button>
         </div>
       </Card>
+
+      <DeclarationsCard />
     </div>
   );
 }

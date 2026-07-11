@@ -42,6 +42,13 @@ CATALOG: List[SshAction] = [
         why_privileged="compose up + macvlan shim creation need host root",
     ),
     SshAction(
+        id="reconcile",
+        title="Reconcile declared services",
+        description="Converge installed services to the config/services.d declarations.",
+        command="sudo syrvis reconcile",
+        why_privileged="converges config/services.d declarations (root: compose + config writes)",
+    ),
+    SshAction(
         id="restart-core",
         title="Restart the whole core stack",
         description="docker-compose restart of the full core stack (regenerates traefik files).",

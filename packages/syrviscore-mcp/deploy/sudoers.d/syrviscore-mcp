@@ -6,6 +6,8 @@
 Defaults:syrvis-operator  !requiretty, env_reset, secure_path="/usr/bin:/bin:/usr/local/bin"
 
 syrvis-operator ALL=(root) NOPASSWD: \
+    /volume1/syrviscore/bin/syrvis reconcile --dry-run --json, \
+    /volume1/syrviscore/bin/syrvis reconcile --json -y, \
     /volume1/syrviscore/bin/syrvis start, \
     /volume1/syrviscore/bin/syrvis stop, \
     /volume1/syrviscore/bin/syrvis restart, \
@@ -17,8 +19,11 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service update -- *, \
     /volume1/syrviscore/bin/syrvis service add -- *, \
     /volume1/syrviscore/bin/syrvis service run --image * --subdomain * --exposure * --port * -- *, \
+    /volume1/syrviscore/bin/syrvis service declare --image * --subdomain * --exposure * --port * --enabled * --critical * --json -- *, \
+    /volume1/syrviscore/bin/syrvis service adopt --json -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore, \
+    /volume1/syrviscore/bin/syrvis reconcile --json -y --prune *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl activate -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y, \

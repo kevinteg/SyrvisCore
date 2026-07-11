@@ -85,6 +85,60 @@ class TestArgvExact:
         toks = remote.build_remote_tokens(cfg, get_command("start"), {})
         assert toks == [WRAP, "start"]
 
+    def test_reconcile_plan(self, cfg):
+        toks = remote.build_remote_tokens(cfg, get_command("reconcile_plan"), {})
+        assert toks == ["sudo", "-n", WRAP, "reconcile", "--dry-run", "--json"]
+
+    def test_reconcile(self, cfg):
+        toks = remote.build_remote_tokens(cfg, get_command("reconcile"), {})
+        assert toks == ["sudo", "-n", WRAP, "reconcile", "--json", "-y"]
+
+    def test_reconcile_prune(self, cfg):
+        toks = remote.build_remote_tokens(cfg, get_command("reconcile_prune"), {"prune": "stop"})
+        assert toks == ["sudo", "-n", WRAP, "reconcile", "--json", "-y", "--prune", "stop"]
+
+    def test_service_declare(self, cfg):
+        cfg = make_config(image_allowed_registries=["ghcr.io"])
+        toks = remote.build_remote_tokens(
+            cfg,
+            get_command("service_declare"),
+            {
+                "name": "cyberquill",
+                "image": "ghcr.io/acme/cyberquill:1.4.0",
+                "subdomain": "cyberquill",
+                "exposure": "tunnel",
+                "port": 8080,
+                "enabled": "true",
+                "critical": "false",
+            },
+        )
+        assert toks == [
+            "sudo",
+            "-n",
+            WRAP,
+            "service",
+            "declare",
+            "--image",
+            "ghcr.io/acme/cyberquill:1.4.0",
+            "--subdomain",
+            "cyberquill",
+            "--exposure",
+            "tunnel",
+            "--port",
+            "8080",
+            "--enabled",
+            "true",
+            "--critical",
+            "false",
+            "--json",
+            "--",
+            "cyberquill",
+        ]
+
+    def test_service_adopt(self, cfg):
+        toks = remote.build_remote_tokens(cfg, get_command("service_adopt"), {"name": "gollum"})
+        assert toks == ["sudo", "-n", WRAP, "service", "adopt", "--json", "--", "gollum"]
+
 
 class TestInjectionBlockedAtArgv:
     @pytest.mark.parametrize("bad", ["0.0.0; reboot", "$(id)", "-y", "../etc", "a b"])
@@ -96,6 +150,26 @@ class TestInjectionBlockedAtArgv:
     def test_bad_name_never_builds(self, cfg, bad):
         with pytest.raises(ValidationError):
             remote.build_remote_tokens(cfg, get_command("service_stop"), {"name": bad})
+
+    @pytest.mark.parametrize("bad", ["everything", "stop;id", "-y", "Purge", "stop remove"])
+    def test_bad_prune_policy_never_builds(self, cfg, bad):
+        with pytest.raises(ValidationError):
+            remote.build_remote_tokens(cfg, get_command("reconcile_prune"), {"prune": bad})
+
+    @pytest.mark.parametrize("bad", ["True", "1", "yes", "true;id", ""])
+    def test_bad_bool_flag_never_builds(self, bad):
+        cfg = make_config(image_allowed_registries=["ghcr.io"])
+        args = {
+            "name": "cq",
+            "image": "ghcr.io/a/b:1.0",
+            "subdomain": "cq",
+            "exposure": "internal",
+            "port": 80,
+            "enabled": bad,
+            "critical": "false",
+        }
+        with pytest.raises(ValidationError):
+            remote.build_remote_tokens(cfg, get_command("service_declare"), args)
 
 
 class TestNoShellString:

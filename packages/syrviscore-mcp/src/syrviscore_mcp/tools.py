@@ -20,7 +20,7 @@ from typing import Callable, Dict, Optional
 from . import sandbox, tokens, validate
 from .commands import get_command
 from .config import NASConfig
-from .errors import McpError
+from .errors import McpError, ValidationError
 from .remote import RemoteRunner
 
 
@@ -132,6 +132,12 @@ def logs(ctx: ToolContext, service: Optional[str] = None, tail: int = 100) -> Di
     return _run(ctx, "logs", {"service": service, "tail": tail})
 
 
+def reconcile_plan(ctx: ToolContext) -> Dict:
+    # `reconcile --dry-run` is side-effect-free by construction; it runs over
+    # the sudo seam only so 0600 services.d declaration files are readable.
+    return _run(ctx, "reconcile_plan")
+
+
 def versions_list(ctx: ToolContext) -> Dict:
     return _run(ctx, "versions_list")
 
@@ -176,6 +182,56 @@ def verify_fix(ctx: ToolContext, smoke: bool = False) -> Dict:
 
 def stack_apply(ctx: ToolContext) -> Dict:
     return _run(ctx, "stack_apply")
+
+
+def reconcile(ctx: ToolContext) -> Dict:
+    # WITHOUT --prune, reconcile never removes anything — non-destructive, like
+    # verify_fix. The CLI's JSON (plan/results/ok) passes straight through.
+    return _run(ctx, "reconcile")
+
+
+def service_declare(
+    ctx: ToolContext,
+    name: str,
+    image: str,
+    subdomain: Optional[str] = None,
+    exposure: str = "internal",
+    port: int = 80,
+    enabled: bool = True,
+    critical: bool = False,
+) -> Dict:
+    # Authors intent only (config/services.d/<name>.yaml); reconcile applies it
+    # later — so no confirmation token. The image still passes the same
+    # fail-closed registry allowlist as service_run: a declaration IS what a
+    # later reconcile will pull and run.
+    validate.validate_name(name)
+    validate.validate_image(image, ctx.cfg.image_allowed_registries)
+    sub = validate.validate_subdomain(subdomain) if subdomain else validate.validate_subdomain(name)
+    exp = validate.validate_exposure(exposure)
+    validate.validate_port(port)
+    for flag, what in ((enabled, "enabled"), (critical, "critical")):
+        if not isinstance(flag, bool):
+            raise ValidationError(f"{what} must be a boolean")
+    args = {
+        "name": name,
+        "image": image,
+        "subdomain": sub,
+        "exposure": exp,
+        "port": port,
+        # Rendered lowercase; validate_bool_flag re-checks at the slot boundary.
+        "enabled": "true" if enabled else "false",
+        "critical": "true" if critical else "false",
+    }
+    return _run(ctx, "service_declare", args)
+
+
+def service_adopt(ctx: ToolContext, name: str) -> Dict:
+    # RESERVED_NAMES rejection (inside validate_name) is correct here: core
+    # services can't be adopted. The membership check keeps adopt pointed at
+    # services SyrvisCore actually has installed, like every name-targeted tool.
+    validate.validate_name(name)
+    sandbox.assert_service_managed(ctx.runner, name)
+    return _run(ctx, "service_adopt", {"name": name})
 
 
 def service_start(ctx: ToolContext, name: str) -> Dict:
@@ -290,6 +346,22 @@ def cleanup(ctx: ToolContext, keep: int = 2, confirm: str = "") -> Dict:
     if pending:
         return pending
     return _with_version_state(ctx, _run(ctx, "cleanup", {"keep": keep}))
+
+
+def reconcile_prune(ctx: ToolContext, prune: str, confirm: str = "") -> Dict:
+    # --prune remove/purge DESTROYS installed-but-undeclared services, so the
+    # whole command takes the two-call token. The preview is the CLI's own
+    # DRY-RUN plan (read-only by construction); binding it into the state hash
+    # means the token dies if the declarations or installs change in between.
+    policy = validate.validate_prune_policy(prune)
+    preview = _run(ctx, "reconcile_plan")
+    plan = {"action": "reconcile_prune", "prune": policy, "plan": preview.get("plan")}
+    pending = _confirm_or_plan(
+        ctx, "reconcile_prune", {"prune": policy}, confirm, [policy, preview], plan
+    )
+    if pending:
+        return pending
+    return _run(ctx, "reconcile_prune", {"prune": policy})
 
 
 def service_remove(ctx: ToolContext, name: str, confirm: str = "") -> Dict:

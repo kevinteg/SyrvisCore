@@ -113,6 +113,8 @@ _SLOT_PREDICATE = {
     "subdomain": "is_subdomain",
     "exposure": "is_exposure",
     "port": "is_port",
+    "prune_policy": "is_prune",
+    "boolean": "is_bool",
 }
 
 
@@ -192,6 +194,8 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "is_subdomain() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }",
         "is_exposure()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }",
+        "is_prune()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }",
+        "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
         "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"
         "(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }",

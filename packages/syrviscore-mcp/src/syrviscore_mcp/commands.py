@@ -32,6 +32,8 @@ KIND_IMAGE = "image"
 KIND_SUBDOMAIN = "subdomain"
 KIND_EXPOSURE = "exposure"
 KIND_PORT = "port"
+KIND_PRUNE_POLICY = "prune_policy"
+KIND_BOOLEAN = "boolean"
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,20 @@ COMMANDS: List[Command] = [
         flags=["--keep", FlagValue(Slot("keep", KIND_KEEP)), "--dry-run"],
     ),
     # ---- privileged, non-destructive (sudo, no token) ----
+    # reconcile --dry-run is READ-ONLY by construction (side-effect-free plan);
+    # it runs under sudo only so the 0600 services.d declaration files are
+    # readable over the seam — the CLI itself skips privilege elevation here.
+    Command(
+        "reconcile_plan",
+        "syrvis",
+        ["reconcile"],
+        sudo=True,
+        read_only=True,
+        flags=["--dry-run", "--json"],
+    ),
+    # WITHOUT --prune, reconcile never removes anything (non-destructive, like
+    # verify_fix): it converges to config/services.d declarations only.
+    Command("reconcile", "syrvis", ["reconcile"], sudo=True, flags=["--json", "-y"], timeout_s=600),
     Command("start", "syrvis", ["start"], sudo=True, expect_json=False),
     Command("stop", "syrvis", ["stop"], sudo=True, expect_json=False),
     Command("restart", "syrvis", ["restart"], sudo=True, expect_json=False),
@@ -154,6 +170,42 @@ COMMANDS: List[Command] = [
         positional=Slot("name", KIND_NAME),
         timeout_s=600,
     ),
+    # service declare authors a services.d declaration through the schema trust
+    # boundary and applies NOTHING (reconcile applies later) — non-destructive.
+    # Fixed flag order mirrors remote.build_remote_tokens so the shim matches
+    # the real argv exactly. name is the trailing positional (after '--').
+    Command(
+        "service_declare",
+        "syrvis",
+        ["service", "declare"],
+        sudo=True,
+        flags=[
+            "--image",
+            FlagValue(Slot("image", KIND_IMAGE)),
+            "--subdomain",
+            FlagValue(Slot("subdomain", KIND_SUBDOMAIN)),
+            "--exposure",
+            FlagValue(Slot("exposure", KIND_EXPOSURE)),
+            "--port",
+            FlagValue(Slot("port", KIND_PORT)),
+            "--enabled",
+            FlagValue(Slot("enabled", KIND_BOOLEAN)),
+            "--critical",
+            FlagValue(Slot("critical", KIND_BOOLEAN)),
+            "--json",
+        ],
+        positional=Slot("name", KIND_NAME),
+    ),
+    # service adopt generates a declaration from an existing install; the
+    # install itself is not touched — non-destructive.
+    Command(
+        "service_adopt",
+        "syrvis",
+        ["service", "adopt"],
+        sudo=True,
+        flags=["--json"],
+        positional=Slot("name", KIND_NAME),
+    ),
     Command(
         "install",
         "syrvisctl",
@@ -166,6 +218,17 @@ COMMANDS: List[Command] = [
         timeout_s=600,
     ),
     # ---- privileged + destructive (sudo, confirmation token) ----
+    # reconcile --prune additionally acts on installed-but-undeclared services;
+    # 'remove'/'purge' are DESTRUCTIVE, so the whole command takes the token.
+    Command(
+        "reconcile_prune",
+        "syrvis",
+        ["reconcile"],
+        sudo=True,
+        destructive=True,
+        flags=["--json", "-y", "--prune", FlagValue(Slot("prune", KIND_PRUNE_POLICY))],
+        timeout_s=600,
+    ),
     Command(
         "activate",
         "syrvisctl",

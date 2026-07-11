@@ -281,16 +281,8 @@ class TestStaleStaticConfig:
 
 
 class TestL2Drift:
-    def test_build_report_includes_l2_drift(self, monkeypatch, tmp_path):
-        """An out-of-sync L2 set flips the report unhealthy."""
-        stub = drift.DriftReport(
-            scope="layer2",
-            items=[
-                drift.DriftItem(
-                    service="wiki", kind=DriftKind.MISSING, expected="ghcr.io/a/wiki:1.0"
-                )
-            ],
-        )
+    def _report(self, monkeypatch, items):
+        stub = drift.DriftReport(scope="layer2", items=items)
         monkeypatch.setattr(verify, "gather_l2_drift", lambda: stub)
         monkeypatch.setattr(verify, "run_validation_reports", lambda smoke: [])
         monkeypatch.setattr(
@@ -298,9 +290,82 @@ class TestL2Drift:
             "gather_core_drift",
             lambda actual=None: drift.DriftReport(scope="core", items=[]),
         )
-        result = verify.build_report(smoke=True)
+        return verify.build_report(smoke=True)
+
+    def test_noncritical_l2_failure_degrades_but_stays_healthy(self, monkeypatch):
+        """The design rule: a non-critical service must never block — verify
+        reports DEGRADED (exit 0), not unhealthy."""
+        result = self._report(
+            monkeypatch,
+            [drift.DriftItem(service="wiki", kind=DriftKind.MISSING, expected="a:1")],
+        )
         assert result["l2_drift"]["in_sync"] is False
+        assert result["healthy"] is True
+        assert result["degraded"] is True
+
+    def test_critical_l2_failure_is_unhealthy(self, monkeypatch):
+        result = self._report(
+            monkeypatch,
+            [
+                drift.DriftItem(
+                    service="vital", kind=DriftKind.MISSING, expected="a:1", critical=True
+                )
+            ],
+        )
         assert result["healthy"] is False
+        assert result["l2_drift"]["items"][0]["critical"] is True
+
+    def test_in_sync_l2_is_neither(self, monkeypatch):
+        result = self._report(monkeypatch, [])
+        assert result["healthy"] is True
+        assert result["degraded"] is False
+
+    def test_gather_l2_drift_uses_declarations(self, monkeypatch, tmp_path):
+        """Declared-enabled-but-missing = drift (critical honored); declared-
+        disabled is skipped; unmanaged installs still watched (non-critical)."""
+        import yaml as yamllib
+
+        from syrviscore import services_d
+        from syrviscore.service_manager import ServiceManager
+
+        home = tmp_path / "syrviscore"
+        (home / "config").mkdir(parents=True)
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+        monkeypatch.setenv("DOMAIN", "example.com")
+        d = services_d.get_declarations_dir(home)
+        d.mkdir(parents=True)
+        (d / "vital.yaml").write_text(
+            yamllib.safe_dump(
+                {"name": "vital", "version": "1", "image": "ghcr.io/a/vital:1.0", "critical": True}
+            )
+        )
+        (d / "napping.yaml").write_text(
+            yamllib.safe_dump(
+                {"name": "napping", "version": "1", "image": "ghcr.io/a/nap:1.0", "enabled": False}
+            )
+        )
+        # unmanaged install (no declaration)
+        sm = ServiceManager(syrvis_home=home)
+        assert sm.add_image("legacy", "ghcr.io/a/legacy:1.0", start=False)[0]
+        services_d.remove_declaration(home, "legacy")
+
+        # docker unreachable for containers -> everything expected is MISSING
+        import docker as docker_sdk
+
+        class _Boom:
+            def __init__(self):
+                self.containers = self
+
+            def get(self, name):
+                raise RuntimeError("no docker in tests")
+
+        monkeypatch.setattr(docker_sdk, "from_env", lambda: _Boom())
+
+        report = verify.gather_l2_drift()
+        by_name = {i.service: i for i in report.items}
+        assert by_name["vital"].critical is True  # declared critical, missing
+        assert by_name["legacy"].critical is False  # unmanaged, watched
+        assert "napping" not in by_name  # declared-off: skipped
 
     def test_remediate_starts_failing_l2_services(self, monkeypatch):
         stub = drift.DriftReport(

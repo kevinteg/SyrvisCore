@@ -185,6 +185,33 @@ def validate_image(image: str, allowed_registries: Optional[list] = None) -> str
     return image
 
 
+_PRUNE_POLICIES = frozenset({"stop", "remove", "purge"})
+
+
+def validate_prune_policy(policy: str) -> str:
+    """Exactly 'stop' | 'remove' | 'purge' — reconcile's undeclared-service policy."""
+    _reject_metachars(policy, "prune policy")
+    if policy not in _PRUNE_POLICIES:
+        raise ValidationError(
+            f"invalid prune policy {policy!r}: must be one of {sorted(_PRUNE_POLICIES)}",
+        )
+    return policy
+
+
+def validate_bool_flag(value: str) -> str:
+    """Exactly 'true' or 'false' — the lowercase rendering of a Python bool.
+
+    The MCP tools take real booleans and render them lowercase before the value
+    reaches this slot validator; anything else (including 'True'/'1') is rejected.
+    """
+    _reject_metachars(value, "boolean flag")
+    if value not in ("true", "false"):
+        raise ValidationError(
+            f"invalid boolean flag {value!r}: must be 'true' or 'false'",
+        )
+    return value
+
+
 def validate_tail(tail: int) -> int:
     """G5 — log tail line count bounds."""
     if not isinstance(tail, int) or isinstance(tail, bool):

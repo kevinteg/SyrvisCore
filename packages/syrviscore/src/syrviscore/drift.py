@@ -49,6 +49,10 @@ class DriftItem:
     kind: DriftKind
     expected: Optional[str] = None
     actual: Optional[str] = None
+    # services.d severity: a critical service's failure makes verify UNHEALTHY;
+    # a non-critical one only DEGRADES it. Core-stack items are always treated
+    # as critical by the caller regardless of this flag.
+    critical: bool = False
 
     @property
     def is_failure(self) -> bool:
@@ -75,6 +79,7 @@ class DriftItem:
             "expected": self.expected,
             "actual": self.actual,
             "failure": self.is_failure,
+            "critical": self.critical,
         }
 
 

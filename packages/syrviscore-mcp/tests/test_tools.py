@@ -134,6 +134,182 @@ class TestServiceAddSecurity:
             tools.service_add(ctx, "https://github.com/u/r.git")
 
 
+RECONCILE_PLAN = {
+    "plan": {"actions": [{"kind": "install", "name": "gollum", "destructive": False}]},
+    "applied": False,
+}
+
+
+class TestReconcile:
+    def test_reconcile_plan_passthrough(self):
+        ctx, runner = make_ctx({"reconcile_plan": RECONCILE_PLAN})
+        out = tools.reconcile_plan(ctx)
+        assert runner.ids() == ["reconcile_plan"]
+        assert out["applied"] is False  # the CLI's JSON passes straight through
+
+    def test_reconcile_passthrough(self):
+        applied = {"plan": RECONCILE_PLAN["plan"], "applied": True, "results": [], "ok": True}
+        ctx, runner = make_ctx({"reconcile": applied})
+        out = tools.reconcile(ctx)
+        assert runner.ids() == ["reconcile"]
+        assert out["ok"] is True and out["applied"] is True
+
+
+class TestReconcilePruneConfirmation:
+    def test_without_confirm_returns_dry_run_plan_no_mutation(self):
+        ctx, runner = make_ctx({"reconcile_plan": RECONCILE_PLAN})
+        out = tools.reconcile_prune(ctx, "remove")
+        assert out["needs_confirmation"] is True
+        assert out["plan"]["prune"] == "remove"
+        assert out["plan"]["plan"] == RECONCILE_PLAN["plan"]  # the dry-run preview
+        assert "confirm_token" in out
+        assert runner.ids() == ["reconcile_plan"]  # only the read-only plan ran
+
+    def test_with_valid_token_executes(self):
+        ctx, runner = make_ctx(
+            {"reconcile_plan": RECONCILE_PLAN, "reconcile_prune": {"ok": True, "applied": True}}
+        )
+        first = tools.reconcile_prune(ctx, "stop")
+        out = tools.reconcile_prune(ctx, "stop", confirm=first["confirm_token"])
+        assert "reconcile_prune" in runner.ids()
+        assert out["applied"] is True
+        prune_call = next(c for c in runner.calls if c["id"] == "reconcile_prune")
+        assert prune_call["tokens"][-2:] == ["--prune", "stop"]
+
+    def test_token_for_other_policy_rejected(self):
+        ctx, runner = make_ctx({"reconcile_plan": RECONCILE_PLAN})
+        first = tools.reconcile_prune(ctx, "stop")
+        with pytest.raises(ConfirmationError):
+            tools.reconcile_prune(ctx, "purge", confirm=first["confirm_token"])
+        assert "reconcile_prune" not in runner.ids()
+
+    def test_token_dies_if_plan_changed_between_calls(self):
+        # TOCTOU: the dry-run plan is bound into the state hash, so a change in
+        # declarations/installs between plan and confirm voids the token.
+        plans = iter([RECONCILE_PLAN, {"plan": {"actions": []}, "applied": False}])
+        ctx, runner = make_ctx({"reconcile_plan": lambda args: next(plans)})
+        first = tools.reconcile_prune(ctx, "remove")
+        with pytest.raises(ConfirmationError):
+            tools.reconcile_prune(ctx, "remove", confirm=first["confirm_token"])
+        assert "reconcile_prune" not in runner.ids()
+
+    def test_invalid_policy_rejected_before_any_ssh(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx()
+        for bad in ("everything", "stop;id", "-y", "Purge"):
+            with pytest.raises(ValidationError):
+                tools.reconcile_prune(ctx, bad)
+        assert runner.ids() == []
+
+
+DECLARE_IMG = "ghcr.io/acme/cyberquill:1.4.0"
+DECLARED = {
+    "ok": True,
+    "name": "cyberquill",
+    "path": "/x/services.d/cyberquill.yaml",
+    "applied": False,
+}
+
+
+def make_declare_ctx(responses=None, registries=("ghcr.io",)):
+    cfg = make_config(image_allowed_registries=list(registries))
+    runner = FakeRunner(cfg, responses or {})
+    ctx = tools.ToolContext(cfg=cfg, runner=runner, secret=b"s", now=lambda: 1000)
+    return ctx, runner
+
+
+class TestServiceDeclare:
+    def test_happy_path_renders_bools_lowercase(self):
+        ctx, runner = make_declare_ctx({"service_declare": DECLARED})
+        out = tools.service_declare(
+            ctx, "cyberquill", DECLARE_IMG, exposure="tunnel", port=8080, critical=True
+        )
+        assert out["applied"] is False  # authoring only; reconcile applies later
+        assert runner.ids() == ["service_declare"]  # no token handshake, no follow-up
+        call = runner.calls[0]
+        assert call["args"]["enabled"] == "true" and call["args"]["critical"] == "true"
+        assert call["args"]["subdomain"] == "cyberquill"  # defaulted from name
+        toks = call["tokens"]
+        assert toks[-2:] == ["--", "cyberquill"]
+        assert toks[toks.index("--enabled") + 1] == "true"
+        assert toks[toks.index("--critical") + 1] == "true"
+
+    def test_image_allowlist_fails_closed(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_declare_ctx(registries=())
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG)
+        assert runner.ids() == []
+
+    def test_wrong_registry_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_declare_ctx()
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", "docker.io/acme/cyberquill:1.4.0")
+        assert runner.ids() == []
+
+    def test_injection_attempts_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_declare_ctx()
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "x;id", DECLARE_IMG)
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG + ";id")
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG, subdomain="Bad_Sub")
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG, exposure="public")
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG, port=0)
+        assert runner.ids() == []
+
+    def test_non_bool_flags_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_declare_ctx()
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG, enabled="yes")
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "cyberquill", DECLARE_IMG, critical=1)
+        assert runner.ids() == []
+
+    def test_reserved_name_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_declare_ctx()
+        with pytest.raises(ValidationError):
+            tools.service_declare(ctx, "traefik", DECLARE_IMG)
+        assert runner.ids() == []
+
+
+class TestServiceAdopt:
+    def test_happy_path_checks_membership_first(self):
+        adopted = {"ok": True, "adopted": [{"name": "gollum", "path": "/x/gollum.yaml"}]}
+        ctx, runner = make_ctx({"service_list": MANAGED, "service_adopt": adopted})
+        out = tools.service_adopt(ctx, "gollum")
+        assert runner.ids() == ["service_list", "service_adopt"]
+        assert out["adopted"][0]["name"] == "gollum"
+        call = next(c for c in runner.calls if c["id"] == "service_adopt")
+        assert call["tokens"][-2:] == ["--", "gollum"]
+
+    def test_reserved_core_name_rejected(self):
+        # core services can't be adopted — RESERVED_NAMES rejection is correct here
+        ctx, runner = make_ctx({"service_list": MANAGED})
+        with pytest.raises(McpError):
+            tools.service_adopt(ctx, "traefik")
+        assert "service_adopt" not in runner.ids()
+
+    def test_unmanaged_service_refused(self):
+        ctx, runner = make_ctx({"service_list": {"services": []}})
+        with pytest.raises(SandboxError):
+            tools.service_adopt(ctx, "gollum")
+        assert "service_adopt" not in runner.ids()
+
+
 class TestPerProcessKey:
     def test_token_from_one_context_fails_in_another(self):
         # F8: each ToolContext salts the secret, so a restart voids tokens

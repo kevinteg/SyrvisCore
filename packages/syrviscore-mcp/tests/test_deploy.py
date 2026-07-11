@@ -85,6 +85,16 @@ DENY = [
     "--subdomain cq --exposure tunnel -- cq",  # missing --port group -> wrong arity
     "sudo -n /volume1/syrviscore/bin/syrvis service run --image ghcr.io/a/b:1.0 "
     "--subdomain Bad_Sub --exposure tunnel --port 80 -- cq",  # subdomain not a DNS label
+    # services.d red-team: bad prune policy, prune without -y, no-sudo variant,
+    # non-lowercase booleans, adopt without --json (off allowlist)
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json -y --prune everything",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json --prune purge",
+    "/volume1/syrviscore/bin/syrvis reconcile --json -y",  # missing sudo -> wrong shape
+    "sudo -n /volume1/syrviscore/bin/syrvis service declare --image ghcr.io/a/b:1.0 "
+    "--subdomain cq --exposure tunnel --port 80 --enabled TRUE --critical false --json -- cq",
+    "sudo -n /volume1/syrviscore/bin/syrvis service declare --image ghcr.io/a/b:1.0 "
+    "--subdomain cq --exposure tunnel --port 80 --enabled true --critical 1 --json -- cq",
+    "sudo -n /volume1/syrviscore/bin/syrvis service adopt -- gollum",
 ]
 
 ALLOW = [
@@ -102,6 +112,14 @@ ALLOW = [
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep 2 -y",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore",
     "sudo -n /var/packages/syrviscore/target/venv/bin/syrvisctl install -y --path /volume1/syrviscore -- 0.2.0",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --dry-run --json",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json -y",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json -y --prune stop",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json -y --prune purge",
+    "sudo -n /volume1/syrviscore/bin/syrvis service declare "
+    "--image ghcr.io/acme/cyberquill:1.4.0 --subdomain cyberquill "
+    "--exposure tunnel --port 8080 --enabled true --critical false --json -- cyberquill",
+    "sudo -n /volume1/syrviscore/bin/syrvis service adopt --json -- gollum",
 ]
 
 

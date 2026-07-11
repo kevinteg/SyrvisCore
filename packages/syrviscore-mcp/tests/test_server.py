@@ -20,17 +20,21 @@ EXPECTED_TOOLS = {
     "info",
     "backup_list",
     "cleanup_preview",
+    "reconcile_plan",
     # privileged, non-destructive
     "start",
     "stop",
     "restart",
     "verify_fix",
     "stack_apply",
+    "reconcile",
     "service_start",
     "service_stop",
     "service_update",
     "service_add",
     "service_run",
+    "service_declare",
+    "service_adopt",
     "install",
     # privileged + destructive
     "activate",
@@ -38,9 +42,10 @@ EXPECTED_TOOLS = {
     "uninstall",
     "cleanup",
     "service_remove",
+    "reconcile_prune",
 }
 
-DESTRUCTIVE = {"activate", "rollback", "uninstall", "cleanup", "service_remove"}
+DESTRUCTIVE = {"activate", "rollback", "uninstall", "cleanup", "service_remove", "reconcile_prune"}
 READ_ONLY = {
     "status",
     "verify",
@@ -52,7 +57,9 @@ READ_ONLY = {
     "info",
     "backup_list",
     "cleanup_preview",
+    "reconcile_plan",
 }
+IDEMPOTENT = {"reconcile", "service_declare", "service_adopt"}
 
 
 def _tools():
@@ -66,7 +73,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 26
+    assert len(EXPECTED_TOOLS) == 31
 
 
 def test_destructive_tools_have_destructive_hint():
@@ -81,3 +88,11 @@ def test_read_only_tools_have_readonly_hint():
     for name in READ_ONLY:
         ann = getattr(tools[name], "annotations", None)
         assert ann is not None and getattr(ann, "readOnlyHint", None), name
+
+
+def test_services_d_idempotent_tools_have_idempotent_hint():
+    tools = _tools()
+    for name in IDEMPOTENT:
+        ann = getattr(tools[name], "annotations", None)
+        assert ann is not None and getattr(ann, "idempotentHint", None), name
+        assert not getattr(ann, "destructiveHint", None), name

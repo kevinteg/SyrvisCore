@@ -263,6 +263,43 @@ syrvis --help
 syrvis status --help
 ```
 
+## Layer 2 services & declarative loading
+
+The `service` group manages user-installed containers; `reconcile` converges the
+instance to the declarations in `config/services.d/` (one validated
+`syrvis-service.yaml` per file — see docs/wiki/05-layer2-services.md and
+docs/service-loading-design.md).
+
+```bash
+# Imperative (each of these also authors the services.d declaration):
+syrvis service run gollum                         # from the catalog
+syrvis service run app --image ghcr.io/o/app:1.0  # image-first
+syrvis service add https://github.com/o/repo.git  # git manifest
+syrvis service list [--json]
+syrvis service start|stop|update|remove NAME      # stop/start flip `enabled`
+syrvis service catalog [--json]                   # vetted templates
+
+# Declarative:
+syrvis service declare NAME --image IMG [--subdomain S] [--exposure internal|tunnel]
+                     [--port N] [--enabled BOOL] [--critical BOOL] [--json]
+                                                  # author intent only — applies nothing
+syrvis service adopt NAME | --all [--json]        # existing install -> declaration
+sudo syrvis reconcile [--dry-run] [--json] [--strict]
+                      [--prune stop|remove|purge] [-y]
+                                                  # converge to services.d
+```
+
+Reconcile semantics: every declaration file loads independently (a broken file
+marks only itself invalid — but any invalid file fails the run, since corrupted
+intent must never pass silently); every service converges independently; only a
+`critical: true` service's failure (or `--strict`) is otherwise fatal. Installed
+services with no declaration are reported `unmanaged` and never touched without
+an explicit `--prune`. The boot hook runs `reconcile --boot` (always exit 0,
+never prunes) after waiting for the Docker daemon.
+
+`syrvis verify` honors the same severity: a failing critical service is
+UNHEALTHY (exit 1); non-critical failures report DEGRADED (exit 0).
+
 ## Services
 
 The following services are managed by `syrvis`:

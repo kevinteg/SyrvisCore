@@ -432,3 +432,74 @@ class TestOrchestrationBoundary:
 
         assert sm.stop("app")[0]  # real flip -> rewritten (normalized)
         assert yaml.safe_load(path.read_text())["enabled"] is False
+
+
+class TestServiceDeclareCli:
+    def test_declare_writes_without_applying(self, home):
+        result = CliRunner().invoke(
+            cli,
+            [
+                "service",
+                "declare",
+                "wiki",
+                "--image",
+                "ghcr.io/a/wiki:1.0",
+                "--subdomain",
+                "notes",
+                "--exposure",
+                "tunnel",
+                "--port",
+                "4567",
+                "--critical",
+                "true",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        body = json.loads(result.output)
+        assert body["ok"] is True and body["applied"] is False
+
+        decl = yaml.safe_load(services_d.declaration_path(home, "wiki").read_text())
+        assert decl["image"] == "ghcr.io/a/wiki:1.0"
+        assert decl["traefik"]["subdomain"] == "notes"
+        assert decl["traefik"]["exposure"] == "tunnel"
+        assert decl["critical"] is True
+        # nothing installed/started
+        assert not (home / "services" / "wiki").exists()
+        assert not (home / "compose" / "wiki.yaml").exists()
+
+    def test_declare_validates_through_trust_boundary(self, home):
+        result = CliRunner().invoke(
+            cli,
+            ["service", "declare", "bad", "--image", "nginx:latest", "--json"],
+        )
+        assert result.exit_code == 1
+        assert "error" in json.loads(result.output)
+        assert not services_d.declaration_path(home, "bad").exists()
+
+    def test_declare_updates_existing_declaration(self, home):
+        for image in ("ghcr.io/a/app:1.0", "ghcr.io/a/app:2.0"):
+            result = CliRunner().invoke(cli, ["service", "declare", "app", "--image", image])
+            assert result.exit_code == 0, result.output
+        decl = yaml.safe_load(services_d.declaration_path(home, "app").read_text())
+        assert decl["image"] == "ghcr.io/a/app:2.0"
+
+    def test_declare_then_reconcile_installs(self, home, monkeypatch):
+        assert (
+            CliRunner()
+            .invoke(cli, ["service", "declare", "app", "--image", "ghcr.io/a/app:1.0"])
+            .exit_code
+            == 0
+        )
+        installed = []
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, name: "unknown")
+        monkeypatch.setattr(
+            ServiceManager,
+            "install_declaration",
+            lambda self, service, start=True, preserve_data_on_rollback=False: (
+                installed.append(service.name) or (True, "installed")
+            ),
+        )
+        result = CliRunner().invoke(cli, ["reconcile", "--json"])
+        assert result.exit_code == 0, result.output
+        assert installed == ["app"]

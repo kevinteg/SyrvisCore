@@ -3,6 +3,7 @@
 import pytest
 
 from syrviscore_mcp import remote
+from syrviscore_mcp.commands import DESTRUCTIVE_IDS, get_command
 from syrviscore_mcp.errors import (
     AuthError,
     CliError,
@@ -76,3 +77,40 @@ def test_non_json_command_ok():
 def test_non_json_command_failure_is_cli_error():
     with pytest.raises(CliError):
         remote.classify(R(1, err="boom"), expect_json=False)
+
+
+class TestServicesDCommandClassification:
+    """The services.d registry entries carry the right read/privileged/destructive flags."""
+
+    def test_reconcile_plan_readonly_over_sudo_seam(self):
+        # dry-run is side-effect-free by construction; sudo is only for the
+        # 0600 declaration files, so it is read-only but still privileged.
+        cmd = get_command("reconcile_plan")
+        assert cmd.sudo and cmd.read_only and not cmd.destructive
+        assert cmd.expect_json
+
+    def test_reconcile_privileged_non_destructive(self):
+        # without --prune, reconcile never removes anything (like verify_fix)
+        cmd = get_command("reconcile")
+        assert cmd.sudo and not cmd.read_only and not cmd.destructive
+        assert cmd.expect_json
+
+    def test_reconcile_prune_destructive(self):
+        cmd = get_command("reconcile_prune")
+        assert cmd.sudo and cmd.destructive
+        assert "reconcile_prune" in DESTRUCTIVE_IDS
+
+    def test_service_declare_privileged_non_destructive(self):
+        # authors intent only; reconcile applies later
+        cmd = get_command("service_declare")
+        assert cmd.sudo and not cmd.read_only and not cmd.destructive
+        assert cmd.expect_json
+
+    def test_service_adopt_privileged_non_destructive(self):
+        cmd = get_command("service_adopt")
+        assert cmd.sudo and not cmd.read_only and not cmd.destructive
+        assert cmd.expect_json
+
+    def test_non_prune_reconcile_commands_not_destructive(self):
+        assert "reconcile" not in DESTRUCTIVE_IDS
+        assert "reconcile_plan" not in DESTRUCTIVE_IDS
