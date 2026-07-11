@@ -40,9 +40,12 @@ async def test_traefik_ok(settings):
     assert result.extra["router_names"] == ["portainer@docker"]
 
 
-async def test_traefik_down_on_connect_error(settings):
+async def test_traefik_down_when_nothing_answers(settings):
     with respx.mock:
         respx.get("http://traefik:8080/ping").mock(side_effect=httpx.ConnectError("refused"))
+        respx.get("http://traefik:8080/api/overview").mock(
+            side_effect=httpx.ConnectError("refused")
+        )
         async with httpx.AsyncClient() as http:
             result = await probe_traefik(settings, http)
     assert result.status == Status.DOWN
@@ -52,10 +55,28 @@ async def test_traefik_degraded_when_api_fails(settings):
     with respx.mock:
         respx.get("http://traefik:8080/ping").mock(return_value=httpx.Response(200, text="OK"))
         respx.get("http://traefik:8080/api/overview").mock(return_value=httpx.Response(500))
-        respx.get("http://traefik:8080/api/http/routers").mock(return_value=httpx.Response(500))
         async with httpx.AsyncClient() as http:
             result = await probe_traefik(settings, http)
     assert result.status == Status.DEGRADED
+
+
+async def test_traefik_degraded_when_ping_absent_but_api_up(settings):
+    # The prod case: :8080 answers, but /ping isn't enabled (404). Traefik is up.
+    with respx.mock:
+        respx.get("http://traefik:8080/ping").mock(return_value=httpx.Response(404))
+        respx.get("http://traefik:8080/api/overview").mock(
+            return_value=httpx.Response(
+                200, json={"http": {"routers": {"total": 2}}, "features": {}}
+            )
+        )
+        respx.get("http://traefik:8080/api/http/routers").mock(
+            return_value=httpx.Response(200, json=[{"name": "portainer@docker"}])
+        )
+        async with httpx.AsyncClient() as http:
+            result = await probe_traefik(settings, http)
+    assert result.status == Status.DEGRADED
+    assert "up (API reachable)" in result.detail
+    assert result.extra["router_names"] == ["portainer@docker"]
 
 
 # --- portainer -------------------------------------------------------------
