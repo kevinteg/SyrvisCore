@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Wifi, WifiOff } from "lucide-react";
-import { getMe, type Overall } from "../lib/api";
+import { Activity, ArrowUpCircle, Wifi, WifiOff } from "lucide-react";
+import { getMe, getUpdates, type Overall } from "../lib/api";
 import { StatusPill } from "./StatusPill";
 
 export interface Tab {
@@ -22,6 +22,11 @@ export function Header({
   setTab: (id: string) => void;
 }) {
   const { data: me } = useQuery({ queryKey: ["me"], queryFn: getMe });
+  const { data: upd } = useQuery({
+    queryKey: ["updates"],
+    queryFn: getUpdates,
+    staleTime: 3_600_000,
+  });
 
   return (
     <header className="sticky top-0 z-10 border-b border-base-700 bg-base-900/80 backdrop-blur">
@@ -36,6 +41,17 @@ export function Header({
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {upd?.update_available && (
+            <a
+              href="https://github.com/kevinteg/SyrvisCore/releases"
+              target="_blank"
+              rel="noreferrer"
+              title={`SyrvisCore ${upd.latest} available — you're on ${upd.current}`}
+              className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-1 text-xs font-medium text-amber-300 transition hover:bg-amber-500/25"
+            >
+              <ArrowUpCircle size={13} /> {upd.latest}
+            </a>
+          )}
           {overall && <StatusPill status={overall} />}
           <span title={live ? "live (SSE)" : "polling"}>
             {live ? (

@@ -115,3 +115,24 @@ export const addService = (source: string, start: boolean) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ source, start }),
   });
+
+export interface LinkItem {
+  name: string;
+  url: string;
+  description?: string;
+  category: string;
+}
+export interface LinksResponse {
+  domain: string | null;
+  links: LinkItem[];
+}
+export interface Updates {
+  current: string | null;
+  latest: string | null;
+  update_available: boolean;
+  dashboard_version?: string;
+  error?: string;
+}
+
+export const getLinks = () => api<LinksResponse>("/api/links");
+export const getUpdates = () => api<Updates>("/api/updates");
