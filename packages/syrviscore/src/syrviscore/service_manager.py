@@ -807,29 +807,8 @@ class ServiceManager:
 
             try:
                 service = load_service_definition(yaml_path)
-                # Inspect by container_name — it defaults to the service name but
-                # a manifest may override it, and the container is what has status.
-                status = self._get_service_status(service.container_name or service.name)
-                url = ""
-                if service.traefik.enabled and service.traefik.subdomain:
-                    try:
-                        domain = get_domain_from_env()
-                        url = f"https://{service.traefik.subdomain}.{domain}"
-                    except ValueError:
-                        pass
-
-                services.append(
-                    {
-                        "name": service.name,
-                        "version": service.version,
-                        "status": status,
-                        "url": url,
-                        "description": service.description,
-                        "subdomain": service.traefik.subdomain if service.traefik.enabled else "",
-                        "exposure": (service.traefik.exposure if service.traefik.enabled else None),
-                    }
-                )
             except Exception:
+                # Only a genuine manifest-load failure is "error".
                 services.append(
                     {
                         "name": service_dir.name,
@@ -839,6 +818,35 @@ class ServiceManager:
                         "description": "Failed to load service definition",
                     }
                 )
+                continue
+
+            # Manifest loaded — status + URL are best-effort. The unprivileged
+            # operator may not reach the docker daemon or read the 0600 .env
+            # (for DOMAIN); neither should turn a loadable service into an error.
+            try:
+                # Inspect by container_name — it defaults to the service name but
+                # a manifest may override it, and the container is what has status.
+                status = self._get_service_status(service.container_name or service.name)
+            except Exception:
+                status = "unknown"
+            url = ""
+            if service.traefik.enabled and service.traefik.subdomain:
+                try:
+                    url = f"https://{service.traefik.subdomain}.{get_domain_from_env()}"
+                except (ValueError, OSError):
+                    pass
+
+            services.append(
+                {
+                    "name": service.name,
+                    "version": service.version,
+                    "status": status,
+                    "url": url,
+                    "description": service.description,
+                    "subdomain": service.traefik.subdomain if service.traefik.enabled else "",
+                    "exposure": (service.traefik.exposure if service.traefik.enabled else None),
+                }
+            )
 
         return services
 

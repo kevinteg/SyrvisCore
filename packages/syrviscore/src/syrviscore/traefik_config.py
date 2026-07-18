@@ -522,12 +522,18 @@ def get_domain_from_env() -> str:
         if syrvis_home:
             env_file = Path(syrvis_home) / "config" / ".env"
             if env_file.exists():
-                with open(env_file, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("DOMAIN="):
-                            domain = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
+                try:
+                    with open(env_file, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line.startswith("DOMAIN="):
+                                domain = line.split("=", 1)[1].strip().strip('"').strip("'")
+                                break
+                except OSError:
+                    # The unprivileged operator can't read the 0600 .env; DOMAIN
+                    # is only needed for an optional URL. Fall through to the
+                    # ValueError below (the documented contract callers handle).
+                    pass
 
     if not domain:
         raise ValueError("DOMAIN environment variable not set")

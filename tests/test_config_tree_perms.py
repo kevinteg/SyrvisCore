@@ -43,6 +43,28 @@ def test_config_tree_made_group_readable_env_untouched(tmp_path, monkeypatch):
     assert not (env.stat().st_mode & 0o040)
 
 
+def test_get_domain_from_env_tolerates_unreadable_env(tmp_path, monkeypatch):
+    """The operator can't read the 0600 .env; get_domain_from_env must raise the
+    documented ValueError, NOT leak PermissionError (which service_list would
+    turn into "Failed to load service definition")."""
+    import pytest
+
+    from syrviscore import traefik_config
+
+    monkeypatch.delenv("DOMAIN", raising=False)
+    home = tmp_path / "syrviscore"
+    (home / "config").mkdir(parents=True)
+    env = home / "config" / ".env"
+    env.write_text("DOMAIN=konsume.org\n")
+    env.chmod(0o000)  # unreadable by the (non-root) test/operator user
+    monkeypatch.setenv("SYRVIS_HOME", str(home))
+    try:
+        with pytest.raises(ValueError):
+            traefik_config.get_domain_from_env()
+    finally:
+        env.chmod(0o600)  # let tmp teardown remove it
+
+
 def test_remediation_dispatch_wired(tmp_path, monkeypatch):
     """config_tree_perms must route to ensure_config_tree_readable, not fall to
     the "no fix wired up" default (the H3-style dispatch-drift regression)."""
