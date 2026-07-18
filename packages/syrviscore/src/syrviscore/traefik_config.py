@@ -73,6 +73,14 @@ SYNOLOGY_SERVICES = {
         "description": "Video Station",
         "env_enabled": "SYNOLOGY_VIDEO_ENABLED",
     },
+    "webdav": {
+        "subdomain": "files",
+        "port": 5006,
+        "protocol": "https",
+        "label": "WebDAV",
+        "description": "WebDAV (Synology WebDAV Server — file access, e.g. iOS Files)",
+        "env_enabled": "SYNOLOGY_WEBDAV_ENABLED",
+    },
 }
 
 # The primordial core UIs Traefik always routes, at fixed subdomains — the

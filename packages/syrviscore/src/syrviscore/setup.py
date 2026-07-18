@@ -148,6 +148,8 @@ def load_existing_config() -> dict:
                 value = value.strip()
 
                 # Map .env keys to config keys
+                # TODO: derive from SYNOLOGY_SERVICES for full DRY (currently only
+                # dsm+photos are prompted during setup; others are operator-set).
                 key_map = {
                     "DOMAIN": "domain",
                     "ACME_EMAIL": "email",
@@ -160,6 +162,7 @@ def load_existing_config() -> dict:
                     "CLOUDFLARE_TUNNEL_TOKEN": "cloudflare_token",
                     "SYNOLOGY_DSM_ENABLED": "synology_dsm",
                     "SYNOLOGY_PHOTOS_ENABLED": "synology_photos",
+                    "SYNOLOGY_WEBDAV_ENABLED": "synology_webdav",
                 }
 
                 if key in key_map and value:
@@ -468,8 +471,13 @@ SHIM_IP={config.get('shim_ip', '')}
 NAS_IP={config.get('nas_ip', '')}
 
 # Synology Services (proxy through Traefik)
+# TODO: derive from SYNOLOGY_SERVICES catalog for full DRY once all services are interactively prompted.
 SYNOLOGY_DSM_ENABLED={str(config.get('synology_dsm', False)).lower()}
 SYNOLOGY_PHOTOS_ENABLED={str(config.get('synology_photos', False)).lower()}
+SYNOLOGY_DRIVE_ENABLED={str(config.get('synology_drive', False)).lower()}
+SYNOLOGY_AUDIO_ENABLED={str(config.get('synology_audio', False)).lower()}
+SYNOLOGY_VIDEO_ENABLED={str(config.get('synology_video', False)).lower()}
+SYNOLOGY_WEBDAV_ENABLED={str(config.get('synology_webdav', False)).lower()}
 
 # Domain & SSL
 DOMAIN={config['domain']}
@@ -889,6 +897,7 @@ def setup(non_interactive, skip_start, domain, email, traefik_ip):
             "nas_ip": defaults.get("nas_ip", ""),
             "synology_dsm": defaults.get("synology_dsm", True),
             "synology_photos": defaults.get("synology_photos", False),
+            "synology_webdav": defaults.get("synology_webdav", False),
             "cloudflare_token": defaults.get("cloudflare_token", ""),
         }
         display_configuration(config)

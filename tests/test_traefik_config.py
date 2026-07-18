@@ -8,6 +8,7 @@ from unittest.mock import patch
 import yaml
 
 from syrviscore.traefik_config import (
+    SYNOLOGY_SERVICES,
     generate_traefik_dynamic_config,
     generate_traefik_static_config,
 )
@@ -180,6 +181,56 @@ class TestDynamicConfig:
 
             dashboard_rule = parsed["http"]["routers"]["dashboard"]["rule"]
             assert "example.com" in dashboard_rule
+
+
+class TestSynologyCatalog:
+    """Tests that verify the SYNOLOGY_SERVICES catalog and route generation."""
+
+    def test_webdav_in_catalog(self):
+        """WebDAV service must be present in the SYNOLOGY_SERVICES catalog."""
+        assert "webdav" in SYNOLOGY_SERVICES
+        webdav = SYNOLOGY_SERVICES["webdav"]
+        assert webdav["subdomain"] == "files"
+        assert webdav["port"] == 5006
+        assert webdav["protocol"] == "https"
+        assert webdav["env_enabled"] == "SYNOLOGY_WEBDAV_ENABLED"
+
+    def test_webdav_route_generated_when_enabled(self):
+        """Enabling SYNOLOGY_WEBDAV_ENABLED produces router + service entries."""
+        env = {
+            "DOMAIN": "example.com",
+            "SHIM_IP": "192.168.1.101",
+            "SYNOLOGY_WEBDAV_ENABLED": "true",
+        }
+        with patch.dict(os.environ, env):
+            config = generate_traefik_dynamic_config()
+            parsed = yaml.safe_load(config)
+
+        routers = parsed["http"]["routers"]
+        services = parsed["http"].get("services", {})
+
+        assert "synology-webdav" in routers
+        assert routers["synology-webdav"]["rule"] == "Host(`files.example.com`)"
+        assert "synology-webdav-secure" in routers
+        assert routers["synology-webdav-secure"]["tls"]["certResolver"] == "letsencrypt"
+        assert "synology-webdav" in services
+        assert "192.168.1.101:5006" in services["synology-webdav"]["loadBalancer"]["servers"][0]["url"]
+        assert services["synology-webdav"]["loadBalancer"]["serversTransport"] == "insecure-skip-verify@file"
+
+    def test_webdav_disabled_by_default(self):
+        """WebDAV is absent when SYNOLOGY_WEBDAV_ENABLED is not set."""
+        env = {
+            "DOMAIN": "example.com",
+            "SHIM_IP": "192.168.1.101",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            # Ensure the var is absent
+            os.environ.pop("SYNOLOGY_WEBDAV_ENABLED", None)
+            config = generate_traefik_dynamic_config()
+            parsed = yaml.safe_load(config)
+
+        routers = parsed["http"]["routers"]
+        assert "synology-webdav" not in routers
 
 
 class TestConfigIntegration:

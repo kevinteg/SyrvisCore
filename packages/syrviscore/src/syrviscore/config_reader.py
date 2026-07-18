@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from . import paths, validators
+from .traefik_config import SYNOLOGY_SERVICES
 
 # Substrings that mark a key's *value* as secret (superset of the CLI's historical
 # TOKEN/SECRET/PASSWORD masking — adds KEY so e.g. private keys are covered too).
@@ -30,12 +31,11 @@ _TOKEN_COMPONENTS = {
 }
 
 # Optional components enabled by a boolean-style key being truthy.
+# Synology entries are derived from the SYNOLOGY_SERVICES catalog in traefik_config so
+# adding a new passthrough service there automatically surfaces it here.
 _BOOL_COMPONENTS = {
-    "synology_dsm": "SYNOLOGY_DSM_ENABLED",
-    "synology_photos": "SYNOLOGY_PHOTOS_ENABLED",
-    "synology_drive": "SYNOLOGY_DRIVE_ENABLED",
-    "synology_audio": "SYNOLOGY_AUDIO_ENABLED",
-    "synology_video": "SYNOLOGY_VIDEO_ENABLED",
+    "synology_{}".format(key): conf["env_enabled"]
+    for key, conf in SYNOLOGY_SERVICES.items()
 }
 
 _TRUTHY = ("true", "1", "yes", "on")

@@ -1,6 +1,7 @@
 """Tests for the shared structured config reader (config_reader.read_config)."""
 
-from syrviscore.config_reader import RedactedConfig, is_secret_key, read_config
+from syrviscore.config_reader import RedactedConfig, _BOOL_COMPONENTS, is_secret_key, read_config
+from syrviscore.traefik_config import SYNOLOGY_SERVICES
 
 
 def _write_env(tmp_path, body):
@@ -75,3 +76,26 @@ def test_missing_env_file_yields_empty(tmp_path):
     assert cfg.values == {}
     assert cfg.domain == ""
     assert cfg.enabled_components["cloudflared"] is False
+
+
+def test_bool_components_derived_from_catalog():
+    """_BOOL_COMPONENTS must include every service in SYNOLOGY_SERVICES (catalog-derived)."""
+    for key, conf in SYNOLOGY_SERVICES.items():
+        component_name = "synology_{}".format(key)
+        assert component_name in _BOOL_COMPONENTS, (
+            "{} missing from _BOOL_COMPONENTS; add it to SYNOLOGY_SERVICES catalog".format(
+                component_name
+            )
+        )
+        assert _BOOL_COMPONENTS[component_name] == conf["env_enabled"]
+
+
+def test_synology_webdav_derived_from_catalog(tmp_path):
+    """synology_webdav enabled_component is read from SYNOLOGY_WEBDAV_ENABLED env var."""
+    env = _write_env(tmp_path, "SYNOLOGY_WEBDAV_ENABLED=true\n")
+    cfg = read_config(env_path=env)
+    assert cfg.enabled_components["synology_webdav"] is True
+
+    env_off = _write_env(tmp_path, "SYNOLOGY_WEBDAV_ENABLED=false\n")
+    cfg_off = read_config(env_path=env_off)
+    assert cfg_off.enabled_components["synology_webdav"] is False

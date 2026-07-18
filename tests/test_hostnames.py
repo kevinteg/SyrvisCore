@@ -84,6 +84,31 @@ def test_layer2_service_included(home, monkeypatch):
     assert cq["record"]["type"] == "CNAME"
 
 
+def test_synology_webdav_in_report(home):
+    """Enabling SYNOLOGY_WEBDAV_ENABLED produces a files.<domain> internal A-record entry."""
+    _write_env(
+        home,
+        "DOMAIN=example.com\nTRAEFIK_IP=192.168.1.100\n"
+        "SYNOLOGY_WEBDAV_ENABLED=true\n",
+    )
+    entries = _by_service(hostnames.build_report())
+    assert "synology_webdav" in entries, "synology_webdav should appear when SYNOLOGY_WEBDAV_ENABLED=true"
+    webdav = entries["synology_webdav"]
+    assert webdav["hostname"] == "files.example.com"
+    assert webdav["subdomain"] == "files"
+    assert webdav["kind"] == "synology"
+    assert webdav["exposure"] == "internal"
+    assert webdav["record"]["type"] == "A"
+    assert webdav["record"]["target"] == "192.168.1.100"
+
+
+def test_synology_webdav_absent_when_disabled(home):
+    """When SYNOLOGY_WEBDAV_ENABLED is not set, synology_webdav must be absent."""
+    _write_env(home, "DOMAIN=example.com\nTRAEFIK_IP=192.168.1.100\n")
+    entries = _by_service(hostnames.build_report())
+    assert "synology_webdav" not in entries
+
+
 def test_missing_config_degrades_gracefully(tmp_path, monkeypatch):
     # No SYRVIS_HOME resolvable -> empty report with an error, never an exception.
     monkeypatch.delenv("SYRVIS_HOME", raising=False)
