@@ -54,21 +54,26 @@ TAG="v${VERSION}"
 log_info "Version: $VERSION"
 log_info "Tag: $TAG"
 
-# Check if service wheel exists
-WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore-[0-9]*.whl 2>/dev/null | head -1)
+# The wheel MUST match THIS release's version. Never reuse whatever wheel happens
+# to be in dist/ (a stale wheel from a prior version would ship old code under the
+# new tag — the 0.3.10-shipped-0.3.9 bug). Pin the filename to $VERSION and rebuild
+# if it isn't already present (build-service.sh cleans old wheels first).
+EXPECTED_WHEEL="$PROJECT_ROOT/dist/syrviscore-${VERSION}-py3-none-any.whl"
 
-if [ -z "$WHEEL_FILE" ]; then
-    log_warn "Service wheel not found, building..."
+if [ ! -f "$EXPECTED_WHEEL" ]; then
+    log_info "Wheel for ${VERSION} not in dist/, building..."
     "$SCRIPT_DIR/build-service.sh"
-    WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore-[0-9]*.whl 2>/dev/null | head -1)
 fi
 
-if [ -z "$WHEEL_FILE" ]; then
-    log_error "Failed to find or build service wheel"
+if [ ! -f "$EXPECTED_WHEEL" ]; then
+    log_error "Expected wheel not found after build: $(basename "$EXPECTED_WHEEL")"
+    log_error "build-service.sh must produce syrviscore-${VERSION}-py3-none-any.whl in dist/"
+    log_error "(check its 'python -m build' — pyenv/venv must have the 'build' module)"
     exit 1
 fi
 
-log_info "Wheel: $(basename "$WHEEL_FILE")"
+WHEEL_FILE="$EXPECTED_WHEEL"
+log_info "Wheel: $(basename "$WHEEL_FILE") (version-pinned to $VERSION)"
 
 # Check for config.yaml
 CONFIG_FILE="$PROJECT_ROOT/build/config.yaml"

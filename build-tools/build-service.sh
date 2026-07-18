@@ -57,6 +57,14 @@ rm -f "$PROJECT_ROOT/dist"/syrviscore-[0-9]*.whl
 log_info "Building service wheel"
 cd "$SERVICE_DIR"
 
+# Fail loudly if the 'build' backend is missing, rather than letting a bare
+# `python -m build` dump pyenv versions and exit unclearly.
+if ! python -m build --version >/dev/null 2>&1; then
+    log_error "'python -m build' is unavailable in this Python."
+    log_error "Activate the build venv/pyenv env, or: python -m pip install build"
+    exit 1
+fi
+
 python -m build --wheel --outdir "$PROJECT_ROOT/dist"
 
 # Find the wheel
