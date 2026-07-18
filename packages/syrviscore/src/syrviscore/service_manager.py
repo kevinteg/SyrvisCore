@@ -431,15 +431,29 @@ class ServiceManager:
         )
 
     def _write_manifest(self, service: ServiceDefinition, service_path: Path) -> None:
-        """Persist the effective manifest; 0600 when it carries inline env entries.
+        """Persist the effective manifest, readable by the operator.
 
         Orchestration keys (enabled/critical) are STRIPPED: the manifest
         describes the container, orchestration lives only in services.d — and
         older service versions (rollback targets) must keep parsing manifests.
+
+        Readability: a reconcile runs as root, so a manifest carrying inline env
+        that dump_definition writes 0600 lands ``root:root`` and locks the
+        operator out of ``service list`` ("Failed to load service definition").
+        Give it the shared group that owns the config tree + 0640 (0644 without
+        inline env) so the operator can read it while inline env stays off
+        world-read. Best-effort: a non-root/edge context keeps the plain mode.
         """
         from .service_schema import dump_definition
 
-        dump_definition(service, service_path / "syrvis-service.yaml", include_orchestration=False)
+        manifest = service_path / "syrvis-service.yaml"
+        dump_definition(service, manifest, include_orchestration=False)
+        try:
+            shared_gid = (self.syrvis_home / "config" / "services.d").stat().st_gid
+            os.chown(manifest, -1, shared_gid)  # keep owner; a root reconcile can set the group
+            manifest.chmod(0o640 if service.environment else 0o644)
+        except OSError:
+            pass
 
     def _install_from_definition(
         self,
