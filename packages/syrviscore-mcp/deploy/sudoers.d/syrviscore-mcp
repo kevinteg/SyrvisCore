@@ -6,6 +6,7 @@
 Defaults:syrvis-operator  !requiretty, env_reset, secure_path="/usr/bin:/bin:/usr/local/bin"
 
 syrvis-operator ALL=(root) NOPASSWD: \
+    /volume1/syrviscore/bin/syrvis schedule list --json, \
     /volume1/syrviscore/bin/syrvis reconcile --dry-run --json, \
     /volume1/syrviscore/bin/syrvis reconcile --json -y, \
     /volume1/syrviscore/bin/syrvis start, \
@@ -29,4 +30,6 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /var/packages/syrviscore/target/venv/bin/syrvisctl rollback -y, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl uninstall -y -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep * -y, \
-    /volume1/syrviscore/bin/syrvis service remove -y -- *
+    /volume1/syrviscore/bin/syrvis service remove -y -- *, \
+    /volume1/syrviscore/bin/syrvis schedule apply --json, \
+    /volume1/syrviscore/bin/syrvis schedule sync --json

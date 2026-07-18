@@ -1047,6 +1047,58 @@ class SystemValidator:
             fix_action="config_tree_perms",
         )
 
+    def check_schedule_block(self) -> CheckResult:
+        """The managed /etc/crontab block must match config/jobs.d.
+
+        DSM regenerates /etc/crontab on UI task edits and can drop SyrvisCore's
+        delimited block; this flags that drift as a fixable issue (verify --fix
+        re-applies via schedule_block). OPTIONAL by construction: with NO declared
+        jobs the desired block is empty and this always passes — the feature stays
+        dormant and invisible until the operator declares a job.
+        """
+        if not self.install_dir:
+            return CheckResult(
+                name="Schedule block", passed=False,
+                message="Cannot check - install dir unknown",
+            )
+        try:
+            from . import jobs_d, schedule as _schedule
+
+            declarations, invalid = jobs_d.load_job_declarations(self.install_dir)
+            if not declarations and not invalid:
+                # Dormant: nothing declared -> feature invisible, always healthy.
+                return CheckResult(
+                    name="Schedule block", passed=True, message="No scheduled jobs declared"
+                )
+            plan = _schedule.compute_plan(self.install_dir)
+        except Exception as e:  # noqa: BLE001 - never let a jobs.d issue crash verify
+            return CheckResult(
+                name="Schedule block", passed=False,
+                message="Could not evaluate jobs.d: {}".format(e),
+            )
+
+        if invalid:
+            return CheckResult(
+                name="Schedule block", passed=False,
+                message="{} invalid job declaration(s)".format(len(invalid)),
+                details="; ".join("{}: {}".format(r["file"], r["error"]) for r in invalid[:3]),
+            )
+        if not plan.get("changed"):
+            return CheckResult(
+                name="Schedule block", passed=True,
+                message="managed crontab block in sync with jobs.d",
+            )
+        return CheckResult(
+            name="Schedule block",
+            passed=False,
+            message="managed crontab block drifted from jobs.d ({} action(s))".format(
+                plan["summary"]["total_actions"]
+            ),
+            details="DSM may have regenerated /etc/crontab; verify --fix re-applies the block",
+            fixable=True,
+            fix_action="schedule_block",
+        )
+
     def validate(self) -> ValidationReport:
         """Run all system integration checks."""
         report = ValidationReport(category="System Integration")
@@ -1056,6 +1108,7 @@ class SystemValidator:
             report.checks.append(self.check_startup_script())
             report.checks.append(self.check_boot_script())
             report.checks.append(self.check_config_tree_readable())
+            report.checks.append(self.check_schedule_block())
 
         return report
 

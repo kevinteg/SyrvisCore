@@ -212,6 +212,35 @@ def validate_bool_flag(value: str) -> str:
     return value
 
 
+_CRON_FIELD_CHARS = frozenset("0123456789*/,-")
+
+
+def validate_cron_spec(spec: str) -> str:
+    """A cron spec: exactly 5 whitespace-separated fields, each drawn from
+    ``[0-9*/,-]`` only.
+
+    Defense in depth for scheduled jobs. The cron spec MUST NOT travel over the
+    MCP seam as an argv token — its ``*``/``,``/``?`` would be rejected by the
+    forced-command shim's char-allowlist anyway. The schedule lives only in
+    ``jobs.d/<name>.yaml`` (validated server-side in ``jobs_d.validate_cron_spec``
+    at reconcile time); this validator exists so that IF a cron value is ever
+    handled MCP-side it fails closed to the same rule, never reaching SSH.
+    """
+    if not isinstance(spec, str):
+        raise ValidationError("cron spec must be a string")
+    fields = spec.split()
+    if len(fields) != 5:
+        raise ValidationError(
+            f"cron spec must have exactly 5 fields (got {len(fields)})"
+        )
+    for field in fields:
+        if not field or set(field) - _CRON_FIELD_CHARS:
+            raise ValidationError(
+                f"cron field {field!r} contains disallowed characters (allowed: [0-9*/,-])"
+            )
+    return " ".join(fields)
+
+
 def validate_tail(tail: int) -> int:
     """G5 — log tail line count bounds."""
     if not isinstance(tail, int) or isinstance(tail, bool):

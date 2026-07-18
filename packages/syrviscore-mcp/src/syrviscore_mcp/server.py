@@ -94,6 +94,16 @@ def reconcile_plan() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def schedule_list() -> dict:
+    """List declared scheduled jobs (config/jobs.d) and the current managed
+    /etc/crontab block (read-only). Each job carries {schedule, enabled} and its
+    DERIVED command (jobs/<name>); neither a command nor a source is ever
+    operator-supplied (the source is the single root-configured config/jobs.source).
+    Empty with no declared jobs — the feature is optional and dormant."""
+    return _call(tools.schedule_list)
+
+
+@mcp.tool(annotations=RO)
 def versions_list() -> dict:
     """Installed service versions and which is active."""
     return _call(tools.versions_list)
@@ -305,3 +315,26 @@ def service_remove(name: str, confirm: str = "") -> dict:
     """Remove a managed Layer 2 service (data preserved; purge is not automatable).
     Two-call handshake. (privileged, destructive)."""
     return _call(tools.service_remove, name=name, confirm=confirm)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def schedule_apply(confirm: str = "") -> dict:
+    """Reconcile config/jobs.d -> root-owned job scripts + the managed /etc/crontab
+    block (privileged; mutates root cron). Takes NO cron/command argument: the
+    schedule + derived command (jobs/<name>) live only in jobs.d, so the operator
+    can schedule a VETTED job at a chosen time but never new root code. Two-call:
+    first returns the plan + a token; re-call with confirm=<token> to apply."""
+    return _call(tools.schedule_apply, confirm=confirm)
+
+
+@mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
+def schedule_sync(confirm: str = "") -> dict:
+    """Sync scheduled jobs from the single ROOT-configured source (config/jobs.source):
+    clone it, install its jobs.d declarations + materialize root-owned jobs/<name>
+    scripts, then reconcile the managed /etc/crontab block (privileged; mutates root
+    cron). Takes NO argument: the source is root-owned (the operator cannot set or
+    influence it), the cron spec lives only in the YAML, and the command is derived
+    as jobs/<name> — so the operator can re-sync the VETTED set but never point a job
+    at a new repo or inject new root code. Two-call: first returns the plan + a token;
+    re-call with confirm=<token> to apply."""
+    return _call(tools.schedule_sync, confirm=confirm)

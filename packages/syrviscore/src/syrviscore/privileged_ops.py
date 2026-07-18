@@ -366,6 +366,13 @@ done
 # a failing declaration or service must never block boot or the core stack.
 "{install_dir}/bin/syrvis" reconcile --boot || true
 
+# Re-apply the managed /etc/crontab block from config/jobs.d -- best-effort.
+# DSM regenerates /etc/crontab from its own DB across reboots, which can drop
+# SyrvisCore's delimited block; this restores it. Only the delimited block is
+# rewritten (never DSM's own lines). With an empty jobs.d this is a no-op, so
+# it is safe to always run and never blocks boot.
+"{install_dir}/bin/syrvis" schedule apply || true
+
 exit 0
 """
 
@@ -899,7 +906,12 @@ def ensure_config_tree_readable(install_dir: Optional[Path] = None) -> Tuple[boo
         except OSError as e:
             failed.append(f"{p.name}: {e}")
 
-    for d in (root / "config", root / "config" / "services.d", root / "services"):
+    for d in (
+        root / "config",
+        root / "config" / "services.d",
+        root / "config" / "jobs.d",  # operator-writable job declarations (same treatment)
+        root / "services",
+    ):
         if d.is_dir():
             _fix(d, True)
     compose = root / "config" / "docker-compose.yaml"
@@ -915,6 +927,36 @@ def ensure_config_tree_readable(install_dir: Optional[Path] = None) -> Tuple[boo
             len(fixed), "; ".join(failed[:4])
         )
     return True, "config tree readable by docker group (gid {}): {} path(s)".format(gid, len(fixed))
+
+
+def ensure_schedule_block(install_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Re-apply the managed /etc/crontab block from config/jobs.d (self-heal).
+
+    DSM regenerates /etc/crontab from its own DB on UI task edits, which can drop
+    SyrvisCore's delimited block. This re-runs the scheduled-jobs reconcile so the
+    block is restored (and job scripts re-materialized) — the remediation behind
+    ``verify --fix``'s ``check_schedule_block``. Requires root (writes /etc/crontab
+    + jobs/ root:root). With an empty jobs.d the result is an empty block (no-op).
+    """
+    from . import paths as _paths
+    from . import schedule as _schedule
+
+    root = Path(install_dir) if install_dir is not None else None
+    if root is None:
+        try:
+            root = _paths.get_syrvis_home()
+        except Exception as e:  # noqa: BLE001
+            return False, "Could not locate SYRVIS_HOME: {}".format(e)
+    try:
+        result = _schedule.apply_schedule(root)
+    except Exception as e:  # noqa: BLE001 - surface as a fix failure, never crash verify
+        return False, "schedule apply failed: {}".format(e)
+    scheduled = result.get("scheduled") or []
+    if result.get("ok"):
+        return True, "managed crontab block re-applied ({} job(s) scheduled)".format(len(scheduled))
+    return False, "managed crontab block re-applied with errors: {}".format(
+        result.get("invalid") or result.get("skipped")
+    )
 
 
 # =============================================================================

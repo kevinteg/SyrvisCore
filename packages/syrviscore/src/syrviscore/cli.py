@@ -501,6 +501,160 @@ def service_update(name):
 
 
 # =============================================================================
+# Scheduled jobs command group (OPTIONAL; dormant with empty config/jobs.d)
+# =============================================================================
+
+
+@cli.group()
+def schedule():
+    """Manage OPTIONAL scheduled jobs (config/jobs.d → managed /etc/crontab block).
+
+    A job declaration carries {schedule, enabled} only — never a command or a
+    source. The command is DERIVED as jobs/<name> (a root-owned, vetted script),
+    and the script source is the SINGLE root-configured repo in config/jobs.source
+    (the operator cannot set it). With no jobs.d entries the feature is dormant and
+    invisible. `apply` is a LOCAL reconcile (no fetch); `sync` clones the source.
+    """
+    pass
+
+
+@schedule.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def schedule_list(as_json):
+    """List declared jobs and the current managed crontab block (read-only)."""
+    from syrviscore import jobs_d, schedule as schedule_lib
+
+    try:
+        home = get_syrvis_home()
+        declarations, invalid = jobs_d.load_job_declarations(home)
+        plan = schedule_lib.compute_plan(home)
+        jobs_out = [
+            {
+                "name": name,
+                "schedule": job.schedule,
+                "enabled": job.enabled,
+                "command": job.derived_command(jobs_dir=home / "jobs"),
+            }
+            for name, job in sorted(declarations.items())
+        ]
+        result = {
+            "jobs": jobs_out,
+            "invalid": invalid,
+            "source": plan.get("source"),
+            "managed_block": sorted(plan["desired"].values()),
+            "plan": plan,
+        }
+    except Exception as e:  # noqa: BLE001 - CLI boundary
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(result, indent=2, default=str))
+        return
+
+    if not jobs_out:
+        click.echo("No scheduled jobs declared (config/jobs.d is empty)")
+        return
+    click.echo()
+    click.echo("Declared jobs:")
+    for job in jobs_out:
+        state = "enabled" if job["enabled"] else "disabled"
+        click.echo("  {} [{}] {} -> {}".format(job["name"], state, job["schedule"], job["command"]))
+    for row in invalid:
+        click.echo("  ! invalid {}: {}".format(row["file"], row["error"]))
+    click.echo()
+
+
+@schedule.command("apply")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def schedule_apply(as_json):
+    """LOCAL reconcile of the managed /etc/crontab block from config/jobs.d (privileged).
+
+    No fetch — the scripts are already on disk from the last `schedule sync`. This
+    is the self-heal path (boot hook / verify --fix) after DSM regenerates
+    /etc/crontab. Rewrites ONLY SyrvisCore's delimited block — never DSM's own lines
+    or the header. A declared+enabled job whose jobs/<name> script is missing is
+    skipped (never scheduled with a missing script).
+    """
+    from syrviscore import schedule as schedule_lib
+
+    privilege.ensure_elevated("Applying scheduled jobs requires elevated privileges.")
+    try:
+        home = get_syrvis_home()
+        result = schedule_lib.apply_schedule(home)
+    except Exception as e:  # noqa: BLE001 - CLI boundary
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(result, indent=2, default=str))
+        if not result["ok"]:
+            raise SystemExit(1)
+        return
+
+    click.echo()
+    click.echo("Scheduled: {}".format(", ".join(result["scheduled"]) or "(none)"))
+    for row in result.get("skipped", []):
+        click.echo("  ~ skipped {}: {}".format(row["name"], row["reason"]))
+    for row in result["invalid"]:
+        click.echo("  ! invalid {}: {}".format(row["file"], row["error"]))
+    click.echo()
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
+@schedule.command("sync")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def schedule_sync(as_json):
+    """Clone the ROOT-configured source (config/jobs.source), install its jobs, reconcile.
+
+    Clones the SINGLE root-configured repo, copies its jobs.d/*.yaml into
+    config/jobs.d/ (each re-validated; the source is authoritative — locally removed
+    declarations are dropped), materializes each enabled job's root-owned jobs/<name>
+    script (root:root 0755), then LOCAL-reconciles the managed /etc/crontab block.
+    With no config/jobs.source configured this is a dormant no-op.
+    """
+    from syrviscore import schedule as schedule_lib
+
+    privilege.ensure_elevated("Syncing scheduled jobs requires elevated privileges.")
+    try:
+        home = get_syrvis_home()
+        result = schedule_lib.sync_from_source(home)
+    except Exception as e:  # noqa: BLE001 - CLI boundary
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(result, indent=2, default=str))
+        if not result["ok"]:
+            raise SystemExit(1)
+        return
+
+    click.echo()
+    if not result.get("applied"):
+        click.echo(result.get("message", "No config/jobs.source configured — dormant"))
+        click.echo()
+        return
+    click.echo("Source: {}".format(result.get("source")))
+    for m in result.get("synced", []):
+        mark = "[+]" if m["ok"] else "[-]"
+        click.echo("  {} {}: {}".format(mark, m["name"], m["message"]))
+    reconcile = result.get("reconcile") or {}
+    click.echo("Scheduled: {}".format(", ".join(reconcile.get("scheduled", [])) or "(none)"))
+    for row in reconcile.get("skipped", []):
+        click.echo("  ~ skipped {}: {}".format(row["name"], row["reason"]))
+    click.echo()
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
+# =============================================================================
 # Top-level convenience commands
 # =============================================================================
 

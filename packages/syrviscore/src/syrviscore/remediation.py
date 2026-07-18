@@ -66,4 +66,9 @@ def apply_fix(fix_action: Optional[str], install_dir: Optional[Path]) -> Tuple[b
     if action == "config_tree_perms":
         return privileged_ops.ensure_config_tree_readable(install_dir)
 
+    if action == "schedule_block":
+        # Re-apply SyrvisCore's managed /etc/crontab block from config/jobs.d
+        # (DSM can drop it on a UI task edit). No-op with an empty jobs.d.
+        return privileged_ops.ensure_schedule_block(install_dir)
+
     return False, "No automatic fix wired up for '{}'".format(action)

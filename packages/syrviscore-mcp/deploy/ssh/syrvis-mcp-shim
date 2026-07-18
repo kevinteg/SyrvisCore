@@ -58,6 +58,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "stack" ] && [ "${3}" = "hostnames" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "list" ] && [ "${3}" = "--json" ]; then
   set -f; exec "$@"
 fi
@@ -143,6 +146,12 @@ if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/
   set -f; exec "$@"
 fi
 if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "remove" ] && [ "${6}" = "-y" ] && [ "${7}" = "--" ] && is_name "${8}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "apply" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "sync" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
 echo "syrvis-mcp-shim: command not on allowlist" >&2

@@ -81,6 +81,17 @@ COMMANDS: List[Command] = [
         positional=Slot("service", KIND_NAME, optional=True),
     ),
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
+    # schedule list parses the managed crontab block + jobs.d — read-only. It runs
+    # under sudo so the 0600-ish jobs.d declarations are readable over the seam,
+    # but the CLI itself performs no privileged action (like reconcile_plan).
+    Command(
+        "schedule_list",
+        "syrvis",
+        ["schedule", "list"],
+        sudo=True,
+        read_only=True,
+        flags=["--json"],
+    ),
     Command("versions_list", "syrvisctl", ["list"], read_only=True, flags=["--json"]),
     Command("check_updates", "syrvisctl", ["check"], read_only=True, flags=["--json"]),
     Command("info", "syrvisctl", ["info"], read_only=True, flags=["--json"]),
@@ -276,6 +287,36 @@ COMMANDS: List[Command] = [
         expect_json=False,
         flags=["-y"],
         positional=Slot("name", KIND_NAME),
+    ),
+    # schedule apply reconciles config/jobs.d -> jobs/ scripts + the managed
+    # /etc/crontab block. It mutates root cron, so it is DESTRUCTIVE (two-call HMAC
+    # handshake, like reconcile_prune). It takes NO cron argv: the schedule lives
+    # only in jobs.d (its '*'/',' would fail the shim char-allowlist), and the
+    # command is derived as jobs/<name> — the operator never supplies either.
+    Command(
+        "schedule_apply",
+        "syrvis",
+        ["schedule", "apply"],
+        sudo=True,
+        destructive=True,
+        flags=["--json"],
+        timeout_s=600,
+    ),
+    # schedule sync clones the ONE root-configured source (config/jobs.source),
+    # installs its jobs.d declarations + materializes root-owned jobs/<name>
+    # scripts, then reconciles the managed /etc/crontab block. It fetches + runs
+    # a root-vetted repo and mutates root cron, so it is DESTRUCTIVE (two-call HMAC
+    # handshake, like schedule_apply). It takes NO argv: the source is root-owned
+    # (the operator cannot pass or influence it), the cron spec lives only in the
+    # YAML, and the command is derived as jobs/<name> — nothing operator-supplied.
+    Command(
+        "schedule_sync",
+        "syrvis",
+        ["schedule", "sync"],
+        sudo=True,
+        destructive=True,
+        flags=["--json"],
+        timeout_s=600,
     ),
 ]
 

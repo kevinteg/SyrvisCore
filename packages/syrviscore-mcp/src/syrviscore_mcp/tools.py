@@ -138,6 +138,12 @@ def reconcile_plan(ctx: ToolContext) -> Dict:
     return _run(ctx, "reconcile_plan")
 
 
+def schedule_list(ctx: ToolContext) -> Dict:
+    # Read-only: parses the managed crontab block + jobs.d. Runs over the sudo
+    # seam only so the operator-owned declarations are readable — no mutation.
+    return _run(ctx, "schedule_list")
+
+
 def versions_list(ctx: ToolContext) -> Dict:
     return _run(ctx, "versions_list")
 
@@ -362,6 +368,39 @@ def reconcile_prune(ctx: ToolContext, prune: str, confirm: str = "") -> Dict:
     if pending:
         return pending
     return _run(ctx, "reconcile_prune", {"prune": policy})
+
+
+def schedule_apply(ctx: ToolContext, confirm: str = "") -> Dict:
+    # schedule apply mutates ROOT cron (rewrites the managed /etc/crontab block)
+    # and materializes root-owned job scripts, so it takes the two-call token like
+    # reconcile_prune. It carries NO cron/command argv: the schedule + derived
+    # command (jobs/<name>) live only in jobs.d — the operator can pick a vetted
+    # job + time, never new root code. Binding the read-only plan into the state
+    # hash voids the token if jobs.d or the managed block changes in between.
+    preview = _run(ctx, "schedule_list")
+    plan = {"action": "schedule_apply", "plan": preview.get("plan"), "jobs": preview.get("jobs")}
+    pending = _confirm_or_plan(ctx, "schedule_apply", {}, confirm, [preview], plan)
+    if pending:
+        return pending
+    return _run(ctx, "schedule_apply")
+
+
+def schedule_sync(ctx: ToolContext, confirm: str = "") -> Dict:
+    # schedule sync CLONES the ONE root-configured source (config/jobs.source),
+    # installs its declarations, materializes root-owned job scripts, then rewrites
+    # the managed /etc/crontab block — so it takes the two-call token like
+    # schedule_apply. It carries NO argv: the source is root-owned (the operator can
+    # neither pass nor influence it), the cron spec lives only in the YAML, and the
+    # command is derived as jobs/<name>. The operator can at most re-sync the already
+    # root-vetted set — never point a job at a new repo or inject new root code.
+    # Binding the read-only plan into the state hash voids the token if jobs.d or the
+    # managed block changes in between.
+    preview = _run(ctx, "schedule_list")
+    plan = {"action": "schedule_sync", "plan": preview.get("plan"), "jobs": preview.get("jobs")}
+    pending = _confirm_or_plan(ctx, "schedule_sync", {}, confirm, [preview], plan)
+    if pending:
+        return pending
+    return _run(ctx, "schedule_sync")
 
 
 def service_remove(ctx: ToolContext, name: str, confirm: str = "") -> Dict:

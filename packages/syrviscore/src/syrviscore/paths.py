@@ -199,6 +199,29 @@ def get_docker_compose_path() -> Path:
     return get_config_dir() / "docker-compose.yaml"
 
 
+def get_jobs_dir(syrvis_home: Optional[Path] = None) -> Path:
+    """Get path to the operator-writable scheduled-job declarations directory.
+
+    ``config/jobs.d/`` holds one ``<name>.yaml`` job declaration per file (the
+    same operator-writable, group-readable treatment as ``config/services.d``).
+    A declaration carries {schedule, source, enabled} only — never a command.
+    """
+    base = Path(syrvis_home) if syrvis_home is not None else get_syrvis_home()
+    return base / "config" / "jobs.d"
+
+
+def get_jobs_script_dir(syrvis_home: Optional[Path] = None) -> Path:
+    """Get path to the root-owned directory of vetted job scripts.
+
+    ``<home>/jobs/<name>`` is materialized ``root:root 0755`` by the privileged
+    reconcile — the operator can NOT write here. The command a job schedules is
+    DERIVED as ``<jobs_dir>/<name>``; it is never declared, so a compromised
+    operator cannot schedule an arbitrary command.
+    """
+    base = Path(syrvis_home) if syrvis_home is not None else get_syrvis_home()
+    return base / "jobs"
+
+
 # =============================================================================
 # Data Directory (persistent across versions)
 # =============================================================================
