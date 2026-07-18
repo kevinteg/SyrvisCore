@@ -1006,6 +1006,47 @@ class SystemValidator:
             fix_action="boot_script",
         )
 
+    def check_config_tree_readable(self) -> CheckResult:
+        """The operator (docker group) must read the config tree + manifests +
+        core compose (never .env). A root reconcile/setup writes these root:root,
+        locking the unprivileged operator out of service_list/verify."""
+        if not self.install_dir:
+            return CheckResult(
+                name="Config tree readable", passed=False,
+                message="Cannot check - install dir unknown",
+            )
+        from . import privileged_ops as _po
+
+        exists, gid = _po.get_docker_group_info()
+        if not exists or gid is None:
+            return CheckResult(
+                name="Config tree readable", passed=False,
+                message="docker group missing (fix docker_group first)",
+            )
+        targets = [self.install_dir / "config" / "docker-compose.yaml"]
+        targets += list((self.install_dir / "services").glob("*/syrvis-service.yaml"))
+        bad = []
+        for p in targets:
+            try:
+                st = p.stat()  # stat needs only dir-traverse, not file read
+            except OSError:
+                continue
+            if not (st.st_gid == gid and (st.st_mode & 0o040)):
+                bad.append(p.name)
+        if not bad:
+            return CheckResult(
+                name="Config tree readable", passed=True,
+                message=f"config + manifests readable by docker (gid {gid})",
+            )
+        return CheckResult(
+            name="Config tree readable",
+            passed=False,
+            message=f"{len(bad)} file(s) not operator-readable (docker group)",
+            details="root-written config/manifests lock out service_list/verify; .env stays 0600",
+            fixable=True,
+            fix_action="config_tree_perms",
+        )
+
     def validate(self) -> ValidationReport:
         """Run all system integration checks."""
         report = ValidationReport(category="System Integration")
@@ -1014,6 +1055,7 @@ class SystemValidator:
         if self.install_dir:
             report.checks.append(self.check_startup_script())
             report.checks.append(self.check_boot_script())
+            report.checks.append(self.check_config_tree_readable())
 
         return report
 

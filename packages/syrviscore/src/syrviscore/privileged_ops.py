@@ -861,6 +861,62 @@ def ensure_manifest_permissions(install_dir: Optional[Path] = None) -> Tuple[boo
         return False, f"Failed to set manifest permissions: {e}"
 
 
+def ensure_config_tree_readable(install_dir: Optional[Path] = None) -> Tuple[bool, str]:
+    """Make the config tree + service manifests + core compose readable by the
+    operator (the ``docker`` group), so the unprivileged operator can run
+    ``service list``/``verify`` without EPERM.
+
+    A root reconcile/setup writes these ``root:root`` and locks the operator out.
+    This chgrps them to the docker group and adds group-read (dirs g+rx, files
+    g+r) WITHOUT touching ``config/.env`` — that stays 0600 because it carries
+    secrets. Best-effort per path; idempotent; self-heals a root re-write.
+    """
+    from . import paths as _paths
+
+    root = Path(install_dir) if install_dir is not None else None
+    if root is None:
+        try:
+            root = _paths.get_syrvis_home()
+        except Exception as e:
+            return False, f"Could not locate SYRVIS_HOME: {e}"
+
+    exists, gid = get_docker_group_info()
+    if not exists or gid is None:
+        return False, "docker group does not exist (fix docker_group first)"
+
+    env_path = (root / "config" / ".env").resolve()
+    fixed: list = []
+    failed: list = []
+
+    def _fix(p: Path, is_dir: bool) -> None:
+        try:
+            if p.resolve() == env_path:  # never touch the secret env file
+                return
+            os.chown(str(p), -1, gid)
+            mode = p.stat().st_mode
+            p.chmod(mode | (0o050 if is_dir else 0o040))
+            fixed.append(p.name)
+        except OSError as e:
+            failed.append(f"{p.name}: {e}")
+
+    for d in (root / "config", root / "config" / "services.d", root / "services"):
+        if d.is_dir():
+            _fix(d, True)
+    compose = root / "config" / "docker-compose.yaml"
+    if compose.is_file():
+        _fix(compose, False)
+    services_dir = root / "services"
+    if services_dir.is_dir():
+        for manifest in services_dir.glob("*/syrvis-service.yaml"):
+            _fix(manifest, False)
+
+    if failed:
+        return False, "config tree: fixed {}, failed: {}".format(
+            len(fixed), "; ".join(failed[:4])
+        )
+    return True, "config tree readable by docker group (gid {}): {} path(s)".format(gid, len(fixed))
+
+
 # =============================================================================
 # Read-only diagnostic functions (don't need SystemOperations)
 # =============================================================================

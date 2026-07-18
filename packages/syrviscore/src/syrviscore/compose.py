@@ -513,6 +513,20 @@ class ComposeGenerator:
         with open(output_file, "w") as f:
             yaml.dump(compose, f, default_flow_style=False, sort_keys=False)
 
+        # The operator (docker group) must READ this for service_list/verify; a
+        # root write otherwise lands root:root 0600 and locks it out. Best-effort
+        # chgrp docker + 0640 (the compose carries no secrets — those live in
+        # .env, which stays 0600). verify --fix (config_tree_perms) self-heals if
+        # this is skipped on a non-root/edge write.
+        try:
+            import grp as _grp
+
+            gid = _grp.getgrnam("docker").gr_gid
+            os.chown(str(output_file), -1, gid)
+            output_file.chmod(0o640)
+        except (KeyError, OSError):
+            pass
+
     def generate_and_save(
         self, config_path: Optional[str] = None, output_path: str = "docker-compose.yaml"
     ) -> Dict[str, Any]:

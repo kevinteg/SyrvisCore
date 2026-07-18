@@ -63,4 +63,7 @@ def apply_fix(fix_action: Optional[str], install_dir: Optional[Path]) -> Tuple[b
     if action == "manifest_perms":
         return privileged_ops.ensure_manifest_permissions(install_dir)
 
+    if action == "config_tree_perms":
+        return privileged_ops.ensure_config_tree_readable(install_dir)
+
     return False, "No automatic fix wired up for '{}'".format(action)
