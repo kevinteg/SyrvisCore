@@ -214,8 +214,15 @@ class RemoteRunner:
         except OSError:
             pass
 
-    def _exec(self, argv: List[str], timeout: int) -> RunResult:
-        proc = self._run(argv, capture_output=True, text=True, timeout=timeout, shell=False)
+    def _exec(self, argv: List[str], timeout: int, stdin_data: Optional[str] = None) -> RunResult:
+        proc = self._run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+            input=stdin_data,
+        )
         return RunResult(
             argv=argv,
             returncode=proc.returncode,
@@ -259,11 +266,16 @@ class RemoteRunner:
         )
 
     def run(self, command: Command, args: Optional[Dict] = None) -> Dict:
-        args = args or {}
+        args = dict(args or {})
+        # Pop the out-of-band stdin value BEFORE build_remote_tokens so it can
+        # never become an argv token, land in remote_tokens, or appear in the
+        # audit log.  The secret on stdin bypasses the shim's char-whitelist
+        # entirely (correct — only $SSH_ORIGINAL_COMMAND is checked by the shim).
+        stdin_data: Optional[str] = args.pop("_stdin", None)
         remote_tokens = build_remote_tokens(self.cfg, command, args)
         ssh_argv = build_ssh_argv(self.cfg, remote_tokens)
         try:
-            result = self._exec(ssh_argv, command.timeout_s)
+            result = self._exec(ssh_argv, command.timeout_s, stdin_data=stdin_data)
         except subprocess.TimeoutExpired:
             self._audit(command, remote_tokens, None, "timeout")
             # A non-read-only op that timed out may have partially applied.

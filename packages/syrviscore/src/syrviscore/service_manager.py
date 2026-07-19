@@ -1013,3 +1013,102 @@ class ServiceManager:
             return True, f"Service '{name}' updated: {current_version} -> {updated.version}"
 
         return True, f"Service '{name}' is up to date (v{updated.version})"
+
+    # -------------------------------------------------------------------------
+    # Secret management (operator-seam verb)
+    # -------------------------------------------------------------------------
+
+    _SECRET_MAX_BYTES = 65536  # 64 KiB — enough for any env-file; rejects OOM/DoS
+
+    def write_secret(self, name: str, content: str) -> Tuple[bool, str]:
+        """Write *content* to the declared service's env_file as root:root 0600.
+
+        Security contract (mirrors env_file materialization at compose-gen time):
+        - Name is re-validated (defense in depth against unvalidated callers).
+        - Service must be DECLARED in config/services.d/ AND have env_file set.
+        - Destination is realpath-containment-checked inside data/<name>/.
+        - data/<name>/ must already exist (created by reconcile/install); we
+          FAIL rather than mkdir — prevents writing secrets for undeployed svcs.
+        - Write is atomic: O_CREAT|O_EXCL temp in same dir -> fsync -> os.replace.
+          A dropped SSH connection or SIGKILL mid-stream never leaves a truncated
+          secrets.env that would break `docker compose up`.
+        - Content is capped at _SECRET_MAX_BYTES and must be non-empty.
+
+        Returns (True, message) on success; (False, error) on any failure.
+        Caller (CLI) must run as root (sudo) — ownership is root:root by default.
+        """
+        # --- input guards (defense in depth) --------------------------------
+        if not content:
+            return False, "secret content must not be empty"
+        content_bytes = content.encode("utf-8", errors="surrogateescape")
+        if len(content_bytes) > self._SECRET_MAX_BYTES:
+            return False, (
+                f"secret content too large ({len(content_bytes)} bytes; max {self._SECRET_MAX_BYTES})"
+            )
+
+        # --- name re-validation ----------------------------------------------
+        try:
+            paths_map = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+
+        # --- declaration check (service must exist and have env_file) --------
+        try:
+            declarations, _invalid = services_d.load_declarations(self.syrvis_home)
+        except Exception as e:  # noqa: BLE001 - catch all load failures
+            return False, f"could not load service declarations: {e}"
+
+        if name not in declarations:
+            return False, f"service {name!r} is not declared in config/services.d/"
+
+        declared = declarations[name]
+        if not declared.env_file:
+            return False, (
+                f"service {name!r} has no env_file declared — "
+                "nothing to write (set env_file in the services.d declaration)"
+            )
+
+        # --- path containment check ------------------------------------------
+        data_dir_for_svc = self.data_dir / name
+        env_file_path = Path(
+            os.path.realpath(str(data_dir_for_svc / declared.env_file))
+        )
+        data_root = os.path.realpath(str(data_dir_for_svc))
+        if not str(env_file_path).startswith(data_root + os.sep):
+            return False, (
+                f"env_file {declared.env_file!r} escapes the service data directory (path traversal)"
+            )
+
+        # --- data dir must already exist (created by reconcile/install) ------
+        if not data_dir_for_svc.exists():
+            return False, (
+                f"data directory {data_dir_for_svc} does not exist — "
+                "deploy the service first (syrvis reconcile creates it)"
+            )
+
+        # --- atomic 0600 write -----------------------------------------------
+        dest = str(env_file_path)
+        dest_dir = os.path.dirname(dest)
+        # Ensure any sub-directory component of env_file exists (e.g. subdir/secrets.env).
+        # The containment check above already verified it stays inside data/<name>/.
+        Path(dest_dir).mkdir(parents=True, exist_ok=True)
+
+        tmp = dest + f".syrvis.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, content_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, dest)
+            # Belt-and-braces: ensure mode is 0600 on the final path.
+            os.chmod(dest, 0o600)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return False, f"failed to write secret: {e}"
+
+        return True, f"wrote {dest}"

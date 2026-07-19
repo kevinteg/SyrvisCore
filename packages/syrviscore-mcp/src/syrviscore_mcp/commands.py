@@ -318,6 +318,20 @@ COMMANDS: List[Command] = [
         flags=["--json"],
         timeout_s=600,
     ),
+    # secret set writes a Layer 2 service's env_file secret atomically as root:root
+    # 0600. The secret arrives on stdin ONLY — it is never a CLI argument, never
+    # logged, never a token. destructive=False (idempotent per-service overwrite,
+    # analogous to service_declare). expect_json=False (plain "wrote <path>" line).
+    # No --json flag: apply-immich-secrets only needs the exit code.
+    Command(
+        "secret_set",
+        "syrvis",
+        ["secret", "set"],
+        sudo=True,
+        destructive=False,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
 ]
 
 COMMANDS_BY_ID = {c.id: c for c in COMMANDS}

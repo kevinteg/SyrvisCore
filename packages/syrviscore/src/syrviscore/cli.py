@@ -655,6 +655,55 @@ def schedule_sync(as_json):
 
 
 # =============================================================================
+# Secret command group (Layer 2 service secrets — operator seam)
+# =============================================================================
+
+
+@cli.group()
+def secret():
+    """Manage Layer 2 service secrets (env_file contents, written 0600 as root)."""
+    pass
+
+
+@secret.command("set")
+@click.argument("name")
+@handle_errors
+def secret_set(name):
+    """Write a service's env_file secret from STDIN (root-only, atomic, 0600).
+
+    Reads the secret from STDIN and writes it atomically to the path derived
+    from the service's services.d declaration env_file field.  The data dir
+    must already exist (deploy the service first with `syrvis reconcile`).
+
+    The secret NEVER appears in argv — it is read exclusively from stdin so
+    it does not appear in ps/audit logs or shell history.
+
+    Example (from home-tech apply-immich-secrets):
+        echo "POSTGRES_PASSWORD=secret" | sudo syrvis secret set -- immich-db
+    """
+    privilege.ensure_elevated("Writing service secrets requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    # Read the secret ONLY from stdin (never argv / env — keeps it out of ps,
+    # audit logs, and shell history).
+    content = click.get_text_stream("stdin").read()
+
+    if not content:
+        raise SyrvisError("secret content must not be empty (nothing on stdin)")
+
+    _MAX = 65536  # 64 KiB; matches ServiceManager._SECRET_MAX_BYTES
+    if len(content.encode("utf-8", errors="surrogateescape")) > _MAX:
+        raise SyrvisError(f"secret content too large (max {_MAX} bytes)")
+
+    manager = ServiceManager()
+    success, message = manager.write_secret(name, content)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
+# =============================================================================
 # Top-level convenience commands
 # =============================================================================
 

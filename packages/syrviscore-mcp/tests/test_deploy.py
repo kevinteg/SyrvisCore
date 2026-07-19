@@ -63,6 +63,12 @@ def _run_shim(original_command: str):
 
 
 DENY = [
+    # secret set red-team vectors
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set -- Immich_DB",  # uppercase -> is_name fails
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set -- immich-db extra",  # extra token -> wrong arity
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set immich-db",  # missing '--' separator
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set",  # missing positional entirely
+    "/volume1/syrviscore/bin/syrvis secret set -- immich-db",  # missing sudo -> wrong shape
     "id",
     "sudo -n /bin/sh",
     "docker ps",
@@ -98,6 +104,9 @@ DENY = [
 ]
 
 ALLOW = [
+    # secret set allow: valid service name, correct shape
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set -- immich-db",
+    "sudo -n /volume1/syrviscore/bin/syrvis secret set -- immich-server",
     "/volume1/syrviscore/bin/syrvis status --json",
     "/volume1/syrviscore/bin/syrvis verify --smoke --json",
     "/volume1/syrviscore/bin/syrvis stack hostnames --json",
