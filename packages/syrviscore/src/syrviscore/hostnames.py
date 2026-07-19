@@ -69,9 +69,24 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
     enabled_components = cfg.enabled_components or {}
     entries: List[Dict[str, Any]] = []
 
-    def add(service: str, kind: str, subdomain: str, exp: str, enabled: bool = True) -> None:
+    def add(
+        service: str,
+        kind: str,
+        subdomain: str,
+        exp: str,
+        enabled: bool = True,
+        svc_domain: str = "",
+    ) -> None:
+        """Add a hostname entry to the report.
+
+        ``svc_domain`` is a per-service domain override (Layer 2 only).  When
+        non-empty it is used instead of the instance ``domain`` so the generated
+        hostname (and the DNS record name) reflects the correct zone.  All other
+        callers leave it empty and inherit the instance domain unchanged.
+        """
         exp = exposure_mod.normalize(exp)
-        host = _host(subdomain, domain)
+        effective_domain = svc_domain if svc_domain else domain
+        host = _host(subdomain, effective_domain)
         entries.append(
             {
                 "service": service,
@@ -125,7 +140,10 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    # 4) Layer 2 services (each carries its own subdomain + exposure).
+    # 4) Layer 2 services (each carries its own subdomain + exposure, and an
+    # optional per-service domain override so a service may route on a zone
+    # other than the instance domain, e.g. photos.tegtmeier.me vs the default
+    # <subdomain>.konsume.org).
     try:
         from .service_manager import ServiceManager
 
@@ -139,6 +157,7 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
                 subdomain,
                 info.get("exposure") or exposure_mod.DEFAULT,
                 enabled=info.get("status") == "running",
+                svc_domain=info.get("domain") or "",
             )
     except Exception:  # noqa: BLE001
         pass

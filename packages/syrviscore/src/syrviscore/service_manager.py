@@ -341,17 +341,28 @@ class ServiceManager:
             service, service_path, start, preserve_data_on_rollback=preserve_data_on_rollback
         )
 
-    def _subdomain_in_use(self, subdomain: str, exclude: Optional[str] = None) -> Optional[str]:
-        """Name of an already-installed service routed at ``subdomain``, else None.
+    def _subdomain_in_use(
+        self, subdomain: str, domain: str = "", exclude: Optional[str] = None
+    ) -> Optional[str]:
+        """Name of an already-installed service routed at ``subdomain.domain``, else None.
 
         Two services claiming the same host each write a Traefik router for it, and
         Traefik's behavior for a duplicate host on one entrypoint is nondeterministic
         (last-loaded wins). Catch the collision at add time instead.
+
+        Uniqueness is checked on the full hostname (subdomain + effective domain), not
+        the subdomain alone — two services may share a subdomain on different zones
+        (e.g. photos.konsume.org and photos.tegtmeier.me are distinct hosts).
+        ``domain`` should be the per-service effective domain (empty string when the
+        service uses the instance domain, which is fine — both sides default the same
+        way so the comparison is still correct).
         """
         for info in self.list():
             if exclude and info.get("name") == exclude:
                 continue
-            if info.get("subdomain") and info.get("subdomain") == subdomain:
+            existing_sub = info.get("subdomain") or ""
+            existing_dom = info.get("domain") or ""
+            if existing_sub and existing_sub == subdomain and existing_dom == domain:
                 return info.get("name")
         return None
 
@@ -468,14 +479,24 @@ class ServiceManager:
         leaves partial state that blocks a retry. Shared by the git-sourced
         :meth:`add` and the image-first :meth:`add_image`.
         """
-        # Reject a subdomain already claimed by another installed service before
+        # Reject a hostname already claimed by another installed service before
         # writing any Traefik config (last-writer-wins is a silent footgun).
+        # Uniqueness is per full hostname (subdomain + domain); two services may
+        # share a subdomain on different zones without conflict.
         if service.traefik.enabled and service.traefik.subdomain:
-            owner = self._subdomain_in_use(service.traefik.subdomain, exclude=service.name)
+            owner = self._subdomain_in_use(
+                service.traefik.subdomain,
+                domain=service.traefik.domain,
+                exclude=service.name,
+            )
             if owner:
                 self._rollback_add(service.name)
-                return False, "subdomain {!r} is already routed by service {!r}".format(
-                    service.traefik.subdomain, owner
+                effective_host = "{}.{}".format(
+                    service.traefik.subdomain,
+                    service.traefik.domain or "<instance-domain>",
+                )
+                return False, "hostname {!r} is already routed by service {!r}".format(
+                    effective_host, owner
                 )
         try:
             service_data_dir = self.data_dir / service.name
@@ -832,7 +853,9 @@ class ServiceManager:
             url = ""
             if service.traefik.enabled and service.traefik.subdomain:
                 try:
-                    url = f"https://{service.traefik.subdomain}.{get_domain_from_env()}"
+                    # Use the per-service domain override when set; fall back to the instance domain.
+                    effective_domain = service.traefik.domain or get_domain_from_env()
+                    url = f"https://{service.traefik.subdomain}.{effective_domain}"
                 except (ValueError, OSError):
                     pass
 
@@ -844,6 +867,9 @@ class ServiceManager:
                     "url": url,
                     "description": service.description,
                     "subdomain": service.traefik.subdomain if service.traefik.enabled else "",
+                    # Per-service domain override (empty string = use instance domain).
+                    # hostnames.py reads this to build the correct external hostname.
+                    "domain": service.traefik.domain if service.traefik.enabled else "",
                     "exposure": (service.traefik.exposure if service.traefik.enabled else None),
                 }
             )

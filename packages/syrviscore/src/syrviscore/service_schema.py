@@ -31,6 +31,11 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 # Single DNS label for Traefik subdomains
 SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
+# Domain override: dot-separated DNS labels (≥2 labels), each matching SUBDOMAIN_RE.
+# Used to allow a service to route on a zone other than the instance DOMAIN.
+# Example: "tegtmeier.me", "photos.example.com"
+DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,}[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Names owned by the core stack — a third-party service may not impersonate
@@ -278,6 +283,11 @@ class TraefikConfig:
 
     enabled: bool = True
     subdomain: str = ""
+    # Optional per-service domain override.  When set, the effective hostname is
+    # ``<subdomain>.<domain>`` instead of ``<subdomain>.<instance-DOMAIN>``.
+    # Empty string (the default) means "use the instance domain" — every existing
+    # service that omits this field is byte-for-byte unchanged.
+    domain: str = ""
     port: int = 80
     middlewares: List[str] = field(default_factory=list)
     # How the routed service is reached from outside: "internal" (LAN-only) or
@@ -293,6 +303,7 @@ class TraefikConfig:
         return cls(
             enabled=data.get("enabled", True),
             subdomain=data.get("subdomain", ""),
+            domain=str(data.get("domain") or "").strip().lower(),
             port=data.get("port", 80),
             middlewares=data.get("middlewares", []),
             exposure=str(data.get("exposure") or exposure_mod.DEFAULT).strip().lower(),
@@ -461,6 +472,12 @@ class ServiceDefinition:
                         traefik.subdomain
                     )
                 )
+            if traefik.domain and not DOMAIN_RE.match(traefik.domain):
+                raise ServiceValidationError(
+                    "Invalid traefik domain {!r}: must be a dot-separated domain with "
+                    "at least 2 labels (e.g. 'tegtmeier.me'), each label matching "
+                    "[a-z0-9][a-z0-9-]{{0,61}}[a-z0-9]".format(traefik.domain)
+                )
             if not isinstance(traefik.port, int) or not 1 <= traefik.port <= 65535:
                 raise ServiceValidationError(
                     "Invalid traefik port {!r}: must be 1-65535".format(traefik.port)
@@ -534,6 +551,8 @@ class ServiceDefinition:
                 "port": self.traefik.port,
                 "exposure": self.traefik.exposure,
             }
+            if self.traefik.domain:
+                result["traefik"]["domain"] = self.traefik.domain
             if self.traefik.middlewares:
                 result["traefik"]["middlewares"] = self.traefik.middlewares
 

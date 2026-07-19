@@ -402,7 +402,16 @@ class ServiceTraefikConfig:
 
         Args:
             service: Service definition
-            domain: Base domain (e.g., "example.com")
+            domain: Instance base domain (e.g., "konsume.org").  When the service
+                declaration includes a ``traefik.domain`` override, the effective
+                hostname uses that domain instead.  Both the HTTP-redirect router
+                and the HTTPS/TLS router use the effective hostname.
+
+                DNS-01 note: wildcard certs are issued per-zone by the Cloudflare
+                DNS-01 provider (CF_DNS_API_TOKEN).  A domain override only works
+                correctly when the target zone (e.g. tegtmeier.me) is also within
+                the scope of that token — CF_DNS_API_TOKEN already spans
+                konsume.org + tegtmeier.me, so both zones are covered.
 
         Returns:
             Traefik configuration dictionary
@@ -414,7 +423,10 @@ class ServiceTraefikConfig:
         # Exposure ('internal' vs 'tunnel') is declared intent reported by
         # ``syrvis stack hostnames``; SyrvisCore routes both identically at the
         # Traefik layer (same router + letsencrypt resolver). See exposure.py.
-        host = f"{service.traefik.subdomain}.{domain}"
+
+        # Use the per-service domain override when set; fall back to the instance domain.
+        effective_domain = service.traefik.domain if service.traefik.domain else domain
+        host = f"{service.traefik.subdomain}.{effective_domain}"
         name = service.name
 
         # Build router configurations
