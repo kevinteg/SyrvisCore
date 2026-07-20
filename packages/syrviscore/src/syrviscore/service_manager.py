@@ -1164,6 +1164,13 @@ class ServiceManager:
           mid-stream never leaves a truncated .conf.
         - Content is capped at ``_SECRET_MAX_BYTES`` and must be non-empty.
 
+        CALLER INVARIANT (security — the safety of this verb lives in the CONSUMER):
+        the content is operator-controlled arbitrary data. A reader of <name>.conf may
+        treat a value ONLY as inert data (a URL, a destination path it writes to, an
+        integer) — NEVER as a command name, a path it later executes, or an
+        ``eval``/``sh -c``/``source`` argument. Like ``secret set``, this verb is only as
+        safe as what reads the file it writes.
+
         Returns (True, message) on success; (False, error) on any failure.
         Caller (CLI) must run as root (sudo) — ownership is root:root by default.
         """
