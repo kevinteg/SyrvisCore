@@ -460,3 +460,78 @@ class TestCommandReconcileAndConverge:
                     },
                 }
             )
+
+
+class TestInfraTier:
+    """design/22 — the privileged infra tier: an enumerated READ-ONLY host-mount
+    allowlist, gated by AUTHORSHIP (only an operator services.d/deploy declaration
+    may set tier: infra — never a git/image/catalog service)."""
+
+    def test_non_infra_rejects_any_host_mount(self):
+        for vol in ("/proc:/host/proc:ro", "/var/run/docker.sock:/var/run/docker.sock:ro",
+                    "/:/rootfs:ro"):
+            with pytest.raises(ServiceValidationError):
+                ServiceDefinition.from_dict(base_service(volumes=[vol]))
+
+    def test_infra_accepts_allowlisted_ro_host_mounts(self):
+        svc = ServiceDefinition.from_dict(base_service(
+            tier="infra",
+            volumes=["/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro",
+                     "/var/run/docker.sock:/var/run/docker.sock:ro", "data:/data:rw"]))
+        assert svc.tier == "infra"
+        assert len(svc.volumes) == 5  # host mounts + a normal named volume
+
+    def test_infra_host_mount_must_be_readonly(self):
+        for vol in ("/proc:/host/proc:rw", "/:/rootfs", "/var/run/docker.sock:/var/run/docker.sock:rw"):
+            with pytest.raises(ServiceValidationError, match="read-only"):
+                ServiceDefinition.from_dict(base_service(tier="infra", volumes=[vol]))
+
+    def test_infra_non_allowlisted_host_path_still_refused(self):
+        # only /proc,/sys,/,docker.sock — NOT /etc, a volume, a look-alike sock, or '..'
+        for vol in ("/etc:/host/etc:ro", "/volume4:/data:ro", "/var/run/x.sock:/s:ro",
+                    "/proc/../etc:/x:ro"):
+            with pytest.raises(ServiceValidationError):
+                ServiceDefinition.from_dict(base_service(tier="infra", volumes=[vol]))
+
+    def test_bad_tier_rejected(self):
+        with pytest.raises(ServiceValidationError, match="tier"):
+            ServiceDefinition.from_dict(base_service(tier="root"))
+
+    def test_tier_round_trips_and_default_omitted(self):
+        out = ServiceDefinition.from_dict(base_service(tier="infra")).to_dict()
+        assert out["tier"] == "infra" and ServiceDefinition.from_dict(out).tier == "infra"
+        assert "tier" not in ServiceDefinition.from_dict(base_service()).to_dict()
+
+    def _mgr(self, tmp_path):
+        import os
+        from syrviscore.service_manager import ServiceManager
+        os.environ.setdefault("DOMAIN", "example.com")
+        m = ServiceManager(syrvis_home=tmp_path)
+        m._ensure_directories()
+        m._start_service = lambda n, cp: (True, "started")
+        m._reload_traefik = lambda: None
+        return m
+
+    def test_authorship_gate_allows_operator_and_emits_host_mounts(self, tmp_path):
+        import yaml
+        mgr = self._mgr(tmp_path)
+        svc = ServiceDefinition.from_dict(base_service(
+            name="node-exporter", tier="infra",
+            volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]))
+        # install_declaration sets source_url="services.d:node-exporter" -> operator -> allowed
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert ok, msg
+        compose = yaml.safe_load((tmp_path / "compose" / "node-exporter.yaml").read_text())
+        vols = compose["services"]["node-exporter"]["volumes"]
+        # emitted as ABSOLUTE host paths (not resolved under data/<svc>/), read-only
+        assert "/proc:/host/proc:ro" in vols and "/:/rootfs:ro" in vols
+
+    def test_authorship_gate_rejects_git_source(self, tmp_path):
+        mgr = self._mgr(tmp_path)
+        svc = ServiceDefinition.from_dict(base_service(
+            name="evil", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc.source_url = "https://github.com/attacker/evil.git"  # a repo, NOT services.d:
+        sp = mgr.services_dir / "evil"
+        sp.mkdir(parents=True, exist_ok=True)
+        ok, msg = mgr._install_from_definition(svc, sp, start=False)
+        assert not ok and "infra" in msg.lower()

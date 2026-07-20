@@ -484,6 +484,22 @@ class ServiceManager:
         leaves partial state that blocks a retry. Shared by the git-sourced
         :meth:`add` and the image-first :meth:`add_image`.
         """
+        # AUTHORSHIP GATE for the privileged infra tier (design/22). tier: infra
+        # unlocks host mounts, so it is permitted ONLY for an operator-authored
+        # declaration — services.d / a deploy bundle, which set source_url to
+        # "services.d:<name>". A git-repo (add), image-first (run), or catalog
+        # service — whose source_url is the git URL / image ref / "catalog:…" —
+        # can NEVER escalate itself to infra. This is the load-bearing rule of
+        # design/22 (the schema accepts tier:infra when parsing so a materialized
+        # manifest round-trips; the trust decision is made HERE, by authorship).
+        if service.tier == "infra" and not str(service.source_url or "").startswith("services.d:"):
+            self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
+            return False, (
+                "tier: infra is only permitted for an operator-authored "
+                "services.d/deploy declaration — not a {} service".format(
+                    service.source_url or "repo/image"
+                )
+            )
         # Reject a hostname already claimed by another installed service before
         # writing any Traefik config (last-writer-wins is a silent footgun).
         # Uniqueness is per full hostname (subdomain + domain); two services may
@@ -674,16 +690,28 @@ class ServiceManager:
         if service.command:
             svc["command"] = list(service.command)
 
-        # Volumes were validated by the schema (no absolute host paths, no
-        # '..', no docker.sock). Every host source resolves under this
-        # service's own data directory; we re-check containment here.
+        # Volumes were validated by the schema. For a normal service every host
+        # source resolves under its own data directory (re-checked here). An
+        # `infra`-tier service (design/22) may ALSO carry an enumerated read-only
+        # host mount (/proc, /sys, /, docker.sock) — those pass through as the
+        # absolute host path, not resolved under data/<svc>/ and not pre-created
+        # (they already exist). The authorship gate that only an operator may set
+        # tier: infra was enforced at install time.
         if service.volumes:
+            from .service_schema import INFRA_HOST_MOUNTS
+
+            is_infra = service.tier == "infra"
             data_root = os.path.realpath(str(self.data_dir / service.name))
             processed_volumes = []
             for vol in service.volumes:
                 parts = vol.split(":")
                 host_path, container_path = parts[0], parts[1]
                 mode = parts[2] if len(parts) > 2 else "rw"
+
+                if is_infra and host_path in INFRA_HOST_MOUNTS:
+                    # Belt-and-braces: only ever read-only, only the allowlist.
+                    processed_volumes.append(f"{host_path}:{container_path}:ro")
+                    continue
 
                 resolved = os.path.realpath(os.path.join(data_root, host_path))
                 if resolved != data_root and not resolved.startswith(data_root + os.sep):
