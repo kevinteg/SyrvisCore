@@ -167,3 +167,55 @@ class TestSecretSetCommandShape:
         assert tokens[-1] == "immich-db"
         assert "secret" in tokens
         assert "set" in tokens
+
+
+# ---------------------------------------------------------------------------
+# Config_set command shape (the jobs analog of secret_set — same contract)
+# ---------------------------------------------------------------------------
+
+
+class TestConfigSetCommandShape:
+    def test_command_registered(self):
+        assert "config_set" in COMMANDS_BY_ID
+
+    def test_command_is_sudo(self):
+        assert COMMANDS_BY_ID["config_set"].sudo is True
+
+    def test_command_is_not_destructive(self):
+        assert COMMANDS_BY_ID["config_set"].destructive is False
+
+    def test_command_expect_json_false(self):
+        assert COMMANDS_BY_ID["config_set"].expect_json is False
+
+    def test_command_has_name_positional(self):
+        cmd = COMMANDS_BY_ID["config_set"]
+        assert cmd.positional is not None
+        assert cmd.positional.name == "name"
+
+    def test_command_has_no_flags(self):
+        """No --json flag: the caller only needs the exit code (like secret_set)."""
+        cmd = COMMANDS_BY_ID["config_set"]
+        assert cmd.flags == []
+
+    def test_token_shape_includes_separator(self):
+        """Remote tokens must include '--' before the job name."""
+        cfg = make_config()
+        cmd = get_command("config_set")
+        tokens = build_remote_tokens(cfg, cmd, {"name": "login-alert"})
+        # ['sudo', '-n', '/volume1/syrviscore/bin/syrvis', 'config', 'set', '--', 'login-alert']
+        assert "--" in tokens
+        assert tokens[-1] == "login-alert"
+        assert "config" in tokens
+        assert "set" in tokens
+
+    def test_stdin_passed_and_not_in_tokens(self):
+        """The conf body arrives on stdin only — never in argv (like secret_set)."""
+        runner, proc = make_runner()
+        cmd = get_command("config_set")
+
+        runner.run(cmd, {"name": "login-alert", "_stdin": "NTFY_URL=topsecret\n"})
+
+        argv = proc.last["argv"]
+        full_cmd = " ".join(str(a) for a in argv)
+        assert "topsecret" not in full_cmd, f"conf body leaked into argv: {full_cmd}"
+        assert proc.last["kwargs"].get("input") == "NTFY_URL=topsecret\n"

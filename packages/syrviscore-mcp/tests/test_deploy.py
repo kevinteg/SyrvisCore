@@ -69,6 +69,12 @@ DENY = [
     "sudo -n /volume1/syrviscore/bin/syrvis secret set immich-db",  # missing '--' separator
     "sudo -n /volume1/syrviscore/bin/syrvis secret set",  # missing positional entirely
     "/volume1/syrviscore/bin/syrvis secret set -- immich-db",  # missing sudo -> wrong shape
+    # config set red-team vectors (same shape/contract as secret set)
+    "sudo -n /volume1/syrviscore/bin/syrvis config set -- Login_Alert",  # uppercase -> is_name fails
+    "sudo -n /volume1/syrviscore/bin/syrvis config set -- login-alert extra",  # extra token -> wrong arity
+    "sudo -n /volume1/syrviscore/bin/syrvis config set login-alert",  # missing '--' separator
+    "sudo -n /volume1/syrviscore/bin/syrvis config set",  # missing positional entirely
+    "/volume1/syrviscore/bin/syrvis config set -- login-alert",  # missing sudo -> wrong shape
     "id",
     "sudo -n /bin/sh",
     "docker ps",
@@ -107,6 +113,9 @@ ALLOW = [
     # secret set allow: valid service name, correct shape
     "sudo -n /volume1/syrviscore/bin/syrvis secret set -- immich-db",
     "sudo -n /volume1/syrviscore/bin/syrvis secret set -- immich-server",
+    # config set allow: valid job name, correct shape
+    "sudo -n /volume1/syrviscore/bin/syrvis config set -- login-alert",
+    "sudo -n /volume1/syrviscore/bin/syrvis config set -- immich-db-backup",
     "/volume1/syrviscore/bin/syrvis status --json",
     "/volume1/syrviscore/bin/syrvis verify --smoke --json",
     "/volume1/syrviscore/bin/syrvis stack hostnames --json",

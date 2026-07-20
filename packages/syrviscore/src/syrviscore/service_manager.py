@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from . import exposure as exposure_mod
+from . import jobs_d
 from . import paths
 from .compose_cmd import resolve_compose_cmd
 from .service_schema import (
@@ -1136,5 +1137,98 @@ class ServiceManager:
             except OSError:
                 pass
             return False, f"failed to write secret: {e}"
+
+        return True, f"wrote {dest}"
+
+    # -------------------------------------------------------------------------
+    # Config management (operator-seam verb) — the jobs analog of write_secret
+    # -------------------------------------------------------------------------
+
+    def write_config(self, name: str, content: str) -> Tuple[bool, str]:
+        """Write *content* to a declared job's conf file as root:root 0600.
+
+        The exact jobs-side analog of :meth:`write_secret`: instead of a Layer 2
+        service's ``data/<name>/<env_file>``, it renders a scheduled job's
+        ``config/<name>.conf`` (e.g. login-alert.conf, immich-db-backup.conf,
+        which carry an NTFY_URL). Same security contract, guard for guard:
+        - Name is re-validated (defense in depth against unvalidated callers).
+        - Name MUST be a DECLARED JOB in config/jobs.d/ (the authorization gate,
+          analogous to secret_set's services.d gate) — this stops the operator
+          writing confs for arbitrary/undeclared names.
+        - Destination is realpath-containment-checked directly inside config/;
+          ``<name>.conf`` is a single path component, so any traversal fails.
+        - config/ must already exist (it does for any install); we FAIL rather
+          than mkdir the home — and we never create a subdirectory.
+        - Write is atomic: O_CREAT|O_EXCL temp in the same dir -> fsync ->
+          os.replace -> chmod 0600. A dropped SSH connection or SIGKILL
+          mid-stream never leaves a truncated .conf.
+        - Content is capped at ``_SECRET_MAX_BYTES`` and must be non-empty.
+
+        Returns (True, message) on success; (False, error) on any failure.
+        Caller (CLI) must run as root (sudo) — ownership is root:root by default.
+        """
+        # --- input guards (defense in depth) --------------------------------
+        if not content:
+            return False, "config content must not be empty"
+        content_bytes = content.encode("utf-8", errors="surrogateescape")
+        if len(content_bytes) > self._SECRET_MAX_BYTES:
+            return False, (
+                f"config content too large ({len(content_bytes)} bytes; max {self._SECRET_MAX_BYTES})"
+            )
+
+        # --- name re-validation (same slug validator write_secret uses) ------
+        # validate_service_name enforces the [a-z0-9][a-z0-9_-]{0,63} charset and
+        # rejects '..'/traversal + reserved names. The declared-job gate below
+        # independently re-validates the name against jobs.d's own name regex.
+        try:
+            validate_service_name(name, "job name")
+        except ServiceValidationError as e:
+            return False, str(e)
+
+        # --- declaration check (name MUST be a declared JOB) -----------------
+        try:
+            declarations, _invalid = jobs_d.load_job_declarations(self.syrvis_home)
+        except Exception as e:  # noqa: BLE001 - catch all load failures
+            return False, f"could not load job declarations: {e}"
+
+        if name not in declarations:
+            return False, f"job {name!r} is not declared in config/jobs.d/"
+
+        # --- path containment check ------------------------------------------
+        config_dir = self.syrvis_home / "config"
+        conf_path = Path(os.path.realpath(str(config_dir / f"{name}.conf")))
+        config_root = os.path.realpath(str(config_dir))
+        if not str(conf_path).startswith(config_root + os.sep):
+            return False, (
+                f"conf file for {name!r} escapes the config directory (path traversal)"
+            )
+
+        # --- config dir must already exist (created by install) --------------
+        # Do NOT mkdir the home — a missing config/ means a broken/absent install.
+        if not config_dir.exists():
+            return False, (
+                f"config directory {config_dir} does not exist — "
+                "this does not look like a SyrvisCore install"
+            )
+
+        # --- atomic 0600 write -----------------------------------------------
+        dest = str(conf_path)
+        tmp = dest + f".syrvis.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, content_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, dest)
+            # Belt-and-braces: ensure mode is 0600 on the final path.
+            os.chmod(dest, 0o600)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return False, f"failed to write config: {e}"
 
         return True, f"wrote {dest}"

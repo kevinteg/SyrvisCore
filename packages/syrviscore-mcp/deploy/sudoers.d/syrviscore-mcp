@@ -33,4 +33,5 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service remove -y -- *, \
     /volume1/syrviscore/bin/syrvis schedule apply --json, \
     /volume1/syrviscore/bin/syrvis schedule sync --json, \
-    /volume1/syrviscore/bin/syrvis secret set -- *
+    /volume1/syrviscore/bin/syrvis secret set -- *, \
+    /volume1/syrviscore/bin/syrvis config set -- *

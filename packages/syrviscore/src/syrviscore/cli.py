@@ -1648,6 +1648,45 @@ def config():
     pass
 
 
+@config.command("set")
+@click.argument("name")
+@handle_errors
+def config_set(name):
+    """Write a declared job's conf file from STDIN (root-only, atomic, 0600).
+
+    The scheduled-jobs analog of `secret set`. Reads the conf body from STDIN
+    and writes it atomically to config/<name>.conf. The name MUST be a job
+    declared in config/jobs.d/ (e.g. login-alert, immich-db-backup); undeclared
+    names are rejected.
+
+    The conf body NEVER appears in argv — it is read exclusively from stdin so
+    it does not appear in ps/audit logs or shell history.
+
+    Example (from home-tech render-job-confs):
+        echo "NTFY_URL=https://ntfy.example/topic" | sudo syrvis config set -- login-alert
+    """
+    privilege.ensure_elevated("Writing job config requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    # Read the conf body ONLY from stdin (never argv / env — keeps it out of ps,
+    # audit logs, and shell history).
+    content = click.get_text_stream("stdin").read()
+
+    if not content:
+        raise SyrvisError("config content must not be empty (nothing on stdin)")
+
+    _MAX = 65536  # 64 KiB; matches ServiceManager._SECRET_MAX_BYTES
+    if len(content.encode("utf-8", errors="surrogateescape")) > _MAX:
+        raise SyrvisError(f"config content too large (max {_MAX} bytes)")
+
+    manager = ServiceManager()
+    success, message = manager.write_config(name, content)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 @config.command()
 @handle_errors
 def generate_traefik():

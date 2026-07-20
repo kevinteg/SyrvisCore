@@ -332,6 +332,24 @@ COMMANDS: List[Command] = [
         expect_json=False,
         positional=Slot("name", KIND_NAME),
     ),
+    # config set writes a scheduled job's config/<name>.conf atomically as
+    # root:root 0600 — the jobs analog of secret_set (which writes a service's
+    # env_file). The conf body arrives on stdin ONLY: never a CLI argument, never
+    # logged, never a token. destructive=False (idempotent per-job overwrite).
+    # expect_json=False (plain "wrote <path>" line). No --json flag: the caller
+    # only needs the exit code. The name is gated to a DECLARED job in
+    # config/jobs.d/ by the CLI impl (write_config), just as secret_set gates on
+    # services.d — so the operator can render a VETTED job's conf but not create
+    # confs for arbitrary names.
+    Command(
+        "config_set",
+        "syrvis",
+        ["config", "set"],
+        sudo=True,
+        destructive=False,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
 ]
 
 COMMANDS_BY_ID = {c.id: c for c in COMMANDS}
