@@ -76,8 +76,22 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # declare itself critical or toggle its own enablement.
         "enabled",
         "critical",
+        # The privileged tier selector (design/22). "" (default) | "infra".
+        # `tier: infra` unlocks a fixed read-only host-mount allowlist for
+        # operator-authored first-party exporters; the AUTHORSHIP gate (only a
+        # services.d/deploy declaration may set it — never a git/image/catalog
+        # service) is enforced at install time in _install_from_definition.
+        "tier",
     }
 )
+
+ALLOWED_TIERS = frozenset({"", "infra"})
+
+# design/22: the ONLY absolute host mounts an `infra`-tier service may declare,
+# each READ-ONLY. Everything else stays refused even for infra. node_exporter
+# needs /proc,/sys,/ ; docker-socket-proxy needs the docker socket (and NOTHING
+# else mounts it — see design/22 §3).
+INFRA_HOST_MOUNTS = frozenset({"/proc", "/sys", "/", "/var/run/docker.sock"})
 
 # healthcheck sub-schema (audited subset of compose's healthcheck)
 ALLOWED_HEALTHCHECK_KEYS = frozenset({"test", "interval", "timeout", "retries", "start_period"})
@@ -270,24 +284,24 @@ def _validate_command(data: Any) -> List[str]:
     return list(data)
 
 
-def _validate_volume(vol: str) -> str:
+def _validate_volume(vol: str, tier: str = "") -> str:
     """Validate a volume entry against the mount policy.
 
-    Allowed:
+    Allowed (ALL tiers):
       - named volumes: ``myvolume:/container/path[:mode]``
       - relative host paths (resolved under data/<service>/):
         ``subdir:/container/path[:mode]``
-    Refused:
-      - absolute host paths (no /etc, no /, no /var/run/docker.sock)
-      - '..' traversal, '$' expansions, docker.sock in any form
-      - modes other than ro/rw
+    Refused (all tiers): '..' traversal, '$' expansions, modes other than ro/rw.
+
+    The **infra tier** (design/22) additionally permits an ENUMERATED, READ-ONLY
+    set of absolute host mounts — ``INFRA_HOST_MOUNTS`` (/proc, /sys, /, and the
+    docker socket) — for operator-authored first-party exporters. Any OTHER
+    absolute host path (or docker.sock at a non-canonical path) stays refused even
+    for infra, and a non-infra service keeps the full refusal. The gate that only
+    an operator declaration may SET ``tier: infra`` lives at install time.
     """
     if not isinstance(vol, str) or not vol:
         raise ServiceValidationError("Volume entries must be non-empty strings")
-    if "docker.sock" in vol:
-        raise ServiceValidationError(
-            "Volume {!r}: mounting the Docker socket is not permitted".format(vol)
-        )
     if "$" in vol:
         raise ServiceValidationError(
             "Volume {!r}: environment expansion is not permitted".format(vol)
@@ -310,6 +324,20 @@ def _validate_volume(vol: str) -> str:
             "Volume {!r}: container path must be absolute (no '..')".format(vol)
         )
 
+    # infra tier: an ENUMERATED, READ-ONLY absolute host mount is permitted. This
+    # is the ONLY path by which an absolute host path or the docker socket passes.
+    if tier == "infra" and host in INFRA_HOST_MOUNTS:
+        if mode != "ro":
+            raise ServiceValidationError(
+                "Volume {!r}: an infra host mount must be read-only (:ro)".format(vol)
+            )
+        return vol
+
+    # Everything else: the strict refusals (every tier).
+    if "docker.sock" in vol:
+        raise ServiceValidationError(
+            "Volume {!r}: mounting the Docker socket is not permitted".format(vol)
+        )
     if host.startswith("/") or host.startswith("~"):
         raise ServiceValidationError(
             "Volume {!r}: absolute host paths are not permitted; use a path "
@@ -388,6 +416,10 @@ class ServiceDefinition:
     # image's default CMD. Needed by argv-driven images (e.g. VictoriaMetrics'
     # vmagent/vmalert) that have no env-var-only configuration path.
     command: List[str] = field(default_factory=list)
+    # Privileged tier selector (design/22): "" (default) | "infra". `infra` unlocks
+    # the enumerated read-only host-mount allowlist; only an operator-authored
+    # declaration may set it (install-time authorship gate).
+    tier: str = ""
     # A data-dir-relative env file (installed 0600) — the recommended home for
     # secrets, keeping them out of this manifest.
     env_file: str = ""
@@ -462,11 +494,17 @@ class ServiceDefinition:
         if data.get("command") is not None:
             command = _validate_command(data["command"])
 
+        tier = data.get("tier", "")
+        if tier not in ALLOWED_TIERS:
+            raise ServiceValidationError(
+                "Invalid tier {!r}: allowed: '' (default) or 'infra'".format(tier)
+            )
+
         volumes = data.get("volumes", [])
         if not isinstance(volumes, list):
             raise ServiceValidationError("volumes must be a list")
         for vol in volumes:
-            _validate_volume(vol)
+            _validate_volume(vol, tier)
 
         networks = data.get("networks", [])
         if not isinstance(networks, list):
@@ -553,6 +591,7 @@ class ServiceDefinition:
             traefik=traefik,
             environment=environment,
             command=command,
+            tier=tier,
             env_file=env_file,
             volumes=volumes,
             networks=networks,
@@ -614,6 +653,8 @@ class ServiceDefinition:
             result["environment"] = self.environment
         if self.command:
             result["command"] = self.command
+        if self.tier:
+            result["tier"] = self.tier
         if self.env_file:
             result["env_file"] = self.env_file
         if self.volumes:
