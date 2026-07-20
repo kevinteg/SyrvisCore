@@ -1274,9 +1274,19 @@ class ServiceManager:
           4. materialize the declared env_file (0600) from the bundle secrets.
           5. regenerate the compose + (re)start.
 
-        Atomic: any failure rolls back this call's artifacts — a FRESH install
-        drops everything it created; an UPDATE keeps the pre-existing data +
-        declaration so the next apply retries. Secret VALUES are never logged.
+        Atomic PER CALL, with an ASYMMETRIC blast radius (know this):
+          - FRESH install failure → drops everything it created (service + its
+            just-made data dir); the declaration is kept (written by
+            install_declaration, never a rollback target) so a retry works.
+          - UPDATE failure → the service is taken DOWN (container stopped,
+            services/<name>/ + compose removed) and the declaration + manifest now
+            hold the NEW (failed) version; the OLD manifest/compose are NOT restored
+            — this is deliberately NOT blue/green. data/ is preserved. A
+            previously-healthy service is therefore torn down by a bad update;
+            recovery is a re-deploy with a good bundle. Validate the bundle before
+            applying (the CLI + schema already do; deploy-stack renders from vetted
+            repo files).
+        Secret VALUES are never logged or placed on argv.
 
         TARGETED: never touches another service (unlike reconcile, which
         converges/prunes the whole set). Caller (CLI) runs as root.

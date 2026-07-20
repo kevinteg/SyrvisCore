@@ -104,7 +104,7 @@ def validate_service_name(name: str, what: str = "name") -> str:
     The value is used as a filesystem path component and compose project
     name, so the charset is deliberately narrow.
     """
-    if not isinstance(name, str) or not NAME_RE.match(name):
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
         raise ServiceValidationError(
             "Invalid {} {!r}: must match [a-z0-9][a-z0-9_-]{{0,63}}".format(what, name)
         )
@@ -189,7 +189,7 @@ def _validate_healthcheck(data: Any) -> Dict[str, Any]:
     for key in ("interval", "timeout", "start_period"):
         if key in data:
             value = data[key]
-            if not isinstance(value, str) or not DURATION_RE.match(value):
+            if not isinstance(value, str) or not DURATION_RE.fullmatch(value):
                 raise ServiceValidationError(
                     "healthcheck.{} must match <number>(s|m|h), got {!r}".format(key, value)
                 )
@@ -214,12 +214,12 @@ def _validate_resources(data: Any) -> Dict[str, str]:
     out: Dict[str, str] = {}
     if "cpus" in data:
         cpus = str(data["cpus"])
-        if not CPUS_RE.match(cpus):
+        if not CPUS_RE.fullmatch(cpus):
             raise ServiceValidationError("resources.cpus must be a decimal, e.g. '1.5'")
         out["cpus"] = cpus
     if "memory" in data:
         memory = str(data["memory"])
-        if not MEMORY_RE.match(memory):
+        if not MEMORY_RE.fullmatch(memory):
             raise ServiceValidationError("resources.memory must be <number>(b|k|m|g), e.g. '512m'")
         out["memory"] = memory
     if not out:
@@ -455,7 +455,7 @@ class ServiceDefinition:
                     "Invalid environment entry {!r}: expected KEY=VALUE".format(entry)
                 )
             key = entry.split("=", 1)[0]
-            if not ENV_KEY_RE.match(key):
+            if not ENV_KEY_RE.fullmatch(key):
                 raise ServiceValidationError("Invalid environment variable name {!r}".format(key))
 
         command: List[str] = []
@@ -519,13 +519,13 @@ class ServiceDefinition:
 
         traefik = TraefikConfig.from_dict(data.get("traefik"))
         if traefik.enabled:
-            if not SUBDOMAIN_RE.match(traefik.subdomain or ""):
+            if not SUBDOMAIN_RE.fullmatch(traefik.subdomain or ""):
                 raise ServiceValidationError(
                     "Invalid traefik subdomain {!r}: must be a single DNS label".format(
                         traefik.subdomain
                     )
                 )
-            if traefik.domain and not DOMAIN_RE.match(traefik.domain):
+            if traefik.domain and not DOMAIN_RE.fullmatch(traefik.domain):
                 raise ServiceValidationError(
                     "Invalid traefik domain {!r}: must be a dot-separated domain with "
                     "at least 2 labels (e.g. 'tegtmeier.me'), each label matching "

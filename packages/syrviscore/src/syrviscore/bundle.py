@@ -172,11 +172,21 @@ class DeployBundle:
             raise BundleValidationError("'secrets' must be a mapping of ENV=value")
         out: Dict[str, str] = {}
         for key, value in raw.items():
-            if not isinstance(key, str) or not ENV_KEY_RE.match(key):
+            # fullmatch (not match): a $-anchored match() accepts a trailing '\n'
+            # (Python's $ matches before a final newline), which would corrupt the
+            # env_file. fullmatch closes that.
+            if not isinstance(key, str) or not ENV_KEY_RE.fullmatch(key):
                 raise BundleValidationError("invalid secret env name {!r}".format(key))
             if not isinstance(value, str):
                 # Do NOT include the value in the error (it is a secret).
                 raise BundleValidationError("secret {!r}: value must be a string".format(key))
+            # The env_file is line-oriented (KEY=value\n). A value containing a
+            # newline would inject extra attacker-chosen KEY=VALUE lines, so reject
+            # it — and never echo the value in the error.
+            if "\n" in value or "\r" in value:
+                raise BundleValidationError(
+                    "secret {!r}: value must not contain a newline".format(key)
+                )
             out[key] = value
         if out and not service.env_file:
             raise BundleValidationError(

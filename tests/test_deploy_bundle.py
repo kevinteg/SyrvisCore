@@ -118,12 +118,28 @@ class TestBundleSchema:
                 base_bundle(configs=[{"dest": "config/a", "content": "x", "mode": "0777"}])
             )
 
-    @pytest.mark.parametrize("key", ["1BAD", "has space", "with-dash", ""])
+    @pytest.mark.parametrize("key", ["1BAD", "has space", "with-dash", "", "FOO\n", "FOO\nBAR"])
     def test_bad_secret_env_key_rejected(self, key):
+        # incl. trailing/embedded newline — a $-anchored .match() would let "FOO\n"
+        # through (fullmatch closes it), corrupting the line-oriented env_file.
         with pytest.raises(BundleValidationError):
             DeployBundle.from_dict(
                 base_bundle(service=base_manifest(env_file="secrets.env"), secrets={key: "v"})
             )
+
+    @pytest.mark.parametrize("value", ["a\nADMIN=1", "a\r\nX=2", "line\nbreak"])
+    def test_secret_value_with_newline_rejected(self, value):
+        # A newline in a VALUE would inject extra KEY=VALUE lines into the env_file.
+        with pytest.raises(BundleValidationError, match="newline"):
+            DeployBundle.from_dict(
+                base_bundle(service=base_manifest(env_file="secrets.env"), secrets={"OK": value})
+            )
+
+    @pytest.mark.parametrize("name", ["svc\n", "sv\nc", "SVC", "../evil"])
+    def test_service_name_with_newline_or_bad_charset_rejected(self, name):
+        # fullmatch: "svc\n" must not become a data/<name>/ dir + declaration.
+        with pytest.raises(BundleValidationError):
+            DeployBundle.from_dict(base_bundle(service=base_manifest(name=name)))
 
     def test_secrets_require_env_file(self):
         with pytest.raises(BundleValidationError, match="env_file"):
@@ -213,6 +229,33 @@ class TestDeployBundleApply:
         assert not (tmp_path / "data" / "snmp-exporter").exists()
         # ...but the declared intent remains for a retry (written outside rollback)
         assert (tmp_path / "config" / "services.d" / "snmp-exporter.yaml").exists()
+
+    def test_failed_update_blast_radius_is_documented_behavior(self, tmp_path):
+        # design/21: a FAILED update takes the service DOWN, keeps data, and leaves
+        # the declaration at the NEW (failed) manifest — NOT blue/green. Pin it so
+        # the documented limitation is intentional + regression-guarded.
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]  # fresh install ok
+        (tmp_path / "data" / "snmp-exporter" / "keepme").write_text("x")
+        mgr._start_service = lambda name, cp: (False, "boom")  # the update will fail at start
+        changed = DeployBundle.from_dict(
+            {
+                "service": base_manifest(
+                    version="v0.30.2", env_file="secrets.env",
+                    volumes=["config:/etc/snmp_exporter:ro"], networks=["proxy"],
+                ),
+                "configs": [{"dest": "config/snmp.yml", "content": "changed\n"}],
+                "secrets": {"SNMP_V3_USER": "u", "SNMP_V3_AUTH_PASS": "a", "SNMP_V3_PRIV_PASS": "p"},
+            }
+        )
+        ok, msg = mgr.deploy_bundle(changed)
+        assert not ok and "failed" in msg
+        # torn down: compose + service dir gone; data preserved; declaration KEPT
+        # and now holds the new (failed) version — recovery is a re-deploy.
+        assert not (tmp_path / "compose" / "snmp-exporter.yaml").exists()
+        assert (tmp_path / "data" / "snmp-exporter" / "keepme").exists()
+        decl = tmp_path / "config" / "services.d" / "snmp-exporter.yaml"
+        assert decl.exists() and "v0.30.2" in decl.read_text()
 
     def test_no_secret_value_in_return_message(self, tmp_path):
         mgr = _manager(tmp_path)
