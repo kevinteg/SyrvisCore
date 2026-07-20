@@ -202,6 +202,87 @@ class TestComposeGenerationContainment:
         mgr = self._manager(tmp_path)
         assert mgr._project_name("gollum") == "syrvis-gollum"
 
+    def test_generated_compose_emits_command(self, tmp_path):
+        mgr = self._manager(tmp_path)
+        mgr._ensure_directories()
+        argv = [
+            "--promscrape.config=/etc/vmagent/scrape.yml",
+            "--remoteWrite.url=http://victoria-metrics:8428/api/v1/write",
+        ]
+        svc = ServiceDefinition.from_dict(base_service(name="vmagent", command=argv))
+        compose_path = mgr._generate_compose_file(svc)
+
+        import yaml
+
+        compose = yaml.safe_load(compose_path.read_text())
+        # emitted verbatim as an exec-form list (never coerced to a shell string)
+        assert compose["services"]["vmagent"]["command"] == argv
+        # still fully confined
+        assert compose["services"]["vmagent"]["security_opt"] == ["no-new-privileges:true"]
+
+    def test_generated_compose_omits_absent_command(self, tmp_path):
+        mgr = self._manager(tmp_path)
+        mgr._ensure_directories()
+        svc = ServiceDefinition.from_dict(base_service(name="nocmd"))
+        compose_path = mgr._generate_compose_file(svc)
+
+        import yaml
+
+        compose = yaml.safe_load(compose_path.read_text())
+        assert "command" not in compose["services"]["nocmd"]
+
+    def test_command_cannot_inject_sibling_compose_keys(self, tmp_path):
+        # The strongest guarantee: a command element carrying YAML-structural
+        # payload (newlines, a leading '- ', colons) must land as a single quoted
+        # scalar list element, NEVER as a sibling key in the service's compose
+        # mapping. PyYAML quoting enforces this — assert it directly so a future
+        # emit change (e.g. a hand-rolled writer) can't silently smuggle a
+        # privileged: true / cap_add sibling in through the argv.
+        mgr = self._manager(tmp_path)
+        mgr._ensure_directories()
+        payload = [
+            "--config=/etc/x.yml",
+            "--flag=1\nprivileged: true",  # newline → would-be sibling key
+            "- cap_add:\n  - SYS_ADMIN",  # leading '- ' → would-be list item/key
+            "value: with: colons",  # colons must not create a mapping
+        ]
+        svc = ServiceDefinition.from_dict(base_service(name="vmagent", command=payload))
+        compose_path = mgr._generate_compose_file(svc)
+
+        import yaml
+
+        svc_dict = yaml.safe_load(compose_path.read_text())["services"]["vmagent"]
+        # command survives byte-for-byte as an exec-form list
+        assert svc_dict["command"] == payload
+        # nothing leaked out as a sibling compose key
+        forbidden = {
+            "privileged", "cap_add", "devices", "network_mode",
+            "entrypoint", "user", "pid", "ipc", "cgroup_parent",
+        }
+        assert set(svc_dict) & forbidden == set()
+        # only the keys we intentionally emit are present
+        assert set(svc_dict) <= {
+            "image", "container_name", "restart", "networks", "security_opt", "command",
+        }
+
+    def test_command_control_chars_accepted_and_inert(self, tmp_path):
+        # Control chars inside an arg are legitimate literals — a shell never sees
+        # them (exec form). Validation accepts them; tab/newline round-trip through
+        # the compose emit intact and never split the argument.
+        argv = ["--x=a\tb", "--y=c\nd", "--z=e\rf", "--n=g\x00h"]
+        assert ServiceDefinition.from_dict(base_service(command=argv)).command == argv
+        mgr = self._manager(tmp_path)
+        mgr._ensure_directories()
+        # NUL omitted here: the concern in THIS assertion is the PyYAML emit
+        # round-trip, and NUL's YAML representation is not the property under test.
+        emit_argv = ["--x=a\tb", "--y=c\nd"]
+        svc = ServiceDefinition.from_dict(base_service(name="cc", command=emit_argv))
+
+        import yaml
+
+        compose = yaml.safe_load(mgr._generate_compose_file(svc).read_text())
+        assert compose["services"]["cc"]["command"] == emit_argv
+
 
 class TestElevationPreservesHome:
     def test_self_elevate_forwards_syrvis_home(self, monkeypatch):
@@ -271,16 +352,111 @@ class TestSchemaV2Fields:
             with pytest.raises(ServiceValidationError):
                 ServiceDefinition.from_dict(base_service(resources=bad))
 
+    def test_command_valid_argv_accepted(self):
+        argv = [
+            "--promscrape.config=/etc/vmagent/scrape.yml",
+            "--remoteWrite.url=http://victoria-metrics:8428/api/v1/write",
+        ]
+        svc = ServiceDefinition.from_dict(base_service(command=argv))
+        assert svc.command == argv
+        # absent command defaults to an empty list (use image's default CMD)
+        assert ServiceDefinition.from_dict(base_service()).command == []
+
+    def test_command_shell_metachars_are_inert_not_rejected(self):
+        # The exec form (a LIST, never a shell string) is WHY these are safe: a
+        # metacharacter inside an argv element is passed literally to the
+        # entrypoint and never seen by a shell, so ';', '|', '&' cannot chain a
+        # second command. We therefore accept them verbatim (a PromQL/relabel
+        # match like {job=~"a|b"} is a legitimate flag value) rather than
+        # performing security-theater rejection. Only '$' (real compose-time
+        # ${VAR} interpolation) is banned — see test_command_invalid_rejected.
+        argv = ["--promscrape.config=/etc/vmagent/scrape.yml;echo pwned", '--match={job=~"a|b"}']
+        svc = ServiceDefinition.from_dict(base_service(command=argv))
+        assert svc.command == argv  # preserved exactly, no splitting, no execution
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "--flag=value",  # bare-string shell form is refused (exec form only)
+            [],  # empty list is meaningless — reject like resources={}
+            ["--url=${SECRET}"],  # '$' interpolation is not permitted
+            ["--url=$SECRET"],  # bare '$' too
+            ["ok", ""],  # empty entry
+            ["ok", 42],  # non-string entry
+            ["ok", None],  # non-string entry
+        ],
+    )
+    def test_command_invalid_rejected(self, cmd):
+        with pytest.raises(ServiceValidationError):
+            ServiceDefinition.from_dict(base_service(command=cmd))
+
     def test_v2_fields_round_trip_to_dict(self):
         data = base_service(
             healthcheck={"test": ["CMD", "true"]},
+            command=["--foo=bar", "--baz"],
             env_file="secrets.env",
             resources={"memory": "256m"},
         )
         svc = ServiceDefinition.from_dict(data)
         out = svc.to_dict()
         assert out["healthcheck"] == {"test": ["CMD", "true"]}
+        assert out["command"] == ["--foo=bar", "--baz"]
         assert out["env_file"] == "secrets.env"
         assert out["resources"] == {"memory": "256m"}
         # and the round-tripped dict re-validates
         ServiceDefinition.from_dict(out)
+        # an empty command is NOT serialized (keeps installed manifests clean)
+        assert "command" not in ServiceDefinition.from_dict(base_service()).to_dict()
+
+
+class TestCommandReconcileAndConverge:
+    """command must survive real persistence, drive drift, and stay off the shorthand."""
+
+    def test_command_change_triggers_reconcile(self):
+        # The reconcile diff compares services_d._content_dict(current, declared).
+        # If command were dropped from that projection, a command appearing or
+        # changing would silently NOT redeploy. Pin both directions.
+        from syrviscore import services_d
+
+        no_cmd = ServiceDefinition.from_dict(base_service(name="vmagent"))
+        cmd_a = ServiceDefinition.from_dict(base_service(name="vmagent", command=["--a=1"]))
+        cmd_b = ServiceDefinition.from_dict(base_service(name="vmagent", command=["--a=2"]))
+        cmd_a2 = ServiceDefinition.from_dict(base_service(name="vmagent", command=["--a=1"]))
+
+        assert services_d._content_dict(no_cmd) != services_d._content_dict(cmd_a)  # appear
+        assert services_d._content_dict(cmd_a) != services_d._content_dict(cmd_b)  # change
+        assert services_d._content_dict(cmd_a) == services_d._content_dict(cmd_a2)  # no churn
+
+    def test_command_survives_installed_manifest_writer(self, tmp_path):
+        # dump_definition(..., include_orchestration=False) is the actual
+        # installed-manifest path (_write_manifest). Prove command round-trips
+        # through the real writer + loader, not just to_dict/from_dict.
+        from syrviscore.service_schema import dump_definition
+
+        argv = [
+            "--promscrape.config=/etc/vmagent/scrape.yml",
+            "--remoteWrite.url=http://victoria-metrics:8428/api/v1/write",
+        ]
+        svc = ServiceDefinition.from_dict(base_service(name="vmagent", command=argv))
+        manifest = tmp_path / "syrvis-service.yaml"
+        dump_definition(svc, manifest, include_orchestration=False)
+        assert ServiceDefinition.from_yaml(manifest).command == argv
+
+    def test_converge_shorthand_rejects_command(self):
+        # The image-first desired-doc shorthand (ALLOWED_SERVICE_KEYS) intentionally
+        # omits command (as it does volumes/healthcheck/resources). A command there
+        # must fail LOUDLY, never silently drop.
+        from syrviscore import converge
+
+        with pytest.raises(converge.ConvergeError, match="unknown key"):
+            converge.validate_desired(
+                {
+                    "version": 1,
+                    "services": {
+                        "vmagent": {
+                            "image": "victoriametrics/vmagent:v1.147.0",
+                            "command": ["--a=1"],
+                        }
+                    },
+                }
+            )

@@ -661,6 +661,15 @@ class ServiceManager:
         if service.environment:
             svc["environment"] = service.environment
 
+        # Container command override (argv / exec form). The schema validated it
+        # as a non-empty list of literal strings (no shell, no '$'), so emit it
+        # verbatim: it parameterizes the image's ENTRYPOINT and runs under the
+        # same confinement (no-new-privileges, no caps, no host mounts) as
+        # every other Layer 2 service. Needed by argv-driven images such as
+        # VictoriaMetrics' vmagent/vmalert, which have no env-var-only config.
+        if service.command:
+            svc["command"] = list(service.command)
+
         # Volumes were validated by the schema (no absolute host paths, no
         # '..', no docker.sock). Every host source resolves under this
         # service's own data directory; we re-check containment here.

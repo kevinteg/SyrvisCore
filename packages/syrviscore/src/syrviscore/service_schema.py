@@ -58,6 +58,7 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "container_name",
         "traefik",
         "environment",
+        "command",
         "env_file",
         "volumes",
         "networks",
@@ -226,6 +227,49 @@ def _validate_resources(data: Any) -> Dict[str, str]:
     return out
 
 
+def _validate_command(data: Any) -> List[str]:
+    """Validate a container command override (the compose ``command:``, i.e. argv).
+
+    SECURITY / trust boundary. ``command:`` sets the container's CMD — the argv
+    handed to the image's ENTRYPOINT. It runs INSIDE the container under the same
+    confinement every Layer 2 service gets (``no-new-privileges:true``, no added
+    capabilities, no host mounts, bridge-only networking), so it grants no
+    authority the image did not already have: the image's own ENTRYPOINT+CMD
+    already execute arbitrary code on ``up``, and ``command:`` merely
+    parameterizes the CMD of an image the manifest already fully controls. It is
+    therefore in the same benign class as ``environment:`` — NOT with the refused
+    keys (``privileged``/``cap_add``/``devices``/``network_mode``/docker.sock),
+    which grant authority over the HOST.
+
+    To keep it auditable we constrain it harder than compose would:
+
+      - a LIST of strings only (exec form). The bare-string shell form is
+        refused, so there is no shell word-splitting or metacharacter surprise —
+        each argument is explicit.
+      - every element a non-empty string.
+      - no ``$`` — the argv is literal and pinned, never subject to compose-time
+        ``${VAR}`` interpolation (the same rule the volume validator enforces).
+    """
+    if not isinstance(data, list) or not data:
+        raise ServiceValidationError(
+            "command must be a non-empty list of argv strings (exec form); the "
+            "bare-string shell form is not accepted"
+        )
+    for arg in data:
+        if not isinstance(arg, str) or not arg:
+            raise ServiceValidationError("command entries must be non-empty strings")
+        # ASCII '$' (0x24) only — that is the ONLY character docker-compose treats
+        # as an interpolation trigger, so banning it is what makes the argv literal.
+        # Fullwidth/lookalike dollars (U+FF04 '＄', U+FE69 '﹩') are deliberately NOT
+        # matched: compose never interpolates them, so they are inert literals.
+        if "$" in arg:
+            raise ServiceValidationError(
+                "Invalid command entry {!r}: environment expansion ('$') is not "
+                "permitted; pin literal arguments".format(arg)
+            )
+    return list(data)
+
+
 def _validate_volume(vol: str) -> str:
     """Validate a volume entry against the mount policy.
 
@@ -339,6 +383,11 @@ class ServiceDefinition:
     container_name: str = ""
     traefik: TraefikConfig = field(default_factory=TraefikConfig)
     environment: List[str] = field(default_factory=list)
+    # Container command override (argv / exec form). Audited by _validate_command:
+    # a non-empty list of literal strings, no shell, no '$'. Empty == use the
+    # image's default CMD. Needed by argv-driven images (e.g. VictoriaMetrics'
+    # vmagent/vmalert) that have no env-var-only configuration path.
+    command: List[str] = field(default_factory=list)
     # A data-dir-relative env file (installed 0600) — the recommended home for
     # secrets, keeping them out of this manifest.
     env_file: str = ""
@@ -408,6 +457,10 @@ class ServiceDefinition:
             key = entry.split("=", 1)[0]
             if not ENV_KEY_RE.match(key):
                 raise ServiceValidationError("Invalid environment variable name {!r}".format(key))
+
+        command: List[str] = []
+        if data.get("command") is not None:
+            command = _validate_command(data["command"])
 
         volumes = data.get("volumes", [])
         if not isinstance(volumes, list):
@@ -499,6 +552,7 @@ class ServiceDefinition:
             container_name=container_name,
             traefik=traefik,
             environment=environment,
+            command=command,
             env_file=env_file,
             volumes=volumes,
             networks=networks,
@@ -558,6 +612,8 @@ class ServiceDefinition:
 
         if self.environment:
             result["environment"] = self.environment
+        if self.command:
+            result["command"] = self.command
         if self.env_file:
             result["env_file"] = self.env_file
         if self.volumes:

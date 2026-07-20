@@ -71,6 +71,7 @@ restart: unless-stopped         # no | always | on-failure | unless-stopped
 | `container_name` | | string | same charset as `name`; defaults to `name` |
 | `traefik` | | map | routing block, see below |
 | `environment` | | list | `KEY=VALUE` strings; key must match `[A-Za-z_][A-Za-z0-9_]*` |
+| `command` | | list | argv override (exec form): a **non-empty list of literal strings**. The bare-string shell form, empty entries, and `$` are all rejected. See [The `command` field](#the-command-field). |
 | `volumes` | | list | mount policy below |
 | `networks` | | list | each a valid name; `proxy` is always included |
 | `config_templates` | | list | `{source, dest}` — both relative subpaths (no absolute, no `..`) |
@@ -133,6 +134,47 @@ layer unvalidated still can't escape the service's own data directory.
 
 A manifest that carries inline `environment:` entries is written `0600` (they may
 hold secrets); prefer `env_file`.
+
+## The `command` field
+
+Some upstream images are **argv-driven** and have no env-var-only configuration
+path — VictoriaMetrics' `vmagent`/`vmalert`, for instance, must be told
+`--promscrape.config=…` / `--remoteWrite.url=…` on the command line. `command:`
+supplies that argv. It is emitted as the compose `command:` (the container's CMD,
+handed to the image's ENTRYPOINT).
+
+```yaml
+command:
+  - "--promscrape.config=/etc/vmagent/scrape.yml"
+  - "--remoteWrite.url=http://victoria-metrics:8428/api/v1/write"
+```
+
+**Why this is safe at the trust boundary.** Unlike the refused keys
+(`privileged`, `cap_add`, `devices`, `network_mode`, docker.sock) — which grant
+authority over the **host** — `command:` runs argv *inside* the container, under
+the same confinement every service gets: `no-new-privileges:true`, no added
+capabilities, no host mounts, bridge-only networking. The container already runs
+arbitrary code (the `image:` itself is arbitrary, and its ENTRYPOINT+CMD execute
+on `up`), so `command:` grants no new authority — it only parameterizes the CMD
+of an image the manifest already fully controls. It is in the same benign class
+as `environment:`.
+
+**Audit constraints** (stricter than compose):
+
+- a **list of strings only** (exec form) — the bare-string shell form is
+  rejected, so there is no shell word-splitting or metacharacter interpretation;
+- every element a **non-empty string**;
+- **no `$`** — the argv is literal and pinned, never subject to compose-time
+  `${VAR}` interpolation (the same rule the volume policy enforces). Render any
+  dynamic value into the config file the flags point at, not into the argv.
+
+Omitting `command:` (or an empty list) uses the image's default CMD.
+
+> **Rollback note.** Unlike the orchestration keys, `command:` is written into the
+> installed `services/<name>/syrvis-service.yaml`. Rolling SyrvisCore back to a
+> version that predates this field will make a `command`-bearing manifest fail to
+> parse (strict allowlist) until the next reconcile — **non-destructive**: reconcile
+> re-materializes the manifest and the service data is untouched.
 
 ## What you cannot (yet) declare
 
