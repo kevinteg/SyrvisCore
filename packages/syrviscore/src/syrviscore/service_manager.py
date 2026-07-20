@@ -45,6 +45,15 @@ def _image_tag(image: str) -> str:
     return "0.0.0"
 
 
+# design/22: the source_url prefixes that mark a service as OPERATOR-AUTHORED —
+# the trust anchor for `tier: infra`. install_declaration (a config/services.d
+# declaration) sets "services.d:<name>"; deploy_bundle (a bundle streamed over the
+# operator seam) sets "deploy:<name>". A git-repo (add), image-first (run), or
+# catalog service sets a git URL / image ref / "catalog:<name>" and therefore can
+# NEVER escalate itself to the infra tier. This tuple is the whole authorship gate.
+OPERATOR_AUTHORED_PREFIXES = ("services.d:", "deploy:")
+
+
 class ServiceManager:
     """Manage Layer 2 services for SyrvisCore."""
 
@@ -492,7 +501,9 @@ class ServiceManager:
         # can NEVER escalate itself to infra. This is the load-bearing rule of
         # design/22 (the schema accepts tier:infra when parsing so a materialized
         # manifest round-trips; the trust decision is made HERE, by authorship).
-        if service.tier == "infra" and not str(service.source_url or "").startswith("services.d:"):
+        if service.tier == "infra" and not str(service.source_url or "").startswith(
+            OPERATOR_AUTHORED_PREFIXES
+        ):
             self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
             return False, (
                 "tier: infra is only permitted for an operator-authored "
@@ -1329,6 +1340,24 @@ class ServiceManager:
         self._ensure_directories()
         service_path = self.services_dir / name
         fresh = not service_path.exists()
+
+        # A deploy bundle is delivered over the operator seam → operator-authored by
+        # construction (the bundle schema never carries source_url, so it's None
+        # here). Mark it "deploy:<name>" so the tier:infra authorship gate (design/22)
+        # accepts it on the FRESH path (install_declaration preserves a preset
+        # source_url) AND so the assertion below covers the UPDATE path, which does
+        # NOT route through _install_from_definition's gate. Without this, an update
+        # could turn a benign on-disk service into an infra one without
+        # re-authorization (adversarial review N1) — reachable only over the root
+        # seam, but the gate must be explicit here, not incidental.
+        if not service.source_url:
+            service.source_url = "deploy:{}".format(name)
+        if service.tier == "infra" and not str(service.source_url or "").startswith(
+            OPERATOR_AUTHORED_PREFIXES
+        ):
+            return False, (
+                "tier: infra is only permitted for an operator-authored declaration"
+            )
 
         # 1. Declaration + install/manifest. The declaration is written in BOTH
         #    branches OUTSIDE the rollback boundary (a failed deploy keeps the

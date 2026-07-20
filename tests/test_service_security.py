@@ -535,3 +535,46 @@ class TestInfraTier:
         sp.mkdir(parents=True, exist_ok=True)
         ok, msg = mgr._install_from_definition(svc, sp, start=False)
         assert not ok and "infra" in msg.lower()
+
+    def test_deploy_bundle_update_path_handles_infra(self, tmp_path):
+        # design/22 N1: deploy_bundle's UPDATE path regenerates compose WITHOUT
+        # routing through _install_from_definition's gate. A bundle is
+        # operator-authored (seam-delivered) so infra is PERMITTED — but the gate
+        # must be EXPLICIT, not incidental. Fresh-install benign, then update to
+        # infra; both succeed and the update emits the allowlisted host mounts.
+        import yaml
+        from syrviscore.bundle import DeployBundle
+        mgr = self._mgr(tmp_path)
+        benign = ServiceDefinition.from_dict(base_service(
+            name="node-exporter", image="prom/node-exporter:v1.12.1"))
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=benign))          # fresh
+        assert ok, msg
+        infra = ServiceDefinition.from_dict(base_service(
+            name="node-exporter", image="prom/node-exporter:v1.12.1",
+            tier="infra", volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]))
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=infra))           # update
+        assert ok, msg
+        assert infra.source_url == "deploy:node-exporter"  # marked operator-authored
+        vols = yaml.safe_load(
+            (tmp_path / "compose" / "node-exporter.yaml").read_text()
+        )["services"]["node-exporter"]["volumes"]
+        assert "/proc:/host/proc:ro" in vols and "/:/rootfs:ro" in vols
+
+    def test_compose_emit_is_defense_in_depth(self, tmp_path):
+        # Even if the schema were bypassed (volumes mutated AFTER validation), the
+        # emit must never produce a non-allowlisted or writable host bind.
+        import yaml
+        mgr = self._mgr(tmp_path)
+        svc = ServiceDefinition.from_dict(base_service(
+            name="ne", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc.volumes.append("/etc:/host/etc:ro")  # inject non-allowlisted host path
+        with pytest.raises(ServiceValidationError, match="escapes the service data directory"):
+            mgr._generate_compose_file(svc)
+        # a :rw allowlisted mount is forced back to :ro by the emit
+        svc2 = ServiceDefinition.from_dict(base_service(
+            name="ne2", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc2.volumes[:] = ["/:/rootfs:rw"]
+        vols = yaml.safe_load(
+            mgr._generate_compose_file(svc2).read_text()
+        )["services"]["ne2"]["volumes"]
+        assert vols == ["/:/rootfs:ro"]
