@@ -219,3 +219,57 @@ class TestConfigSetCommandShape:
         full_cmd = " ".join(str(a) for a in argv)
         assert "topsecret" not in full_cmd, f"conf body leaked into argv: {full_cmd}"
         assert proc.last["kwargs"].get("input") == "NTFY_URL=topsecret\n"
+
+
+# ---------------------------------------------------------------------------
+# Deploy command shape (design/21 — the bundle is on stdin; the only argv token
+# is the is_name-gated service name)
+# ---------------------------------------------------------------------------
+
+
+class TestDeployCommandShape:
+    def test_command_registered(self):
+        assert "deploy" in COMMANDS_BY_ID
+
+    def test_command_is_sudo(self):
+        assert COMMANDS_BY_ID["deploy"].sudo is True
+
+    def test_command_is_not_destructive(self):
+        assert COMMANDS_BY_ID["deploy"].destructive is False
+
+    def test_command_expect_json_false(self):
+        assert COMMANDS_BY_ID["deploy"].expect_json is False
+
+    def test_command_has_name_positional(self):
+        cmd = COMMANDS_BY_ID["deploy"]
+        assert cmd.positional is not None
+        assert cmd.positional.name == "name"
+
+    def test_command_has_no_flags(self):
+        """The whole bundle is on stdin — the only argv token is the name."""
+        assert COMMANDS_BY_ID["deploy"].flags == []
+
+    def test_token_shape_includes_separator(self):
+        cfg = make_config()
+        cmd = get_command("deploy")
+        tokens = build_remote_tokens(cfg, cmd, {"name": "snmp-exporter"})
+        # ['sudo', '-n', '/volume1/syrviscore/bin/syrvis', 'deploy', '--', 'snmp-exporter']
+        assert "--" in tokens
+        assert tokens[-1] == "snmp-exporter"
+        assert "deploy" in tokens
+
+    def test_stdin_bundle_not_in_tokens(self):
+        """The bundle (carrying secret values) arrives on stdin only — never argv."""
+        runner, proc = make_runner()
+        cmd = get_command("deploy")
+        runner.run(
+            cmd,
+            {
+                "name": "snmp-exporter",
+                "_stdin": '{"service":{"name":"snmp-exporter"},"secrets":{"SNMP_V3_AUTH_PASS":"topsecret"}}',
+            },
+        )
+        argv = proc.last["argv"]
+        full_cmd = " ".join(str(a) for a in argv)
+        assert "topsecret" not in full_cmd, f"bundle leaked into argv: {full_cmd}"
+        assert "topsecret" in proc.last["kwargs"].get("input", "")

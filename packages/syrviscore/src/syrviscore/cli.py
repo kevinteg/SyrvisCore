@@ -708,6 +708,59 @@ def secret_set(name):
 # =============================================================================
 
 
+@cli.command("deploy")
+@click.argument("name")
+@handle_errors
+def deploy(name):
+    """Apply a resolved deployment bundle (JSON on STDIN) to service NAME (root-only).
+
+    The encapsulated services-plane apply (design/21): one syrvis-bundle — the
+    service manifest + non-secret configs + secret values — becomes a running,
+    up-to-date service atomically (install OR update; configs 0644; env_file
+    0600; start LAST; rollback on failure). NAME is the authoritative target; a
+    bundle whose service.name differs is rejected.
+
+    The bundle arrives on STDIN only — secrets never touch argv/ps/logs. A
+    deployment repo assembles it from discoverable files (design/21; home-tech's
+    scripts/deploy-stack) and streams it over the operator seam:
+
+        <bundle.json> | sudo syrvis deploy -- snmp-exporter
+    """
+    privilege.ensure_elevated("Deploying a service requires elevated privileges.")
+    from syrviscore.bundle import BundleValidationError, DeployBundle
+    from syrviscore.service_manager import ServiceManager
+
+    # Read the bundle from stdin ONLY (secrets never on argv/ps). Cap the stream
+    # so a runaway/hostile input can't OOM the box.
+    _MAX = 1024 * 1024  # 1 MiB — generous for a bundle; per-field caps are tighter
+    raw = click.get_text_stream("stdin").read(_MAX + 1)
+    if len(raw) > _MAX:
+        raise SyrvisError(f"bundle too large (max {_MAX} bytes)")
+    if not raw.strip():
+        raise SyrvisError("no bundle on stdin")
+    try:
+        doc = jsonlib.loads(raw)
+    except ValueError as e:
+        raise SyrvisError(f"bundle is not valid JSON: {e}")
+    try:
+        bundle = DeployBundle.from_dict(doc)
+    except BundleValidationError as e:
+        raise SyrvisError(str(e))
+    # The argv NAME is the shim-gated, authoritative target; refuse a bundle that
+    # claims a different service.name (never deploy something else than named).
+    if bundle.service.name != name:
+        raise SyrvisError(
+            f"bundle service name {bundle.service.name!r} does not match deploy target {name!r}"
+        )
+
+    manager = ServiceManager()
+    success, message = manager.deploy_bundle(bundle)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors

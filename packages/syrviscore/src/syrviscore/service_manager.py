@@ -7,11 +7,15 @@ Each service is defined by a syrvis-service.yaml file in a git repository.
 
 import os
 import shutil
+import stat
 import subprocess
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
+
+if TYPE_CHECKING:
+    from .bundle import DeployBundle
 
 from . import exposure as exposure_mod
 from . import jobs_d
@@ -1247,4 +1251,152 @@ class ServiceManager:
                 pass
             return False, f"failed to write config: {e}"
 
+        return True, f"wrote {dest}"
+
+    # -------------------------------------------------------------------------
+    # Deployment bundle (operator-seam verb) — one atomic install/update of a
+    # single L2 service from a resolved syrvis-bundle (design/21).
+    # -------------------------------------------------------------------------
+
+    def deploy_bundle(self, bundle: "DeployBundle") -> Tuple[bool, str]:
+        """Apply a resolved deployment bundle to ONE service, atomically.
+
+        The encapsulated services-plane apply (design/21): manifest + non-secret
+        configs + secret values → a running, up-to-date service in one call.
+        Steps, in order — start LAST so the container reads a complete config on
+        first boot (no crash-loop window):
+
+          1. (re)write the services.d declaration (source of truth; outside the
+             rollback boundary, so a failed apply keeps the intent for a retry).
+          2. fresh service → install WITHOUT starting; existing → rewrite the
+             effective manifest (data preserved).
+          3. place each non-secret config into data/<name>/<dest> (0644).
+          4. materialize the declared env_file (0600) from the bundle secrets.
+          5. regenerate the compose + (re)start.
+
+        Atomic: any failure rolls back this call's artifacts — a FRESH install
+        drops everything it created; an UPDATE keeps the pre-existing data +
+        declaration so the next apply retries. Secret VALUES are never logged.
+
+        TARGETED: never touches another service (unlike reconcile, which
+        converges/prunes the whole set). Caller (CLI) runs as root.
+        """
+        service = bundle.service
+        name = service.name
+        try:
+            self._service_paths(name)  # re-validate name as a path component
+        except ServiceValidationError as e:
+            return False, str(e)
+
+        self._ensure_directories()
+        service_path = self.services_dir / name
+        fresh = not service_path.exists()
+
+        # 1. Declaration + install/manifest. The declaration is written in BOTH
+        #    branches OUTSIDE the rollback boundary (a failed deploy keeps the
+        #    declared intent for a retry — the install rollback never removes it).
+        if fresh:
+            # install_declaration writes the declaration + creates services/<name>/
+            # + the manifest + installs WITHOUT starting (configs+secrets must land
+            # before first boot). It rolls back its OWN artifacts on failure.
+            ok, msg = self.install_declaration(service, start=False)
+            if not ok:
+                return False, msg
+        else:
+            # Update in place — rewrite declaration + effective manifest (data kept).
+            try:
+                services_d.write_declaration(self.syrvis_home, service)
+            except Exception as e:  # noqa: BLE001
+                return False, f"could not write declaration for {name!r}: {e}"
+            self._write_manifest(service, service_path)
+
+        try:
+            # 2. Non-secret configs (0644, container-readable over the :ro mount).
+            for cfg in bundle.configs:
+                ok, msg = self._place_config(name, cfg.dest, cfg.content)
+                if not ok:
+                    raise RuntimeError(msg)
+
+            # 3. Secrets → the declared env_file (0600). Reuse write_secret (atomic,
+            #    dest derived from env_file). msg carries no secret value.
+            if bundle.secrets:
+                env_body = "".join(f"{k}={v}\n" for k, v in bundle.secrets.items())
+                ok, msg = self.write_secret(name, env_body)
+                if not ok:
+                    raise RuntimeError(msg)
+
+            # 4. Compose + start LAST.
+            compose_path = self._generate_compose_file(service)
+            ok, msg = self._start_service(name, compose_path)
+            if not ok:
+                raise RuntimeError(f"failed to start: {msg}")
+            self._reload_traefik()
+        except Exception as e:  # noqa: BLE001
+            # Fresh: drop everything (incl. the just-created data dir). Update:
+            # keep data + declaration (they predate this call) for a clean retry.
+            self._rollback_add(name, keep_data=not fresh)
+            return False, f"deploy of {name!r} failed ({e})"
+
+        verb = "installed" if fresh else "updated"
+        return True, (
+            f"deployed {name} ({verb}; {len(bundle.configs)} config(s), "
+            f"{len(bundle.secrets)} secret(s))"
+        )
+
+    def _place_config(self, name: str, relpath: str, content: str) -> Tuple[bool, str]:
+        """Write a NON-SECRET bundle config into data/<name>/<relpath> (root 0644).
+
+        Same atomic contract as :meth:`write_secret` but 0644 — the file is a
+        config a (non-root) container reads over a :ro mount. The dest was
+        schema-validated (relative, no '..', not the env_file); we realpath-confine
+        it to data/<name>/ here (defense in depth) and REFUSE to downgrade an
+        existing 0600 file (never expose a secret by overwriting it world-readable).
+        """
+        if not isinstance(content, str):
+            return False, "config content must be a string"
+        content_bytes = content.encode("utf-8", errors="surrogateescape")
+        if len(content_bytes) > self._SECRET_MAX_BYTES:
+            return False, (
+                f"config content too large ({len(content_bytes)} bytes; max {self._SECRET_MAX_BYTES})"
+            )
+        if os.path.isabs(relpath) or ".." in PurePosixPath(relpath).parts:
+            return False, f"invalid config dest {relpath!r}: must be relative with no '..'"
+
+        data_dir_for_svc = self.data_dir / name
+        dest_path = Path(os.path.realpath(str(data_dir_for_svc / relpath)))
+        data_root = os.path.realpath(str(data_dir_for_svc))
+        if dest_path != Path(data_root) and not str(dest_path).startswith(data_root + os.sep):
+            return False, f"config dest {relpath!r} escapes the service data directory"
+        if not data_dir_for_svc.exists():
+            return False, f"data directory {data_dir_for_svc} does not exist"
+        # Never downgrade an existing 0600-style secret file to 0644.
+        if dest_path.exists():
+            try:
+                mode = stat.S_IMODE(dest_path.stat().st_mode)
+                if not (mode & 0o077):
+                    return False, (
+                        f"refusing to overwrite {dest_path} (mode {mode:04o}; a 0600-style "
+                        "secret) — config put only writes non-secret 0644 files"
+                    )
+            except OSError:
+                pass
+
+        dest = str(dest_path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        tmp = dest + f".syrvis.{os.getpid()}.tmp"
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                os.write(fd, content_bytes)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, dest)
+            os.chmod(dest, 0o644)
+        except OSError as e:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            return False, f"failed to write config: {e}"
         return True, f"wrote {dest}"

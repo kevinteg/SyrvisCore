@@ -160,5 +160,8 @@ fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "config" ] && [ "${5}" = "set" ] && [ "${6}" = "--" ] && is_name "${7}"; then
   set -f; exec "$@"
 fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "deploy" ] && [ "${5}" = "--" ] && is_name "${6}"; then
+  set -f; exec "$@"
+fi
 echo "syrvis-mcp-shim: command not on allowlist" >&2
 exit 1

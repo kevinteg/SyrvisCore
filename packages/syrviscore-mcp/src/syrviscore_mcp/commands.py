@@ -350,6 +350,26 @@ COMMANDS: List[Command] = [
         expect_json=False,
         positional=Slot("name", KIND_NAME),
     ),
+    # deploy applies a resolved syrvis-bundle (manifest + non-secret configs +
+    # secret values) to ONE service atomically — the encapsulated services-plane
+    # apply (design/21). The whole bundle arrives on stdin ONLY (secrets never on
+    # argv/ps/logs); the sole argv token is the is_name-gated service name, which
+    # is authoritative (a bundle claiming a different service.name is rejected by
+    # the CLI). destructive=False (idempotent per-service install/update, like
+    # service_declare/secret_set — the CLI's deploy_bundle rolls back on failure).
+    # expect_json=False (plain "deployed <name> ..." line). No --json flag: the
+    # caller (deploy-stack) needs the exit code + message. timeout_s mirrors
+    # service_run (a fresh deploy may pull the image + start the container).
+    Command(
+        "deploy",
+        "syrvis",
+        ["deploy"],
+        sudo=True,
+        destructive=False,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+        timeout_s=600,
+    ),
 ]
 
 COMMANDS_BY_ID = {c.id: c for c in COMMANDS}
