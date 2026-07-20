@@ -1321,9 +1321,9 @@ class ServiceManager:
             self._write_manifest(service, service_path)
 
         try:
-            # 2. Non-secret configs (0644, container-readable over the :ro mount).
+            # 2. Configs — 0644 (container-readable) or 0600 (secret config file).
             for cfg in bundle.configs:
-                ok, msg = self._place_config(name, cfg.dest, cfg.content)
+                ok, msg = self._place_config(name, cfg.dest, cfg.content, secret=cfg.secret)
                 if not ok:
                     raise RuntimeError(msg)
 
@@ -1353,15 +1353,20 @@ class ServiceManager:
             f"{len(bundle.secrets)} secret(s))"
         )
 
-    def _place_config(self, name: str, relpath: str, content: str) -> Tuple[bool, str]:
-        """Write a NON-SECRET bundle config into data/<name>/<relpath> (root 0644).
+    def _place_config(
+        self, name: str, relpath: str, content: str, secret: bool = False
+    ) -> Tuple[bool, str]:
+        """Write a bundle config into data/<name>/<relpath> (root-owned).
 
-        Same atomic contract as :meth:`write_secret` but 0644 — the file is a
-        config a (non-root) container reads over a :ro mount. The dest was
-        schema-validated (relative, no '..', not the env_file); we realpath-confine
-        it to data/<name>/ here (defense in depth) and REFUSE to downgrade an
-        existing 0600 file (never expose a secret by overwriting it world-readable).
+        Mode is 0600 when ``secret`` (a config FILE carrying a secret — e.g. an
+        ntfy scfg / a Grafana datasource token), else 0644 (a config a non-root
+        container reads over a :ro mount). Same atomic contract as
+        :meth:`write_secret`. The dest was schema-validated (relative, no '..',
+        not the env_file); we realpath-confine it to data/<name>/ here (defense in
+        depth). The 0600-downgrade guard is 0644-ONLY — a secret write is itself
+        0600, so overwriting an existing 0600 there is not a downgrade.
         """
+        mode = 0o600 if secret else 0o644
         if not isinstance(content, str):
             return False, "config content must be a string"
         content_bytes = content.encode("utf-8", errors="surrogateescape")
@@ -1379,14 +1384,15 @@ class ServiceManager:
             return False, f"config dest {relpath!r} escapes the service data directory"
         if not data_dir_for_svc.exists():
             return False, f"data directory {data_dir_for_svc} does not exist"
-        # Never downgrade an existing 0600-style secret file to 0644.
-        if dest_path.exists():
+        # Never DOWNGRADE an existing 0600 secret to a world-readable 0644 write.
+        # A secret config writes 0600 (not a downgrade), so this guard is 0644-only.
+        if not secret and dest_path.exists():
             try:
-                mode = stat.S_IMODE(dest_path.stat().st_mode)
-                if not (mode & 0o077):
+                existing_mode = stat.S_IMODE(dest_path.stat().st_mode)
+                if not (existing_mode & 0o077):
                     return False, (
-                        f"refusing to overwrite {dest_path} (mode {mode:04o}; a 0600-style "
-                        "secret) — config put only writes non-secret 0644 files"
+                        f"refusing to overwrite {dest_path} (mode {existing_mode:04o}; a "
+                        "0600-style secret) with a non-secret 0644 config"
                     )
             except OSError:
                 pass
@@ -1395,14 +1401,14 @@ class ServiceManager:
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         tmp = dest + f".syrvis.{os.getpid()}.tmp"
         try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             try:
                 os.write(fd, content_bytes)
                 os.fsync(fd)
             finally:
                 os.close(fd)
             os.replace(tmp, dest)
-            os.chmod(dest, 0o644)
+            os.chmod(dest, mode)
         except OSError as e:
             try:
                 os.unlink(tmp)

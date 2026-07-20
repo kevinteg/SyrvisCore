@@ -34,7 +34,7 @@ from .service_schema import ENV_KEY_RE, ServiceDefinition, ServiceValidationErro
 BUNDLE_API_VERSION = "syrvis-bundle/v1"
 
 ALLOWED_BUNDLE_KEYS = frozenset({"apiVersion", "service", "configs", "secrets"})
-ALLOWED_CONFIG_KEYS = frozenset({"dest", "content"})
+ALLOWED_CONFIG_KEYS = frozenset({"dest", "content", "secret"})
 
 # A config value is capped like a secret — enough for any real config file,
 # rejects an OOM/DoS stream. Matches ServiceManager._SECRET_MAX_BYTES.
@@ -52,16 +52,23 @@ class BundleValidationError(SyrvisError, ValueError):
 
 @dataclass(frozen=True)
 class BundleConfig:
-    """A single non-secret config file to place in the service's data dir.
+    """A single config file to place in the service's data dir.
 
     ``dest`` is relative to ``data/<service>/`` (validated: relative, no ``..``);
-    ``content`` is the literal file body (written 0644 — container-readable over a
-    :ro mount). Non-secret by contract: SECRETS travel in ``DeployBundle.secrets``
-    and land in the 0600 env_file, never here.
+    ``content`` is the literal file body. ``secret`` selects the mode:
+
+      - ``secret=False`` (default) → written **0644**, container-readable over a
+        :ro mount. Non-secret content (scrape targets, SNMP module, …).
+      - ``secret=True`` → written **0600** (root-only). For a config FILE that
+        carries a secret and is NOT env-format (so it can't ride ``secrets``) —
+        e.g. an ntfy-alertmanager scfg with a bearer topic, a Grafana datasource
+        with a token. The deployment repo renders the secret in from sops before
+        streaming, exactly like an env_file secret (never committed / on argv).
     """
 
     dest: str
     content: str
+    secret: bool = False
 
 
 @dataclass
@@ -160,10 +167,13 @@ class DeployBundle:
             seen_dests.add(norm)
             if env_file_norm is not None and norm == env_file_norm:
                 raise BundleValidationError(
-                    "config dest {!r} is the declared env_file — secrets go in the "
-                    "'secrets' section (written 0600), not 'configs' (0644)".format(dest)
+                    "config dest {!r} is the declared env_file — env secrets go in the "
+                    "'secrets' section, not 'configs'".format(dest)
                 )
-            out.append(BundleConfig(dest=dest, content=content))
+            secret = entry.get("secret", False)
+            if not isinstance(secret, bool):
+                raise BundleValidationError("config {!r}: 'secret' must be a boolean".format(dest))
+            out.append(BundleConfig(dest=dest, content=content, secret=secret))
         return out
 
     @staticmethod

@@ -118,6 +118,20 @@ class TestBundleSchema:
                 base_bundle(configs=[{"dest": "config/a", "content": "x", "mode": "0777"}])
             )
 
+    def test_config_secret_flag(self):
+        b = DeployBundle.from_dict(
+            base_bundle(configs=[{"dest": "config/a", "content": "x", "secret": True}])
+        )
+        assert b.configs[0].secret is True
+        # default is non-secret
+        b2 = DeployBundle.from_dict(base_bundle(configs=[{"dest": "config/a", "content": "x"}]))
+        assert b2.configs[0].secret is False
+        # must be a bool
+        with pytest.raises(BundleValidationError, match="boolean"):
+            DeployBundle.from_dict(
+                base_bundle(configs=[{"dest": "config/a", "content": "x", "secret": "yes"}])
+            )
+
     @pytest.mark.parametrize("key", ["1BAD", "has space", "with-dash", "", "FOO\n", "FOO\nBAR"])
     def test_bad_secret_env_key_rejected(self, key):
         # incl. trailing/embedded newline — a $-anchored .match() would let "FOO\n"
@@ -279,6 +293,33 @@ class TestDeployBundleApply:
         assert mgr.deploy_bundle(_snmp_bundle())[0]
         ok, msg = mgr._place_config("snmp-exporter", "../../escape", "x")
         assert not ok
+
+    def test_secret_config_written_0600(self, tmp_path):
+        mgr = _manager(tmp_path)
+        b = DeployBundle.from_dict(
+            {
+                "service": base_manifest(
+                    name="svc", env_file="secrets.env",
+                    volumes=["config:/etc/x:ro"], networks=["proxy"],
+                ),
+                "configs": [
+                    {"dest": "config/public.yml", "content": "a"},
+                    {"dest": "config/token.scfg", "content": "topic secret-slug", "secret": True},
+                ],
+                "secrets": {"K": "v"},
+            }
+        )
+        assert mgr.deploy_bundle(b)[0]
+        pub = tmp_path / "data" / "svc" / "config" / "public.yml"
+        sec = tmp_path / "data" / "svc" / "config" / "token.scfg"
+        assert stat.S_IMODE(pub.stat().st_mode) == 0o644  # non-secret config
+        assert stat.S_IMODE(sec.stat().st_mode) == 0o600  # secret config
+        # a secret RE-write over the existing 0600 is fine (not a downgrade)
+        ok, _ = mgr._place_config("svc", "config/token.scfg", "topic new", secret=True)
+        assert ok and stat.S_IMODE(sec.stat().st_mode) == 0o600
+        # but a NON-secret write over that 0600 is refused (downgrade guard)
+        ok2, msg2 = mgr._place_config("svc", "config/token.scfg", "x", secret=False)
+        assert not ok2 and "secret" in msg2.lower()
 
 
 # ---------------------------------------------------------------------------
