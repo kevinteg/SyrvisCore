@@ -599,6 +599,13 @@ class DockerManager:
                     break
 
             if not container:
+                # Fall back to a Layer 2 service — its container runs in its own
+                # per-service compose project `syrvis-<name>` (not the core
+                # project), so the operator seam can read L2 logs (vmagent,
+                # snmp-exporter, immich, ...) too, not just the core stack.
+                container = self._find_l2_container(service)
+
+            if not container:
                 available = [c.labels.get("com.docker.compose.service", c.name) for c in containers]
                 raise ValueError(
                     f"Service '{service}' not found. Available services: {', '.join(available)}"
@@ -610,14 +617,23 @@ class DockerManager:
             return "No containers found"
 
         if follow:
-            # For follow mode, use docker-compose logs
+            # Core services stream via `docker compose logs -f`; a resolved Layer 2
+            # container (its own compose project) streams directly from the container.
+            is_l2 = bool(
+                service
+                and containers
+                and containers[0].labels.get("com.docker.compose.project") != self.PROJECT_NAME
+            )
             try:
-                cmd = ["logs", "-f", "--tail", str(tail)]
-                if service:
-                    cmd.append(service)
-
-                self._run_compose_command(cmd)
-            except subprocess.CalledProcessError:
+                if is_l2:
+                    for chunk in containers[0].logs(stream=True, follow=True, tail=tail):
+                        print(chunk.decode("utf-8", errors="replace"), end="")
+                else:
+                    cmd = ["logs", "-f", "--tail", str(tail)]
+                    if service:
+                        cmd.append(service)
+                    self._run_compose_command(cmd)
+            except (subprocess.CalledProcessError, KeyboardInterrupt):
                 # User likely interrupted with Ctrl+C
                 pass
             return ""
@@ -635,6 +651,25 @@ class DockerManager:
                 logs.append("")
 
             return "\n".join(logs)
+
+    def _find_l2_container(self, service: str):
+        """Resolve a Layer 2 service's container by its per-service compose project.
+
+        L2 services run as isolated compose projects named ``syrvis-<name>``
+        (ServiceManager._project_name), so an L2 container carries the label
+        ``com.docker.compose.project=syrvis-<service>``. Returns the container or
+        None. Constrained to syrvis-managed L2 projects — never an arbitrary
+        container — so `logs` over the operator seam only ever exposes a managed
+        service's logs.
+        """
+        try:
+            matches = self.client.containers.list(
+                all=True,
+                filters={"label": f"com.docker.compose.project=syrvis-{service}"},
+            )
+            return matches[0] if matches else None
+        except DockerException:
+            return None
 
     @staticmethod
     def _format_uptime(seconds: float) -> str:

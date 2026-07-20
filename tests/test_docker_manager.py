@@ -228,12 +228,35 @@ class TestGetContainerLogs:
         assert "portainer" in logs
 
     def test_get_logs_service_not_found(self, mock_docker_client):
-        """Test error when service not found."""
+        """Test error when service not found (not core, not an L2 project)."""
         mock_docker_client.containers.list.return_value = []
 
         manager = DockerManager()
         with pytest.raises(ValueError, match="Service 'nonexistent' not found"):
             manager.get_container_logs(service="nonexistent")
+
+    def test_get_logs_l2_service_fallback(self, mock_docker_client):
+        """A Layer 2 service is resolved via its per-service compose project
+        (syrvis-<name>), so `logs` over the operator seam reaches L2 services
+        (vmagent/snmp-exporter/immich/...), not just the core stack."""
+        l2 = Mock()
+        l2.name = "vmagent"
+        l2.labels = {
+            "com.docker.compose.project": "syrvis-vmagent",
+            "com.docker.compose.service": "vmagent",
+        }
+        l2.logs.return_value = b"vmagent: scrape snmp-exporter ok; remote-write ok\n"
+        # 1st list() = get_core_containers (core project) -> not there;
+        # 2nd list() = _find_l2_container (syrvis-vmagent project) -> [l2]
+        mock_docker_client.containers.list.side_effect = [[], [l2]]
+
+        manager = DockerManager()
+        logs = manager.get_container_logs(service="vmagent", follow=False)
+
+        assert "vmagent" in logs and "scrape snmp-exporter ok" in logs
+        # the fallback filtered on the per-service project label
+        calls = mock_docker_client.containers.list.call_args_list
+        assert any("syrvis-vmagent" in str(c) for c in calls)
 
 
 class TestFormatUptime:
