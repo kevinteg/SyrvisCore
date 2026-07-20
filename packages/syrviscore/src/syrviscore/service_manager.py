@@ -1340,6 +1340,15 @@ class ServiceManager:
             ok, msg = self._start_service(name, compose_path)
             if not ok:
                 raise RuntimeError(f"failed to start: {msg}")
+            # `docker compose up -d` compares the COMPOSE SPEC (image/command/
+            # volumes/env), NOT the CONTENT of bind-mounted files — so on an UPDATE
+            # a changed config/secret would keep serving the OLD content (the
+            # process read it once at start). Restart the container to re-read it.
+            # Only when there IS a config/secret and the compose didn't already
+            # recreate it (fresh installs start with the final content; config-less
+            # services like victoria-metrics need no restart).
+            if not fresh and (bundle.configs or bundle.secrets):
+                self._compose(name, compose_path, "restart", timeout=90)
             self._reload_traefik()
         except Exception as e:  # noqa: BLE001
             # Fresh: drop everything (incl. the just-created data dir). Update:

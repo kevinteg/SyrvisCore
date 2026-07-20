@@ -271,6 +271,26 @@ class TestDeployBundleApply:
         decl = tmp_path / "config" / "services.d" / "snmp-exporter.yaml"
         assert decl.exists() and "v0.30.2" in decl.read_text()
 
+    def test_config_carrying_update_restarts_to_apply_change(self, tmp_path):
+        # `up -d` won't recreate an unchanged compose, so a changed bind-mounted
+        # config/secret would keep serving old content — deploy_bundle restarts the
+        # container on a config/secret-carrying UPDATE to re-read it.
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]  # fresh install
+        calls = []
+        mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
+        assert mgr.deploy_bundle(_snmp_bundle())[0]  # update (has config + secrets)
+        assert any("restart" in a for a in calls), f"expected a restart; calls={calls}"
+
+    def test_configless_update_does_not_restart(self, tmp_path):
+        mgr = _manager(tmp_path)
+        b = DeployBundle.from_dict(base_bundle(service=base_manifest(name="vm", networks=["proxy"])))
+        assert mgr.deploy_bundle(b)[0]  # fresh
+        calls = []
+        mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
+        assert mgr.deploy_bundle(b)[0]  # update, NO configs/secrets
+        assert not any("restart" in a for a in calls), "config-less update must not restart"
+
     def test_no_secret_value_in_return_message(self, tmp_path):
         mgr = _manager(tmp_path)
         ok, msg = mgr.deploy_bundle(_snmp_bundle())
