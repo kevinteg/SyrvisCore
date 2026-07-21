@@ -1,0 +1,49 @@
+# Build + push the SyrvisCore dashboard container image from CI (no local Docker
+# needed). The dashboard bakes the `syrviscore` library into its image, so it must
+# be rebuilt whenever the dashboard package (its version, or the syrviscore it
+# pulls in) changes — otherwise its baked schema lags the CLI and it mis-flags
+# valid declarations. Tags the image at the dashboard's own __version__.
+name: dashboard-image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "packages/syrviscore-dashboard/**"
+      - ".github/workflows/dashboard-image.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve dashboard version
+        id: ver
+        run: |
+          v=$(grep '^__version__' \
+            packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py \
+            | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Dashboard version: $v"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Context is the REPO ROOT — the Dockerfile COPYs packages/syrviscore too.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/syrviscore-dashboard/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/kevinteg/syrviscore-dashboard:${{ steps.ver.outputs.version }}
+            ghcr.io/kevinteg/syrviscore-dashboard:latest
