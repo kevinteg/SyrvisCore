@@ -532,3 +532,37 @@ class TestStartSelfHeals:
         ok, _ = sm.start("app")
         assert ok and started.get("yes")
         assert _stat.S_IMODE(vol_dir.stat().st_mode) == 0o777
+
+
+class TestTolerantLoad:
+    """The dashboard (read-only, image-baked syrviscore) tolerates a NEWER top-level
+    schema field so a valid declaration isn't flagged 'invalid' — CLI stays strict."""
+
+    def test_strict_flags_unknown_top_level_key(self, home):
+        _declare(home, "svc", future_only_field="x")
+        valid, invalid = services_d.load_declarations(home)  # strict (default)
+        assert "svc" not in valid
+        assert any(r["file"] == "svc.yaml" for r in invalid)
+
+    def test_tolerant_loads_despite_unknown_top_level_key(self, home):
+        _declare(home, "svc", future_only_field="x")
+        valid, invalid = services_d.load_declarations(home, tolerant=True)
+        assert "svc" in valid and not invalid
+
+    def test_tolerant_still_reports_real_errors(self, home):
+        # a genuine error (declared name != filename) must still surface as invalid
+        _declare(home, "svc")
+        p = services_d.get_declarations_dir(home) / "svc.yaml"
+        doc = yaml.safe_load(p.read_text())
+        doc["name"] = "not-svc"
+        p.write_text(yaml.safe_dump(doc))
+        valid, invalid = services_d.load_declarations(home, tolerant=True)
+        assert "svc" not in valid and "not-svc" not in valid
+        assert any(r["file"] == "svc.yaml" for r in invalid)
+
+    def test_tolerant_matches_strict_for_clean_declarations(self, home):
+        _declare(home, "svc")
+        assert (
+            services_d.load_declarations(home, tolerant=True)[0].keys()
+            == services_d.load_declarations(home)[0].keys()
+        )

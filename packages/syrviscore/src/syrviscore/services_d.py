@@ -56,6 +56,7 @@ def declaration_path(syrvis_home: Path, name: str) -> Path:
 
 def load_declarations(
     syrvis_home: Path,
+    tolerant: bool = False,
 ) -> Tuple[Dict[str, ServiceDefinition], List[Dict[str, str]]]:
     """Load every ``services.d/*.yaml`` with per-file failure isolation.
 
@@ -63,6 +64,14 @@ def load_declarations(
         (valid, invalid): ``valid`` maps name -> ServiceDefinition; ``invalid``
         is a list of ``{"file", "error"}`` rows — a broken file never blocks
         the others (the design's core requirement).
+
+    ``tolerant`` (READ-ONLY callers only, e.g. the dashboard): before parsing,
+    drop any TOP-LEVEL key this reader's schema doesn't recognise, so a
+    declaration written for a NEWER schema field than this (possibly older,
+    image-baked) reader knows still loads for display instead of being flagged
+    "invalid". A real error (bad value on a known key, name mismatch) still
+    surfaces. The strict default is for the deploy/reconcile path, which must
+    NEVER silently ignore an unaudited key — that rejection is the trust boundary.
     """
     directory = get_declarations_dir(syrvis_home)
     valid: Dict[str, ServiceDefinition] = {}
@@ -75,6 +84,8 @@ def load_declarations(
             data = yaml.safe_load(path.read_text())
             if not isinstance(data, dict):
                 raise ValueError("declaration must be a mapping")
+            if tolerant:
+                data = _drop_unknown_top_level_keys(data)
             service = ServiceDefinition.from_dict(data)
             if service.name != path.stem:
                 raise ValueError(
@@ -84,6 +95,19 @@ def load_declarations(
         except Exception as exc:  # noqa: BLE001 - isolation: report, keep loading
             invalid.append({"file": path.name, "error": str(exc)})
     return valid, invalid
+
+
+def _drop_unknown_top_level_keys(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``data`` minus top-level keys outside the current schema allowlist.
+
+    Lets a READ-ONLY reader tolerate a declaration written for a newer schema (a
+    field added after this reader was built) — the unknown field is simply not
+    shown. NEVER call this on the deploy/install path: there, ``from_dict``'s
+    rejection of an unaudited key is a deliberate trust boundary.
+    """
+    from .service_schema import ALLOWED_TOP_LEVEL_KEYS
+
+    return {k: v for k, v in data.items() if k in ALLOWED_TOP_LEVEL_KEYS}
 
 
 def _content_dict(service: ServiceDefinition) -> Dict[str, Any]:

@@ -24,7 +24,11 @@ def declarations() -> dict:
         from syrviscore.service_manager import ServiceManager
 
         manager = ServiceManager()
-        declared, invalid = services_d.load_declarations(manager.syrvis_home)
+        # tolerant=True: the dashboard is READ-ONLY and its syrviscore is baked into
+        # its image, so it can lag the CLI's schema. Tolerating a newer top-level
+        # field (a future `command:`/`tier:`-style addition) keeps the service
+        # visible instead of flagging it "invalid" — the CLI stays the strict gate.
+        declared, invalid = services_d.load_declarations(manager.syrvis_home, tolerant=True)
         # Read-only plan: per-declared-service docker status via the manager,
         # no prune policy, nothing mutated.
         plan = services_d.build_reconcile_plan(manager, declared, invalid)
