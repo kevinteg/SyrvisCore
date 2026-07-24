@@ -147,6 +147,12 @@ def image_updates(ctx: ToolContext) -> Dict:
     return _run(ctx, "image_updates")
 
 
+def export(ctx: ToolContext) -> Dict:
+    # Read-only snapshot of the instance as a syrvis-instance bundle. ALWAYS
+    # redacted over the seam — secret values never transit the MCP.
+    return _run(ctx, "export")
+
+
 def profile_enable(ctx: ToolContext, name: str) -> Dict:
     # Intent-only (declarations + seeded configs, never overwriting) — like
     # service_declare. Fail-closed against the platform's profile set.

@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "service_catalog",
     "profile_list",
     "image_updates",
+    "export",
     # privileged, non-destructive
     "start",
     "stop",
@@ -86,6 +87,7 @@ READ_ONLY = {
     "service_catalog",
     "profile_list",
     "image_updates",
+    "export",
 }
 IDEMPOTENT = {
     "reconcile",
@@ -109,7 +111,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 44
+    assert len(EXPECTED_TOOLS) == 45
 
 
 def test_destructive_tools_have_destructive_hint():

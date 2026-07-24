@@ -967,6 +967,39 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
         click.echo("(dry run — nothing written)")
 
 
+@cli.command("export")
+@click.option("--json", "as_json", is_flag=True, help="Emit JSON (default is YAML)")
+@click.option(
+    "--reveal-secrets",
+    is_flag=True,
+    help="Include real secret values (elevated; output is sensitive). Default: redacted.",
+)
+@handle_errors
+def export_cmd(as_json, reveal_secrets):
+    """Export the live instance as a syrvis-instance/v1 bundle (read companion to apply).
+
+    Snapshots .env + stack.yaml + the services.d declaration set — for GitOps
+    snapshotting, diffing a desired bundle against reality, or DR inspection.
+    Secret VALUES are REDACTED by default (safe to print/commit/diff);
+    --reveal-secrets includes real values for a re-appliable backup (requires
+    elevation, and the output is sensitive).
+
+        syrvis export                 # redacted YAML to stdout
+        sudo syrvis export --reveal-secrets --json > instance.json
+    """
+    from syrviscore.instance_bundle import export_instance
+
+    if reveal_secrets:
+        privilege.ensure_elevated("Revealing secret values requires elevated privileges.")
+    bundle = export_instance(get_syrvis_home(), reveal_secrets=reveal_secrets)
+    if as_json:
+        click.echo(jsonlib.dumps(bundle, indent=2))
+    else:
+        import yaml as yamllib
+
+        click.echo(yamllib.safe_dump(bundle, default_flow_style=False, sort_keys=False), nl=False)
+
+
 @cli.command("updates")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @click.option("--refresh", is_flag=True, help="Bypass the cache and re-query registries")

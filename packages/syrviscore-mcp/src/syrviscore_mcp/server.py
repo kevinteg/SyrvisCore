@@ -99,6 +99,14 @@ def image_updates() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def export() -> dict:
+    """Snapshot the live instance as a syrvis-instance/v1 bundle — .env (secrets
+    REDACTED), stack.yaml, and the services.d declaration set (read-only). The
+    inverse of apply; for GitOps snapshot/diff and DR inspection."""
+    return _call(tools.export)
+
+
+@mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""
     return _call(tools.logs, service=service, tail=tail)

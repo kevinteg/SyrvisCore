@@ -65,6 +65,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "profile" ] && [ "${3}" = "list" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "export" ] && [ "${5}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 3 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "updates" ] && [ "${3}" = "--json" ]; then
   set -f; exec "$@"
 fi

@@ -48,10 +48,10 @@ drift test asserts it).
 
 | Class | Examples | Notes |
 |---|---|---|
-| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `logs` | All support `--json` |
-| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run` | sudo only to read 0600 config |
-| Converge (sudo) | `start/stop/restart`, `stack apply`, `reconcile`, `stack enable/disable`, `service declare/adopt/run/add/start/stop/update`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle |
-| Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake |
+| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs` | All support `--json`; `updates` queries registries (report-only) |
+| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export` | sudo only to read 0600 config; `export` is always redacted over the seam |
+| Converge (sudo) | `start/stop/restart`, `stack apply`, `reconcile`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle |
+| Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake |
 | Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context |
 
 ### Deliberately NOT on the seam
@@ -181,4 +181,19 @@ The argv service name is authoritative — a bundle claiming a different
 Verification loop for a deployment: `verify --json` (health + drift),
 `reconcile --dry-run --json` (L2 plan), `apply --dry-run --json` (core plan),
 `schedule list --json` (jobs + per-script sha256), `stack hostnames --json`
-(external-state diff) — all seam-readable without a break-glass login.
+(external-state diff), `updates --json` (available container-image updates),
+`export --json` (a redacted snapshot of the whole declared instance) — all
+seam-readable without a break-glass login.
+
+## 4. Keeping current
+
+- **Platform version** (`syrviscore`/`syrviscore-manager`): `syrvisctl check`
+  → `syrvisctl install <ver>` (from GitHub releases; a release ships new
+  core-image pins). `syrvisctl activate`/`rollback` re-sync the seam.
+- **Container images**: `syrvis updates --json` reports newer *compatible*
+  registry tags for every pinned image (core + installed L2), report-only.
+  Apply an L2 image update declaratively with `syrvis service set-image
+  --image <ref> -- <name>` (re-pins the manifest + declaration, pulls,
+  restarts). Core-tier images advance with a platform release. A deployment
+  repo can also bump the pin in its `services.d/` manifest and re-`apply`.
+- **DNS/tunnel state**: `stack hostnames --json` → the deployment reconciles.

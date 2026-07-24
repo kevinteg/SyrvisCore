@@ -204,7 +204,12 @@ syrvis service start <name>   # Start a service
 syrvis service stop <name>    # Stop a service
 syrvis service update <name>  # Update from git repo
 syrvis service task --task T -- <name>  # Run a DECLARED one-shot task (tasks: block)
+syrvis service set-image --image REF -- <name>  # Re-pin an L2 image + redeploy (declarative update)
 syrvis service catalog        # Bundled catalog templates (--json)
+
+# Updates + export
+syrvis updates [--json --refresh]  # Available container-image updates (report-only)
+syrvis export [--json --reveal-secrets]  # Snapshot instance as syrvis-instance/v1 (redacted)
 
 # Profiles (platform-curated service sets)
 syrvis profile list           # Available profiles (--json)

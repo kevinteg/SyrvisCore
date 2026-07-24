@@ -92,6 +92,11 @@ COMMANDS: List[Command] = [
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
+    # export snapshots the live instance as a syrvis-instance bundle. Read-only,
+    # but sudo so it can read the 0600 config over the seam (like reconcile_plan);
+    # over the seam it is ALWAYS redacted (no --reveal-secrets shape exists, so a
+    # secret value can never transit the MCP/seam).
+    Command("export", "syrvis", ["export"], sudo=True, read_only=True, flags=["--json"]),
     # image_updates queries external registries (openWorldHint on the MCP side)
     # but only READS + caches; it never pulls or changes anything.
     Command(

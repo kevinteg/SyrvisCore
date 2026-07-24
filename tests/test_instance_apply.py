@@ -393,3 +393,68 @@ class TestDeclarationRemovalFailure:
         b = InstanceBundle.from_dict(bundle_doc(declarations={"web": decl()}))
         with pytest.raises(InstanceBundleError, match="could not remove declaration"):
             apply_instance_bundle(b, tmp_path)
+
+
+class TestExport:
+    def _seed(self, home):
+        (home / "config" / "services.d").mkdir(parents=True)
+        (home / "config" / ".env").write_text(
+            "DOMAIN=example.com\nTRAEFIK_IP=192.168.1.100\nX_TOKEN=supersecret\n"
+        )
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["cloudflared"].enabled = True
+        (home / "config" / "stack.yaml").write_text(st.to_yaml())
+        (home / "config" / "services.d" / "web.yaml").write_text(yaml.safe_dump(decl(name="web")))
+
+    def test_redacts_secrets_by_default(self, tmp_path):
+        from syrviscore.instance_bundle import export_instance
+
+        self._seed(tmp_path)
+        bundle = export_instance(tmp_path)
+        assert bundle["apiVersion"] == "syrvis-instance/v1"
+        assert bundle["env"]["DOMAIN"] == "example.com"
+        assert bundle["env"]["X_TOKEN"] == "****"  # secret redacted
+        assert "supersecret" not in json.dumps(bundle)
+        assert bundle["stack"]["services"]["cloudflared"]["enabled"] is True
+        assert bundle["declarations"]["web"]["image"] == "nginx:1.25.3"
+
+    def test_reveal_secrets(self, tmp_path):
+        from syrviscore.instance_bundle import export_instance
+
+        self._seed(tmp_path)
+        bundle = export_instance(tmp_path, reveal_secrets=True)
+        assert bundle["env"]["X_TOKEN"] == "supersecret"
+
+    def test_export_roundtrips_through_apply(self, tmp_path):
+        """A revealed export re-applies cleanly (structural round-trip)."""
+        from syrviscore.instance_bundle import (
+            InstanceBundle,
+            apply_instance_bundle,
+            export_instance,
+        )
+
+        self._seed(tmp_path)
+        exported = export_instance(tmp_path, reveal_secrets=True)
+        # a fresh home; applying the exported bundle reproduces the config
+        dest = tmp_path / "dest"
+        exported["env"]["SYRVIS_HOME"] = str(dest)
+        report = apply_instance_bundle(InstanceBundle.from_dict(exported), dest)
+        assert report["declarations"]["written"] == ["web"]
+        assert (dest / "config" / ".env").exists()
+        assert (dest / "config" / "services.d" / "web.yaml").exists()
+
+    def test_cli_export_yaml_default(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from syrviscore.cli import cli
+
+        self._seed(tmp_path)
+        monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        r = CliRunner().invoke(cli, ["export"])
+        assert r.exit_code == 0, r.output
+        doc = yaml.safe_load(r.output)
+        assert doc["apiVersion"] == "syrvis-instance/v1"
+        assert doc["env"]["X_TOKEN"] == "****"
+        assert "supersecret" not in r.output

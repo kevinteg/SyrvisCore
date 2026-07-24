@@ -442,6 +442,67 @@ def _write_declarations(plan: Dict[str, Any]) -> None:
             raise InstanceBundleError("could not remove declaration {!r}: {}".format(path.stem, e))
 
 
+# =============================================================================
+# Export — the read companion to apply
+# =============================================================================
+
+
+def export_instance(home: Path, reveal_secrets: bool = False) -> Dict[str, Any]:
+    """Read the live instance and emit it as a ``syrvis-instance/v1`` bundle.
+
+    The inverse of :func:`apply_instance_bundle`: snapshot ``.env`` +
+    ``stack.yaml`` + the complete ``services.d/`` set for GitOps snapshotting,
+    diffing a desired bundle against reality, or disaster-recovery inspection.
+
+    Secret VALUES are **redacted** by default (``****``) — the export is safe to
+    print, commit, and diff. ``reveal_secrets=True`` includes real values (for a
+    re-appliable backup); callers must treat that output as sensitive. The
+    structure round-trips through ``apply`` (an exported redacted bundle applies
+    cleanly except that redacted secrets are refused as a secret *change*).
+    """
+    home = Path(home)
+
+    env: Dict[str, str] = {}
+    env_path = _env_path(home)
+    if env_path.exists():
+        for key, value in parse_env_file(env_path).items():
+            if not reveal_secrets and is_secret_key(key) and value:
+                env[key] = _REDACTED
+            else:
+                env[key] = value
+
+    stack_doc = None
+    stack_path = home / "config" / "stack.yaml"
+    if stack_path.exists():
+        try:
+            loaded = stack_mod.from_dict(yaml.safe_load(stack_path.read_text()) or {})
+            stack_doc = loaded.to_dict()
+        except Exception:  # noqa: BLE001 - unreadable stack: omit the section
+            stack_doc = None
+
+    declarations: Dict[str, Any] = {}
+    directory = get_declarations_dir(home)
+    if directory.exists():
+        for path in sorted(directory.glob("*.yaml")):
+            try:
+                data = yaml.safe_load(path.read_text())
+                if isinstance(data, dict):
+                    declarations[path.stem] = data
+            except Exception:  # noqa: BLE001 - a broken declaration: skip it
+                continue
+
+    bundle: Dict[str, Any] = {"apiVersion": INSTANCE_API_VERSION}
+    if env:
+        bundle["env"] = env
+    if stack_doc:
+        bundle["stack"] = stack_doc
+    bundle["declarations"] = declarations
+    return bundle
+
+
+_REDACTED = "****"
+
+
 # --- shared ------------------------------------------------------------------
 
 
