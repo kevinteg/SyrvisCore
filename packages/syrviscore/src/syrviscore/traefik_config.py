@@ -7,7 +7,7 @@ Also handles Layer 2 service dynamic configurations.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import yaml
 
@@ -119,7 +119,9 @@ def generate_traefik_static_config() -> str:
     Static configuration defines:
     - API/Dashboard settings
     - Entry points (ports 80, 443)
-    - Providers (Docker, file-based)
+    - Provider (file-based only — ONE routing mechanism for every tier: core
+      services, Synology passthroughs, and Layer 2 services are all routed by
+      generated files under /config, and Traefik never needs the docker socket)
     - Logging configuration
     - Let's Encrypt certificate resolver
 
@@ -162,10 +164,6 @@ entryPoints:
     address: ":443"
 
 providers:
-  docker:
-    endpoint: "unix:///var/run/docker.sock"
-    exposedByDefault: false
-    network: proxy
   file:
     directory: "/config"
     watch: true
@@ -258,12 +256,13 @@ def generate_synology_services_config(backend_ip: str) -> str:
     if not enabled_services:
         return ""
 
+    # Entries only (no ``services:`` header) — the dynamic config always opens
+    # the services section for the core containers and appends these after.
     lines = [
         "",
-        "  # ===========================================================================",
-        "  # Synology NAS Services",
-        "  # ===========================================================================",
-        "  services:",
+        "    # =========================================================================",
+        "    # Synology NAS Services",
+        "    # =========================================================================",
     ]
 
     for key, config in enabled_services.items():
@@ -292,12 +291,79 @@ def generate_synology_services_config(backend_ip: str) -> str:
     return "\n".join(lines)
 
 
+def _host_router_pair(name: str, host: str, service: str) -> str:
+    """The standard HTTP-redirect + HTTPS/TLS router pair for one hostname."""
+    return f"""
+    # {name} (HTTP -> HTTPS redirect)
+    {name}-http:
+      rule: "Host(`{host}`)"
+      service: {service}
+      entryPoints:
+        - web
+      middlewares:
+        - https-redirect
+
+    # {name} (HTTPS with Let's Encrypt)
+    {name}:
+      rule: "Host(`{host}`)"
+      service: {service}
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+"""
+
+
+def _core_service_routes(domain: str) -> Tuple[str, str]:
+    """Router + service snippets for the core containers (file provider).
+
+    Core services are file-routed exactly like Layer 2 services — ONE routing
+    mechanism, and Traefik needs no docker provider/socket. Portainer is
+    primordial (always routed); the SyrvisCore dashboard is routed when the
+    stack enables it. Backends are container-DNS names on the proxy network,
+    the same pattern ServiceTraefikConfig uses.
+    """
+    from . import stack as stack_mod
+
+    try:
+        stack = stack_mod.load_stack()
+        dashboard_enabled = stack.is_enabled("dashboard")
+        dash_subdomain = stack.setting("dashboard", "subdomain") or os.getenv(
+            "DASHBOARD_SUBDOMAIN", "dash"
+        )
+    except Exception:  # noqa: BLE001 - unreadable stack: route the primordials only
+        dashboard_enabled = False
+        dash_subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
+
+    routers = _host_router_pair("portainer", f"portainer.{domain}", "portainer")
+    services = """    portainer:
+      loadBalancer:
+        servers:
+          - url: "http://portainer:9000"
+"""
+    if dashboard_enabled:
+        # Prefixed `syrvis-dashboard` so it can't collide with the `dashboard`
+        # router (Traefik's own UI) above.
+        routers += _host_router_pair(
+            "syrvis-dashboard", f"{dash_subdomain}.{domain}", "syrvis-dashboard"
+        )
+        services += """    syrvis-dashboard:
+      loadBalancer:
+        servers:
+          - url: "http://syrviscore-dashboard:8000"
+"""
+    return routers, services
+
+
 def generate_traefik_dynamic_config() -> str:
     """
     Generate Traefik dynamic configuration (config/dynamic.yml).
 
     Dynamic configuration can be updated without restarting Traefik.
-    Defines routing rules, services, and middleware.
+    Defines routing rules, services, and middleware — for Traefik's own UI,
+    the core containers (portainer, the SyrvisCore dashboard), and the
+    Synology passthrough services. Layer 2 services get their own per-service
+    files in /config/dynamic/ (ServiceTraefikConfig).
 
     Returns:
         YAML content as string
@@ -317,6 +383,8 @@ def generate_traefik_dynamic_config() -> str:
     if backend_ip:
         synology_routers = generate_synology_routers_config(domain, backend_ip)
         synology_services = generate_synology_services_config(backend_ip)
+
+    core_routers, core_services = _core_service_routes(domain)
 
     config = f"""# Traefik Dynamic Configuration
 # Generated by SyrvisCore
@@ -345,7 +413,7 @@ http:
         - websecure
       tls:
         certResolver: letsencrypt
-{synology_routers}
+{core_routers}{synology_routers}
 
   middlewares:
     # Redirect HTTP to HTTPS
@@ -353,7 +421,9 @@ http:
       redirectScheme:
         scheme: https
         permanent: true
-{synology_services}
+
+  services:
+{core_services}{synology_services}
 """
     return config
 

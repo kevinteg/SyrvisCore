@@ -58,10 +58,9 @@ class TestStaticConfig:
         config = generate_traefik_static_config()
         parsed = yaml.safe_load(config)
 
-        # Check Docker provider
-        assert "docker" in parsed["providers"]
-        assert parsed["providers"]["docker"]["exposedByDefault"] is False
-        assert parsed["providers"]["docker"]["network"] == "proxy"
+        # File-provider only: the docker provider (and with it traefik's need
+        # for the docker socket) is gone — every tier is file-routed.
+        assert "docker" not in parsed["providers"]
 
         # Check file provider
         assert "file" in parsed["providers"]
@@ -269,3 +268,51 @@ class TestConfigIntegration:
         # Logs in /logs
         assert static_parsed["log"]["filePath"] == "/logs/traefik.log"
         assert static_parsed["accessLog"]["filePath"] == "/logs/access.log"
+
+
+class TestCoreFileProviderRoutes:
+    """Core containers are file-routed like every other tier (no docker provider)."""
+
+    def test_portainer_always_routed(self, monkeypatch):
+        monkeypatch.setenv("DOMAIN", "example.com")
+        dynamic = generate_traefik_dynamic_config()
+        assert "portainer.example.com" in dynamic
+        assert "http://portainer:9000" in dynamic
+        parsed = yaml.safe_load(dynamic)
+        assert "portainer" in parsed["http"]["routers"]
+        assert "portainer-http" in parsed["http"]["routers"]
+        assert parsed["http"]["routers"]["portainer"]["tls"]["certResolver"] == "letsencrypt"
+        assert parsed["http"]["services"]["portainer"]["loadBalancer"]["servers"] == [
+            {"url": "http://portainer:9000"}
+        ]
+
+    def test_dashboard_not_routed_by_default(self, monkeypatch):
+        from syrviscore import stack as stack_mod
+
+        monkeypatch.setenv("DOMAIN", "example.com")
+        monkeypatch.setattr(stack_mod, "load_stack", lambda: stack_mod.default_stack())
+        dynamic = generate_traefik_dynamic_config()
+        assert "syrvis-dashboard" not in dynamic
+
+    def test_dashboard_routed_when_stack_enables_it(self, monkeypatch):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["dashboard"].enabled = True
+        monkeypatch.setattr(stack_mod, "load_stack", lambda: st)
+        monkeypatch.setenv("DOMAIN", "example.com")
+        parsed = yaml.safe_load(generate_traefik_dynamic_config())
+        assert "syrvis-dashboard" in parsed["http"]["routers"]
+        assert parsed["http"]["services"]["syrvis-dashboard"]["loadBalancer"]["servers"] == [
+            {"url": "http://syrviscore-dashboard:8000"}
+        ]
+
+    def test_synology_services_nest_under_services_key(self, monkeypatch):
+        """Synology passthrough entries live inside the same services: section."""
+        monkeypatch.setenv("DOMAIN", "example.com")
+        monkeypatch.setenv("SHIM_IP", "192.168.1.101")
+        monkeypatch.setenv("SYNOLOGY_DSM_ENABLED", "true")
+        parsed = yaml.safe_load(generate_traefik_dynamic_config())
+        assert "synology-dsm" in parsed["http"]["services"]
+        assert "portainer" in parsed["http"]["services"]
+        assert "insecure-skip-verify" in parsed["http"]["serversTransports"]

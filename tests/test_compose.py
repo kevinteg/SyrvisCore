@@ -157,7 +157,8 @@ class TestComposeGenerator:
         assert "syrvis-macvlan" in service["networks"]
         assert service["networks"]["syrvis-macvlan"]["ipv4_address"] == "192.168.0.100"
         assert "proxy" in service["networks"]
-        assert "/var/run/docker.sock:/var/run/docker.sock:ro" in service["volumes"]
+        # file-provider-only routing: traefik holds NO docker socket
+        assert not any("docker.sock" in v for v in service["volumes"])
 
     def test_generate_portainer_service(self, temp_config_file):
         """Test Portainer service generation."""
@@ -171,7 +172,8 @@ class TestComposeGenerator:
         assert service["restart"] == "unless-stopped"
         assert "proxy" in service["networks"]
         assert len(service["volumes"]) == 2
-        assert any("portainer" in label for label in service["labels"])
+        # routed by the file provider — no traefik labels
+        assert "labels" not in service
 
     def test_generate_cloudflared_service(self, temp_config_file):
         """Test Cloudflared service generation."""
@@ -485,7 +487,8 @@ class TestDashboardAndDdns:
         assert "../data:/syrvis/data:ro" in svc["volumes"]
         # L2 service definitions must be mounted or the dashboard shows no services
         assert "../services:/syrvis/services:ro" in svc["volumes"]
-        assert any("dash.${DOMAIN}" in label for label in svc["labels"])
+        # routed by the file provider — no traefik labels
+        assert "labels" not in svc
 
     def test_dashboard_management_makes_socket_rw(self, network_env_vars):
         from syrviscore import stack as stack_mod
@@ -504,15 +507,19 @@ class TestDashboardAndDdns:
         st = stack_mod.default_stack()  # dashboard off (opt-in default)
         assert "syrviscore-dashboard" not in self._gen().generate_compose(stack=st)["services"]
 
-    def test_dashboard_subdomain_from_stack(self, network_env_vars):
+    def test_dashboard_subdomain_from_stack(self, network_env_vars, monkeypatch):
+        """The dashboard route (file provider) uses the stack's subdomain setting."""
         from syrviscore import stack as stack_mod
+        from syrviscore.traefik_config import generate_traefik_dynamic_config
 
         st = stack_mod.default_stack()
         st.services["dashboard"].enabled = True
         st.services["dashboard"].settings["subdomain"] = "panel"
-        compose = self._gen().generate_compose(stack=st)
-        labels = compose["services"]["syrviscore-dashboard"]["labels"]
-        assert any("panel.${DOMAIN}" in label for label in labels)
+        monkeypatch.setattr(stack_mod, "load_stack", lambda: st)
+        monkeypatch.setenv("DOMAIN", "example.com")
+        dynamic = generate_traefik_dynamic_config()
+        assert "panel.example.com" in dynamic
+        assert "http://syrviscore-dashboard:8000" in dynamic
 
     def test_cloudflared_gated_by_stack(self, network_env_vars):
         from syrviscore import stack as stack_mod

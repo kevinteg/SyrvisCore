@@ -1290,16 +1290,16 @@ def generate(config, output):
     click.echo()
     click.echo("Regenerating Traefik configuration...")
     syrvis_home = get_syrvis_home()
-    static_changed = write_traefik_config_files(syrvis_home)
+    config_changed = write_traefik_config_files(syrvis_home)
     traefik_data = syrvis_home / "data" / "traefik"
     click.echo(f"  Generated: {traefik_data / 'traefik.yml'}")
     click.echo(f"  Generated: {traefik_data / 'config' / 'dynamic.yml'}")
 
-    # A STATIC config change (traefik.yml) only takes effect on a Traefik
-    # restart — `up -d` won't pick up a bind-mounted file edit. Restart the
-    # running Traefik now so the change (e.g. `ping: {}`) applies immediately.
-    if static_changed and restart_traefik_if_running():
-        click.echo("  Static config changed — restarted Traefik to apply it.")
+    # A static change only applies on a Traefik restart, and the file-provider
+    # watch is unreliable on Synology bind mounts, so a dynamic change gets the
+    # same treatment. Restart the running Traefik so the change applies now.
+    if config_changed and restart_traefik_if_running():
+        click.echo("  Config changed — restarted Traefik to apply it.")
 
     click.echo()
     click.echo("Run 'syrvis start' to start services.")
@@ -1334,10 +1334,11 @@ def _regenerate_compose():
         out = str(p.get_docker_compose_path())
         compose = generate_compose_from_config(config_path=config_path, output_path=out)
 
-        # Keep Traefik static/dynamic config in sync too (single writer). A static
-        # change only applies on a Traefik restart, so restart it if it's running.
-        static_changed = write_traefik_config_files(p.get_syrvis_home())
-        restarted = static_changed and restart_traefik_if_running()
+        # Keep Traefik static/dynamic config in sync too (single writer). A
+        # static change only applies on a restart, and the file-provider watch
+        # is unreliable on Synology bind mounts — restart on any real change.
+        config_changed = write_traefik_config_files(p.get_syrvis_home())
+        restarted = config_changed and restart_traefik_if_running()
 
         # Reconcile disabled optional core services: `up -d` never removes a
         # container that dropped out of the compose file, so stop/remove them
@@ -1844,14 +1845,14 @@ def generate_traefik():
     syrvis_home = get_syrvis_home()
     traefik_data = syrvis_home / "data" / "traefik"
 
-    static_changed = write_traefik_config_files(syrvis_home)
+    config_changed = write_traefik_config_files(syrvis_home)
     click.echo(f"Generated static config: {traefik_data / 'traefik.yml'}")
     click.echo(f"Generated dynamic config: {traefik_data / 'config' / 'dynamic.yml'}")
 
-    # Static config only applies on a Traefik restart (up -d ignores a
-    # bind-mounted file edit); restart the running container if it changed.
-    if static_changed and restart_traefik_if_running():
-        click.echo("Restarted Traefik to apply the static config change.")
+    # Static config only applies on a Traefik restart, and the dynamic-file
+    # watch is unreliable on Synology bind mounts; restart on any real change.
+    if config_changed and restart_traefik_if_running():
+        click.echo("Restarted Traefik to apply the config change.")
 
     click.echo()
     click.echo("Configuration files created successfully!")

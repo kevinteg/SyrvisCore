@@ -40,21 +40,23 @@ class DockerError(SyrvisError):
 
 
 def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
-    """Write Traefik's static + dynamic config; return whether STATIC config changed.
+    """Write Traefik's static + dynamic config; return whether a restart is needed.
 
     This is the single writer of ``traefik.yml`` (static) and ``config/dynamic.yml``
     (dynamic), plus a one-time ``acme.json`` create. Centralizing it lets every
-    caller enforce the invariant that a STATIC-config change must be followed by a
-    Traefik *restart* — Traefik only parses ``traefik.yml`` at process start, while
-    the file-provider hot-reloads the dynamic ``/config`` dir. Regenerating the
-    static file without restarting is why a change like ``ping: {}`` never took
-    effect (the dashboard then reports "up (API reachable) but /ping returned 404").
+    caller enforce the restart invariant: Traefik only parses ``traefik.yml`` at
+    process start, and while the file provider nominally hot-reloads the dynamic
+    ``/config`` dir, its watch does not fire reliably on Synology bind mounts
+    (the same reason ServiceManager._reload_traefik force-restarts) — so a REAL
+    content change to either file must be followed by a Traefik restart.
 
-    Idempotent. ``acme.json`` is created only if missing (never overwritten, to
-    preserve issued certificates).
+    Idempotent, and only touches a file whose content actually changed (the
+    stale-static drift check compares mtimes against Traefik's StartedAt, so a
+    no-op rewrite must never bump them). ``acme.json`` is created only if
+    missing (never overwritten, to preserve issued certificates).
 
     Returns:
-        True if the static ``traefik.yml`` content differed from what was on disk
+        True if the static or dynamic content differed from what was on disk
         (so the caller should restart Traefik if it is running).
     """
     load_dotenv(get_env_path(), override=True)
@@ -79,7 +81,11 @@ def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
     config_dir = traefik_data / "config"
     config_dir.mkdir(parents=True, exist_ok=True)
     dynamic_path = config_dir / "dynamic.yml"
-    dynamic_path.write_text(generate_traefik_dynamic_config())
+    new_dynamic = generate_traefik_dynamic_config()
+    old_dynamic = dynamic_path.read_text() if dynamic_path.exists() else None
+    dynamic_changed = old_dynamic != new_dynamic
+    if dynamic_changed:
+        dynamic_path.write_text(new_dynamic)
     dynamic_path.chmod(0o644)
 
     acme_file = traefik_data / "acme.json"
@@ -87,7 +93,7 @@ def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
         acme_file.touch()
         acme_file.chmod(0o600)
 
-    return static_changed
+    return static_changed or dynamic_changed
 
 
 def remove_disabled_core_containers() -> List[str]:

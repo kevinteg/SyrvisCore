@@ -228,15 +228,14 @@ class ComposeGenerator:
                 # Enables cert issuance/renewal for internal names on a private IP.
                 "CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:-}",
             ],
+            # No docker socket: routing is file-provider only (core, Synology
+            # passthrough, and L2 routes are all generated files under /config),
+            # so Traefik holds no host-level authority at all.
             "volumes": [
-                "/var/run/docker.sock:/var/run/docker.sock:ro",
                 "../data/traefik/traefik.yml:/traefik.yml:ro",
                 "../data/traefik/config/:/config/:ro",
                 "../data/traefik/acme.json:/acme.json",
                 "../data/traefik/logs:/logs",
-            ],
-            "labels": [
-                "traefik.enable=false",
             ],
         }
 
@@ -250,23 +249,11 @@ class ComposeGenerator:
             "restart": "unless-stopped",
             "security_opt": ["no-new-privileges:true"],
             "networks": ["proxy"],
+            # Routed by the file provider (traefik_config._core_service_routes),
+            # like every other tier — no traefik labels.
             "volumes": [
                 "/var/run/docker.sock:/var/run/docker.sock:ro",
                 "../data/portainer:/data",
-            ],
-            "labels": [
-                "traefik.enable=true",
-                # HTTP router (redirect to HTTPS)
-                "traefik.http.routers.portainer-http.entrypoints=web",
-                "traefik.http.routers.portainer-http.rule=Host(`portainer.${DOMAIN}`)",
-                "traefik.http.routers.portainer-http.middlewares=https-redirect@file",
-                # HTTPS router (with Let's Encrypt)
-                "traefik.http.routers.portainer.entrypoints=websecure",
-                "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)",
-                "traefik.http.routers.portainer.tls=true",
-                "traefik.http.routers.portainer.tls.certresolver=letsencrypt",
-                # Service
-                "traefik.http.services.portainer.loadbalancer.server.port=9000",
             ],
         }
 
@@ -317,9 +304,6 @@ class ComposeGenerator:
 
         image = self.build_config["docker_images"]["dashboard"]["full_image"]
         stack = getattr(self, "_stack", None)
-        subdomain = stack.setting("dashboard", "subdomain") if stack is not None else None
-        if not subdomain:
-            subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
 
         # Read-only by default (safe to expose, no management). Opt into container
         # control by declaring `management: true` on the dashboard in stack.yaml —
@@ -365,21 +349,8 @@ class ComposeGenerator:
                 # so paths.get_syrvis_home() trusts SYRVIS_HOME (it looks for the manifest).
                 "../.syrviscore-manifest.json:/syrvis/.syrviscore-manifest.json:ro",
             ],
-            "labels": [
-                # Router names are prefixed `syrvis-dashboard` to avoid colliding with
-                # the generated file-provider `dashboard` router (Traefik's own UI).
-                "traefik.enable=true",
-                "traefik.http.routers.syrvis-dashboard-http.entrypoints=web",
-                "traefik.http.routers.syrvis-dashboard-http.rule=Host(`"
-                + subdomain
-                + ".${DOMAIN}`)",
-                "traefik.http.routers.syrvis-dashboard-http.middlewares=https-redirect@file",
-                "traefik.http.routers.syrvis-dashboard.entrypoints=websecure",
-                "traefik.http.routers.syrvis-dashboard.rule=Host(`" + subdomain + ".${DOMAIN}`)",
-                "traefik.http.routers.syrvis-dashboard.tls=true",
-                "traefik.http.routers.syrvis-dashboard.tls.certresolver=letsencrypt",
-                "traefik.http.services.syrvis-dashboard.loadbalancer.server.port=8000",
-            ],
+            # Routed by the file provider (traefik_config._core_service_routes,
+            # router prefix `syrvis-dashboard`) — no traefik labels.
         }
 
     def _generate_ddns_service(self) -> Optional[Dict[str, Any]]:
