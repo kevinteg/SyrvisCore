@@ -138,6 +138,12 @@ class InstanceBundle:
             # attacker-chosen KEY=value lines. Never echo the value.
             if "\n" in value or "\r" in value:
                 raise InstanceBundleError("env {!r}: value must not contain a newline".format(key))
+            # Strip surrounding whitespace to match how the value is read back:
+            # both validators.parse_env_file and python-dotenv strip, so an
+            # un-stripped value could never compare equal to what apply wrote,
+            # making every re-apply report the key "changed" (and, for a secret,
+            # refusing re-apply without --allow-secret-change). Strip once here.
+            value = value.strip()
             total += len(key.encode()) + len(value.encode("utf-8", errors="surrogateescape"))
             out[key] = value
         if total > ENV_MAX_BYTES:
@@ -242,7 +248,9 @@ def apply_instance_bundle(
     """
     report: Dict[str, Any] = {"dry_run": dry_run, "env": None, "stack": None, "declarations": None}
 
-    env_plan = _plan_env(bundle, home, allow_secret_change) if bundle.env is not None else None
+    env_plan = (
+        _plan_env(bundle, home, allow_secret_change, dry_run) if bundle.env is not None else None
+    )
     stack_plan = _plan_stack(bundle, home) if bundle.stack is not None else None
     decl_plan = _plan_declarations(bundle, home) if bundle.has_declarations else None
 
@@ -286,7 +294,9 @@ def _render_env(env: Dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _plan_env(bundle: InstanceBundle, home: Path, allow_secret_change: bool) -> Dict[str, Any]:
+def _plan_env(
+    bundle: InstanceBundle, home: Path, allow_secret_change: bool, dry_run: bool = False
+) -> Dict[str, Any]:
     env = dict(bundle.env or {})
     declared_home = env.get("SYRVIS_HOME")
     if declared_home is not None and declared_home != str(home):
@@ -306,10 +316,14 @@ def _plan_env(bundle: InstanceBundle, home: Path, allow_secret_change: bool) -> 
 
     # Token rotation is a deliberate act: changing or dropping an existing,
     # non-empty secret value needs the explicit flag. Setting a secret that was
-    # empty/absent is a normal first configuration and passes.
+    # empty/absent is a normal first configuration and passes. On a dry-run the
+    # guard is NOT enforced — a plan writes nothing and reports key names only,
+    # so a deployment can safely PREVIEW a rotation over the seam (there is no
+    # `apply --dry-run --allow-secret-change` argv shape); the mutating apply
+    # still requires the flag.
     secret_changes = [k for k in changed if is_secret_key(k) and existing.get(k)]
     secret_changes += [k for k in removed if is_secret_key(k) and existing.get(k)]
-    if secret_changes and not allow_secret_change:
+    if secret_changes and not allow_secret_change and not dry_run:
         raise InstanceBundleError(
             "refusing to change existing secret value(s) {} without "
             "--allow-secret-change".format(", ".join(sorted(secret_changes)))
@@ -417,10 +431,15 @@ def _write_declarations(plan: Dict[str, Any]) -> None:
     for write in plan["writes"]:
         _atomic_write(write["path"], write["content"], write["mode"])
     for path in plan["removals"]:
+        # The report already lists this name under `removed`; if the unlink
+        # fails (e.g. a stray directory shadows the file, or perms), the removal
+        # did NOT happen — surface it instead of reporting a false convergence.
         try:
             path.unlink()
-        except OSError:
-            pass
+        except FileNotFoundError:
+            pass  # already gone — the desired end state
+        except OSError as e:
+            raise InstanceBundleError("could not remove declaration {!r}: {}".format(path.stem, e))
 
 
 # --- shared ------------------------------------------------------------------

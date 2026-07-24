@@ -258,6 +258,10 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
 
     click.echo()
     click.echo("Installation complete!")
+    # install activates the new version (version_manager.activate_version), so the
+    # seam must track it too — same hook activate/rollback use. No-op unless the
+    # NAS was provisioned with auto_seam_update.
+    _sync_seam_after_switch(home)
     click.echo()
 
     profile_path = paths.get_syrvis_profile_path(home)

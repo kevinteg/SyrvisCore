@@ -921,6 +921,15 @@ def ensure_config_tree_readable(install_dir: Optional[Path] = None) -> Tuple[boo
     if services_dir.is_dir():
         for manifest in services_dir.glob("*/syrvis-service.yaml"):
             _fix(manifest, False)
+    # Declaration + job files a root writer (profile enable, service declare,
+    # reconcile) may have written 0600 when they carry inline env — the
+    # unprivileged operator's reconcile-plan and the dashboard must still read
+    # them. (These are intent/config, never secrets: secret values live in the
+    # env_file under data/, which this never touches.)
+    for decl in (root / "config" / "services.d").glob("*.yaml"):
+        _fix(decl, False)
+    for job in (root / "config" / "jobs.d").glob("*.yaml"):
+        _fix(job, False)
 
     if failed:
         return False, "config tree: fixed {}, failed: {}".format(len(fixed), "; ".join(failed[:4]))

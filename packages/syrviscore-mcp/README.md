@@ -23,9 +23,13 @@ Design: `docs/mcp-design.md`. This README is the operator/NAS setup guide.
 
 ## Install (operator Mac)
 
+The MCP consumes the platform's seam verb registry (`syrviscore.seam`), so
+install the `syrviscore` package alongside it from the monorepo — it is not on
+PyPI, and installing the MCP alone fails to resolve `syrviscore>=0.4`:
+
 ```bash
 python3.12 -m venv ~/.venvs/syrviscore-mcp
-~/.venvs/syrviscore-mcp/bin/pip install -e packages/syrviscore-mcp
+~/.venvs/syrviscore-mcp/bin/pip install -e packages/syrviscore -e packages/syrviscore-mcp
 ```
 
 Config lives at `~/.config/syrviscore-mcp/config.toml` (see

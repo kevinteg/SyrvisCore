@@ -78,6 +78,26 @@ def json_error(e, indent=None):
     raise SystemExit(1)
 
 
+def read_json_stdin(what="bundle", max_bytes=1024 * 1024):
+    """Read + parse a JSON document from STDIN, byte-capped (the seam-verb pattern).
+
+    The single reader behind ``apply`` and ``deploy``: secrets arrive on stdin
+    only (never argv/ps/logs), so the cap guards against a runaway/hostile
+    stream. The cap is measured in BYTES (encode, not len(str)) so a multibyte
+    payload can't slip several times past a byte limit. Raises SyrvisError on an
+    over-cap, empty, or non-JSON stream; per-field caps downstream are tighter.
+    """
+    raw = click.get_text_stream("stdin").read(max_bytes + 1)
+    if len(raw.encode("utf-8", errors="surrogateescape")) > max_bytes:
+        raise SyrvisError(f"{what} too large (max {max_bytes} bytes)")
+    if not raw.strip():
+        raise SyrvisError(f"no {what} on stdin")
+    try:
+        return jsonlib.loads(raw)
+    except ValueError as e:
+        raise SyrvisError(f"{what} is not valid JSON: {e}")
+
+
 @click.group()
 @click.version_option(version=__version__, prog_name="syrvis")
 def cli():
@@ -829,18 +849,8 @@ def deploy(name):
     from syrviscore.bundle import BundleValidationError, DeployBundle
     from syrviscore.service_manager import ServiceManager
 
-    # Read the bundle from stdin ONLY (secrets never on argv/ps). Cap the stream
-    # so a runaway/hostile input can't OOM the box.
-    _MAX = 1024 * 1024  # 1 MiB — generous for a bundle; per-field caps are tighter
-    raw = click.get_text_stream("stdin").read(_MAX + 1)
-    if len(raw) > _MAX:
-        raise SyrvisError(f"bundle too large (max {_MAX} bytes)")
-    if not raw.strip():
-        raise SyrvisError("no bundle on stdin")
-    try:
-        doc = jsonlib.loads(raw)
-    except ValueError as e:
-        raise SyrvisError(f"bundle is not valid JSON: {e}")
+    # Secrets arrive on stdin only (never argv/ps); byte-capped shared reader.
+    doc = read_json_stdin("bundle")
     try:
         bundle = DeployBundle.from_dict(doc)
     except BundleValidationError as e:
@@ -886,35 +896,19 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
         <instance.json> | sudo syrvis apply --json
     """
     privilege.ensure_elevated("Applying an instance bundle requires elevated privileges.")
-    from syrviscore.instance_bundle import (
-        InstanceBundle,
-        InstanceBundleError,
-        apply_instance_bundle,
-    )
+    from syrviscore.instance_bundle import InstanceBundle, apply_instance_bundle
 
     try:
-        # Read the bundle from stdin ONLY (secrets never on argv/ps). Cap the
-        # stream so a runaway/hostile input can't OOM the box (mirrors deploy).
-        _MAX = 1024 * 1024  # 1 MiB — generous; per-section caps are tighter
-        raw = click.get_text_stream("stdin").read(_MAX + 1)
-        if len(raw) > _MAX:
-            raise SyrvisError(f"bundle too large (max {_MAX} bytes)")
-        if not raw.strip():
-            raise SyrvisError("no bundle on stdin")
-        try:
-            doc = jsonlib.loads(raw)
-        except ValueError as e:
-            raise SyrvisError(f"bundle is not valid JSON: {e}")
-        try:
-            bundle = InstanceBundle.from_dict(doc)
-            report = apply_instance_bundle(
-                bundle,
-                get_syrvis_home(),
-                allow_secret_change=allow_secret_change,
-                dry_run=dry_run,
-            )
-        except InstanceBundleError as e:
-            raise SyrvisError(str(e))
+        # Secrets arrive on stdin only; InstanceBundleError IS a SyrvisError, so
+        # it flows to the envelope below without a code-flattening rewrap.
+        doc = read_json_stdin("bundle")
+        bundle = InstanceBundle.from_dict(doc)
+        report = apply_instance_bundle(
+            bundle,
+            get_syrvis_home(),
+            allow_secret_change=allow_secret_change,
+            dry_run=dry_run,
+        )
     except SyrvisError as e:
         if as_json:
             json_error(e, indent=2)

@@ -325,17 +325,21 @@ def _core_service_routes(domain: str) -> Tuple[str, str]:
     """
     from . import stack as stack_mod
 
-    try:
-        stack = stack_mod.load_stack()
-        dashboard_enabled = stack.is_enabled("dashboard")
-        dash_subdomain = stack.setting("dashboard", "subdomain") or os.getenv(
-            "DASHBOARD_SUBDOMAIN", "dash"
-        )
-    except Exception:  # noqa: BLE001 - unreadable stack: route the primordials only
-        dashboard_enabled = False
-        dash_subdomain = os.getenv("DASHBOARD_SUBDOMAIN", "dash")
+    # Load the stack ONCE and let a genuinely-corrupt stack.yaml raise (StackError):
+    # a routing regen that silently dropped the dashboard router here would restart
+    # Traefik and de-route a running dashboard with no error surfaced. load_stack
+    # already falls back to the env-inferred default when the file is merely absent.
+    stack = stack_mod.load_stack()
+    dashboard_enabled = stack.is_enabled("dashboard")
+    dash_subdomain = stack.setting("dashboard", "subdomain") or os.getenv(
+        "DASHBOARD_SUBDOMAIN", "dash"
+    )
 
-    routers = _host_router_pair("portainer", f"portainer.{domain}", "portainer")
+    # Portainer's subdomain comes from the PRIMORDIAL_UIS catalog (the single
+    # source hostnames.py + the dashboard also read) so the routed host can't
+    # drift from the host the deployment's DNS reconciler is told to create.
+    portainer_sub = next(ui["subdomain"] for ui in PRIMORDIAL_UIS if ui["service"] == "portainer")
+    routers = _host_router_pair("portainer", f"{portainer_sub}.{domain}", "portainer")
     services = """    portainer:
       loadBalancer:
         servers:

@@ -85,6 +85,19 @@ def _render(home: Path, policy: Dict[str, Any], what: str) -> str:
     return result.stdout
 
 
+def _read_or_none(path: Path) -> Optional[str]:
+    """Read ``path``, or None if it is absent OR unreadable (e.g. the 0440
+    root sudoers file compared by an unelevated ``seam status``/dry-run).
+
+    Returning None means "can't confirm it matches" → treated as needing an
+    update; the actual install re-checks under root and no-ops if identical.
+    """
+    try:
+        return path.read_text()
+    except OSError:
+        return None
+
+
 def _install(path: Path, content: str, mode: int, validate_sudoers: bool = False) -> bool:
     """Atomically install ``content`` at ``path``; returns False when unchanged.
 
@@ -92,7 +105,7 @@ def _install(path: Path, content: str, mode: int, validate_sudoers: bool = False
     #includedir ignores dotfiles), so sudo only ever sees the atomic rename —
     the same guarantee the provision script gives (DSM has no visudo).
     """
-    if path.exists() and path.read_text() == content:
+    if _read_or_none(path) == content:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
@@ -135,18 +148,15 @@ def sync_seam(
     shim_content = _render(home, policy, "shim")
 
     if dry_run:
+        # Tolerant read: a comparison from an unelevated `seam status` can't read
+        # the 0440 root sudoers file — report "would update" (unknown) rather
+        # than crashing on PermissionError (handle_errors only catches SyrvisError).
         return {
             "dry_run": True,
             "sudoers": (
-                "unchanged"
-                if sudoers_path.exists() and sudoers_path.read_text() == sudoers_content
-                else "would update"
+                "unchanged" if _read_or_none(sudoers_path) == sudoers_content else "would update"
             ),
-            "shim": (
-                "unchanged"
-                if shim_path.exists() and shim_path.read_text() == shim_content
-                else "would update"
-            ),
+            "shim": ("unchanged" if _read_or_none(shim_path) == shim_content else "would update"),
         }
 
     changed_sudoers = _install(sudoers_path, sudoers_content, 0o440, validate_sudoers=True)

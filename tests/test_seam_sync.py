@@ -218,3 +218,15 @@ class TestProvisionPolicy:
         script = self._render(auto_seam_update=False)
         assert '"auto_seam_update": false' in script
         assert "auto_seam_update=false" in script
+
+    def test_policy_path_matches_manager_constant(self):
+        """Bind seam_sync.SEAM_POLICY_PATH to where the provision script actually
+        writes the policy — a silent divergence would make load_policy() always
+        return None, so auto-sync would silently skip on every activate/rollback."""
+        script = self._render()
+        parent = str(seam_sync.SEAM_POLICY_PATH.parent)
+        assert seam_sync.SEAM_POLICY_PATH.name == "seam-policy.json"
+        # The provision script sets STATE_DIR to the policy's parent dir and
+        # writes $STATE_DIR/seam-policy.json into it.
+        assert 'STATE_DIR="{}"'.format(parent) in script
+        assert 'POLICY_PATH="$STATE_DIR/seam-policy.json"' in script

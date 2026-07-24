@@ -70,6 +70,16 @@ def _with_service_state(ctx: ToolContext, result: Dict) -> Dict:
     return result
 
 
+def _with_backup_state(ctx: ToolContext, result: Dict) -> Dict:
+    """Attach the post-op backup list as ground truth (backup verbs lack --json)."""
+    try:
+        after = _run(ctx, "backup_list")
+        result["backups"] = after.get("backups")
+    except McpError:
+        pass
+    return result
+
+
 def _confirm_or_plan(
     ctx: ToolContext, tool: str, bound_args: Dict, confirm: str, state_parts: list, plan: Dict
 ):
@@ -229,13 +239,7 @@ def stack_disable(ctx: ToolContext, name: str) -> Dict:
 def backup_create(ctx: ToolContext) -> Dict:
     # Additive + idempotent (a new archive); sudo only to read 0600 config into
     # it. Follow with the backup list as ground truth (the CLI has no --json).
-    result = _run(ctx, "backup_create")
-    try:
-        after = _run(ctx, "backup_list")
-        result["backups"] = after.get("backups")
-    except McpError:
-        pass
-    return result
+    return _with_backup_state(ctx, _run(ctx, "backup_create"))
 
 
 def reconcile(ctx: ToolContext) -> Dict:
@@ -422,13 +426,7 @@ def backup_cleanup(ctx: ToolContext, keep: int = 3, confirm: str = "") -> Dict:
     pending = _confirm_or_plan(ctx, "backup_cleanup", {"keep": keep}, confirm, [current], plan)
     if pending:
         return pending
-    result = _run(ctx, "backup_cleanup", {"keep": keep})
-    try:
-        after = _run(ctx, "backup_list")
-        result["backups"] = after.get("backups")
-    except McpError:
-        pass
-    return result
+    return _with_backup_state(ctx, _run(ctx, "backup_cleanup", {"keep": keep}))
 
 
 def reconcile_prune(ctx: ToolContext, prune: str, confirm: str = "") -> Dict:

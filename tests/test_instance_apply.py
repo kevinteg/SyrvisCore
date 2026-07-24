@@ -219,6 +219,25 @@ class TestApplyEnv:
         assert report["dry_run"] is True
         assert not (tmp_path / "config" / ".env").exists()
 
+    def test_dry_run_previews_secret_change_without_flag(self, tmp_path):
+        """A plan writes nothing and reports key names only, so a rotation must be
+        previewable over the seam (no --dry-run --allow-secret-change argv exists)."""
+        (tmp_path / "config").mkdir(parents=True)
+        (tmp_path / "config" / ".env").write_text("DOMAIN=example.com\nX_TOKEN=oldvalue\n")
+        report = self._apply(tmp_path, make_env(X_TOKEN="newvalue"), dry_run=True)
+        assert "X_TOKEN" in report["env"]["changed"]
+        assert "newvalue" not in json.dumps(report)  # values never in the report
+        assert not (tmp_path / "config" / ".env").read_text().count("newvalue")  # unwritten
+
+    def test_whitespace_value_is_idempotent(self, tmp_path):
+        """A value with surrounding whitespace is stripped to match read-back, so
+        re-applying the same bundle reports 'unchanged' (not an eternal 'update')."""
+        self._apply(tmp_path, make_env(NOTE="  spaced  "))
+        written = (tmp_path / "config" / ".env").read_text()
+        assert "NOTE=spaced" in written
+        report = self._apply(tmp_path, make_env(NOTE="  spaced  "))
+        assert report["env"]["action"] == "unchanged"
+
 
 # ---------------------------------------------------------------------------
 # Apply — stack + declarations
@@ -361,3 +380,16 @@ class TestApplyCli:
         r = self._run(monkeypatch, tmp_path, ["apply"], "")
         assert r.exit_code != 0
         assert "no bundle" in r.output
+
+
+class TestDeclarationRemovalFailure:
+    def test_unlinkable_declaration_surfaces(self, tmp_path):
+        """A removal that can't happen (a dir shadows the file) must fail the
+        apply, not report a false convergence."""
+        d = tmp_path / "config" / "services.d"
+        d.mkdir(parents=True)
+        # a DIRECTORY named stale.yaml — unlink() raises IsADirectoryError (OSError)
+        (d / "stale.yaml").mkdir()
+        b = InstanceBundle.from_dict(bundle_doc(declarations={"web": decl()}))
+        with pytest.raises(InstanceBundleError, match="could not remove declaration"):
+            apply_instance_bundle(b, tmp_path)
