@@ -165,6 +165,9 @@ syrvisctl info [--json]       # Show installation info
 syrvisctl cleanup [--keep N]  # Remove old versions
 syrvisctl backup <cmd>        # Backup management (list/create/cleanup)
 syrvisctl restore [file]      # Restore from backup (disaster recovery)
+syrvisctl seam sync|status    # Regenerate operator shim+sudoers from the active
+                              # version (activate/rollback do this automatically
+                              # when provisioned with auto_seam_update)
 ```
 
 All prompts are bypassable with `-y`; read commands support `--json`
@@ -200,6 +203,19 @@ syrvis service list           # List installed services
 syrvis service start <name>   # Start a service
 syrvis service stop <name>    # Stop a service
 syrvis service update <name>  # Update from git repo
+syrvis service task --task T -- <name>  # Run a DECLARED one-shot task (tasks: block)
+syrvis service catalog        # Bundled catalog templates (--json)
+
+# Profiles (platform-curated service sets)
+syrvis profile list           # Available profiles (--json)
+syrvis profile enable <name>  # Declare a profile's services + seed default configs
+
+# Operator-seam bundle verbs (stdin-only; secrets never on argv)
+syrvis apply                  # syrvis-instance/v1: .env + stack.yaml + services.d
+                              # (--dry-run, --allow-secret-change; see docs/seam-contract.md)
+syrvis deploy <name>          # syrvis-bundle/v1: one service's manifest+configs+secrets
+syrvis secret set <name>      # Write a service's env_file from stdin
+syrvis config set <name>      # Write a declared job's conf from stdin
 ```
 
 ## Service Exposure (internal vs tunnel)

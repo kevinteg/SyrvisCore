@@ -1,7 +1,7 @@
 # Design: Declarative Service Loading (`services.d`)
 
 **Status:** Proposed · **Audience:** SyrvisCore core + home-tech · **Date:** 2026-07-11
-**Companion:** [service-declaration-v2.md](service-declaration-v2.md), [home-tech-provisioning-requirement.md](home-tech-provisioning-requirement.md), [wiki/05 Layer 2 Services](wiki/05-layer2-services.md)
+**Companion:** [service-declaration-roadmap.md](service-declaration-roadmap.md), [home-tech-provisioning-requirement.md](home-tech-provisioning-requirement.md), [wiki/05 Layer 2 Services](wiki/05-layer2-services.md)
 
 ## 1. The question
 

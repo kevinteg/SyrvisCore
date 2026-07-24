@@ -20,6 +20,11 @@ using Traefik, Cloudflared, Portainer, and a web dashboard.
 | [06 · Disaster Recovery](06-disaster-recovery.md) | Rebuilding the NAS from scratch: SPK → install → setup → restore, what the backup does and does not capture, and the ordering that matters. |
 | [07 · `syrvis-service.yaml` Reference](07-service-schema-reference.md) | Every field a Layer 2 service definition may declare, the security rules, and worked examples. |
 
+The **cross-repo contract** — the hostnames report schema, the
+`syrvis-instance`/`syrvis-bundle` wire formats, and the operator-seam verb
+classes a deployment repo may rely on — lives in
+[`../seam-contract.md`](../seam-contract.md).
+
 ## The 60-second model
 
 ```mermaid
@@ -55,6 +60,6 @@ and the **web dashboard** — sit over it. Anything an adapter can do, `ssh nas 
 **SyrvisCore never touches DNS or the Cloudflare API.** It *declares* what it routes and how each
 host is meant to be reached (`internal` = LAN-only, `tunnel` = remote), and reports the concrete
 external record each hostname needs via `syrvis stack hostnames`. A neighbouring deployment repo
-(**home-tech**) reads that report and reconciles the outside world (DNS, Tunnel, Access). This keeps
-SyrvisCore generic — no domain, IPs, or accounts live in it — and is why [Split DNS](04-split-dns.md)
-is a first-class concept here.
+reads that report and reconciles the outside world (DNS, Tunnel, Access) — see the
+[seam contract](../seam-contract.md). This keeps SyrvisCore generic — no domain, IPs, or accounts
+live in it — and is why [Split DNS](04-split-dns.md) is a first-class concept here.

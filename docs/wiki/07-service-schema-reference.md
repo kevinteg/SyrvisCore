@@ -78,6 +78,8 @@ restart: unless-stopped         # no | always | on-failure | unless-stopped
 | `restart` | | string | `no` \| `always` \| `on-failure` \| `unless-stopped` |
 | `enabled` | | bool | orchestration key (default `true`); `false` → declared but not run. Only meaningful in a `services.d/` declaration — see [Declarative loading](05-layer2-services.md#declarative-loading--servicesd--reconcile). |
 | `critical` | | bool | orchestration key (default `false`); `true` → this service's failure makes a `reconcile` run report the stack unhealthy instead of merely degraded. |
+| `tier` | | string | `""` (default) \| `"infra"`. The privileged tier selector (design/22): `infra` unlocks the **enumerated, read-only** host-mount allowlist (`/proc`, `/sys`, `/`, `/var/run/docker.sock`) for first-party exporters. **Authorship-gated**: only an operator-authored declaration (`services.d/` or a `deploy` bundle — e.g. written by `syrvis profile enable`) may set it; a git/image/catalog install with `tier: infra` is refused at install time. |
+| `tasks` | | map | declared one-shot tasks: `{taskname: {command: [...]}}` (max 16). Each `command` follows the same audit rules as the top-level `command` (exec form, literal, no `$`). Run with `syrvis service task --task <taskname> -- <name>` — executes the argv inside the service's **own running container** (`docker exec`), the encapsulated alternative to a raw break-glass exec (e.g. a DB bootstrap). No extra authority: the container already runs that code. |
 
 Any key **not** in this list is rejected — this is what stops a manifest smuggling `privileged`,
 `cap_add`, `devices`, `network_mode`, etc.
@@ -120,7 +122,7 @@ layer unvalidated still can't escape the service's own data directory.
   otherwise fail with *"Bind mount failed: … does not exist"*.
 - An `rw` source dir is made **`0777`** so a non-root container UID can write to it (a root-owned dir
   would shadow the image's volume and crash the app). `ro` dirs get no write bit. A narrower,
-  per-service ownership control (a `user:`/PUID-GID field) is on the [roadmap](service-declaration-v2.md).
+  per-service ownership control (a `user:`/PUID-GID field) is on the [roadmap](service-declaration-roadmap.md).
 - `syrvis service start <name>` **regenerates the compose file first**, so a volume dir pruned or
   re-permissioned out from under a service is re-created before the container starts (drift self-heal).
 
@@ -185,7 +187,7 @@ The single-container, HTTP-through-Traefik model intentionally omits:
 - **Multiple published/routed ports** and **non-HTTP (TCP/UDP) exposure** — everything goes through
   Traefik's HTTP entrypoints; no host ports are published.
 
-See the [next-iteration design](service-declaration-v2.md) for the roadmap.
+See the [next-iteration design](service-declaration-roadmap.md) for the roadmap.
 
 ---
 

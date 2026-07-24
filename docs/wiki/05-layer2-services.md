@@ -195,7 +195,7 @@ Three things SyrvisCore handles so a bind mount actually works on DSM:
 2. **`rw` dirs are made world-writable (`0777`).** Most images run as a
    non-root UID; a root-owned host dir would shadow the image's volume and the app
    would crash-looping-fail to write. `0777` is the pragmatic fix today (a
-   narrower, per-service `user:`/PUID field is on the [roadmap](service-declaration-v2.md)).
+   narrower, per-service `user:`/PUID field is on the [roadmap](service-declaration-roadmap.md)).
    `ro` mounts get no write bit.
 3. **`start` self-heals volume-dir drift.** `syrvis service start <name>`
    regenerates the compose file first, so a directory that was pruned or
@@ -264,7 +264,7 @@ drive the same steps when an agent does it instead.
 > image/subdomain/exposure/port/enabled/critical — **not** `environment` or
 > `volumes`. A declaration that needs either is therefore **file-pushed** (its
 > `.yaml` copied into `services.d/`, then reconciled) rather than expressed as a
-> single tool call. See the [roadmap](service-declaration-v2.md) for closing that
+> single tool call. See the [roadmap](service-declaration-roadmap.md) for closing that
 > gap.
 
 ---
@@ -326,7 +326,7 @@ The single-container, HTTP-through-Traefik model is deliberately simple. Today i
 
 Richer declarations landed with schema v2: `healthcheck`, `env_file` (0600 secrets
 out of the manifest), and `resources` — see the [schema reference](07-service-schema-reference.md).
-The remaining roadmap lives in the [next-iteration design](service-declaration-v2.md).
+The remaining roadmap lives in the [next-iteration design](service-declaration-roadmap.md).
 
 ---
 

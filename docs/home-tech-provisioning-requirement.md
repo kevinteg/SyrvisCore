@@ -60,15 +60,15 @@ One human-edited file in home-tech is the single source of truth (git-versioned,
 
 ```yaml
 # deployment.yaml
-instance:   { domain: konsume.org, ssh_target: nas, traefik_ip: 192.168.8.4, version: 0.3.2 }
-network:    { subnet: 192.168.8.0/24, macvlan_parent: ovs_eth0, shim_ip: 192.168.8.5 }
+instance:   { domain: example.com, ssh_target: nas, traefik_ip: 192.168.1.100, version: 0.3.2 }
+network:    { subnet: 192.168.1.0/24, macvlan_parent: ovs_eth0, shim_ip: 192.168.1.101 }
 stack:
   dashboard:   { enabled: true, subdomain: dash, exposure: internal }
   cloudflared: { enabled: true }
 services:
   cyberquill:  { image: ghcr.io/kevinteg/cyberquill:0.1.0, subdomain: bbq, exposure: tunnel, port: 8300,
                  on_absent: stop }          # stop | remove | purge — deletion policy, defaults to stop
-cloudflare: { zone: konsume.org, tunnel: syrvis, access: { idp: google } }
+cloudflare: { zone: example.com, tunnel: syrvis, access: { idp: google } }
 ```
 
 Everything else — the Cloudflare records, the LAN A records, the running container set — is **derived** from this file plus what `syrvis stack hostnames --json` reports.

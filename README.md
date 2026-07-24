@@ -4,212 +4,126 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-**Self-hosted infrastructure platform for Synology NAS**
+A self-hosted infrastructure platform for Synology NAS. SyrvisCore turns a DSM
+box into a coherent, declaratively-managed application host: Traefik reverse
+proxying with real certificates on your LAN, optional remote access through a
+Cloudflare Tunnel, a curated Layer 2 service tier for the apps you actually
+run, and a management seam that makes routine operations API calls instead of
+SSH sessions.
 
-SyrvisCore provides a complete reverse proxy and container management platform for Synology NAS devices:
+**Why it exists.** DSM owns ports 80/443 and makes clean HTTPS for
+self-hosted services painful. SyrvisCore gives Traefik its **own LAN IP** via
+macvlan (plus a shim so the host stays reachable), issues **DNS-01 wildcard
+certificates** so nothing needs to be exposed to the internet, routes DSM's
+native apps (DSM UI, Photos, Drive, WebDAV) through the same clean hostnames,
+and survives reboots without manual steps.
 
-- **Traefik** - Reverse proxy with SSL termination
-- **Portainer** - Container management UI
-- **Cloudflared** - Cloudflare Tunnel for external access (optional)
+## Architecture (v3 — split packages, thin adapters)
 
-## Architecture
+One deterministic library does the work; every interface is a thin adapter
+over it — anything an adapter can do, `ssh nas && syrvis …` can do.
 
-SyrvisCore uses a split-package architecture:
+| Package | What it is | Runs |
+|---------|-----------|------|
+| `syrviscore` (`syrvis`) | The platform: compose/Traefik generation, the Layer 2 service tier, the declarative stack, the seam verb registry | On the NAS, per-version venv |
+| `syrviscore-manager` (`syrvisctl`) | Version manager: install/activate/rollback service versions from GitHub releases; seam lifecycle | On the NAS, SPK-installed (rarely updated) |
+| `syrviscore-mcp` | MCP server exposing 42 typed management tools over a hardened SSH seam | On your workstation |
+| `syrviscore-dashboard` | Web UI (FastAPI + React): health, drift, routes, logs | On the NAS, optional core container |
 
-| Component | CLI | Purpose |
-|-----------|-----|---------|
-| Manager (`syrviscore-manager`) | `syrvisctl` | Version management, installs from SPK |
-| Service (`syrviscore`) | `syrvis` | Docker services, installed via syrvisctl |
+### The tiers
 
-## Requirements
+- **Core (declared in `config/stack.yaml`)** — the platform substrate.
+  *Primordial* (always on): Traefik, Portainer. *Optional*: cloudflared,
+  the dashboard, Cloudflare DDNS. Toggled with `syrvis stack enable/disable`,
+  converged with `syrvis stack apply` + `syrvis start`.
+- **Layer 2 (declared in `config/services.d/`)** — your apps. Each is a
+  strictly-validated `syrvis-service.yaml` (pinned image, contained volumes,
+  audited keys — unknown keys rejected) run as its own compose project and
+  routed by a generated Traefik file. `syrvis reconcile` converges the
+  declarations; `syrvis service run/add` covers the imperative path.
+- **Profiles** — platform-curated sets: `syrvis profile enable monitoring`
+  declares a complete observability substrate (VictoriaMetrics, vmagent,
+  vmalert, Alertmanager, node/docker exporters) with platform-pinned images.
 
-- **Synology NAS**: DSM 7.0 or later
-- **Docker**: Installed from Package Center
-- **Python 3.8+**: For development
+### Exposure: internal vs tunnel
 
-## Releases
+Every routed service declares `exposure: internal` (LAN-only; a LAN DNS record
+pointing at Traefik) or `tunnel` (remote via Cloudflare Tunnel + Access).
+SyrvisCore never touches DNS or the Cloudflare API — `syrvis stack hostnames
+--json` reports the exact external records each hostname needs, and a
+deployment repo reconciles them. That report, the bundle formats, and the
+operator seam are the documented cross-repo surface: see
+[`docs/seam-contract.md`](docs/seam-contract.md).
 
-SyrvisCore uses separate release tags for the two packages:
+### The management seam
 
-| Release Tag | Package | Contains |
-|-------------|---------|----------|
-| `manager-vX.X.X` | Manager | SPK file (syrvisctl) |
-| `vX.X.X` | Service | Wheel + config.yaml (syrvis) |
+Routine operations run as a dedicated least-privilege operator account whose
+SSH key is locked to a **generated forced-command shim** and an **enumerated
+sudoers allowlist** — both derived from the platform's verb registry
+(`syrviscore.seam`), regenerated automatically when a version is activated.
+The MCP server brokers those verbs as typed tools (with a two-call
+confirmation handshake for destructive ones); configuration flows as validated
+JSON bundles over stdin (`syrvis apply` for the instance, `syrvis deploy` per
+service) so secrets never touch argv, logs, or an LLM context. Break-glass SSH
+is reserved for what genuinely needs it: first-boot setup, disaster restore,
+troubleshooting.
 
-**Latest Releases:**
-- [Manager SPK](https://github.com/kevinteg/SyrvisCore/releases/tag/manager-v0.0.1) - Install this first
-- [Service v0.1.0](https://github.com/kevinteg/SyrvisCore/releases/tag/v0.1.0) - Downloaded automatically
-
-## Installation
-
-### For Synology (Production)
-
-1. Download the [Manager SPK](https://github.com/kevinteg/SyrvisCore/releases/tag/manager-v0.0.1)
-2. Install via Package Center → Manual Install
-3. Install the service package:
-   ```bash
-   syrvisctl install
-   ```
-4. Complete setup:
-   ```bash
-   syrvis setup
-   syrvis start
-   ```
-
-See [SPK Installation Guide](docs/spk-installation-guide.md) for detailed instructions.
-
-### For Development
-
-```bash
-# Clone repository
-git clone git@github.com:kevinteg/SyrvisCore.git
-cd SyrvisCore
-
-# Install Python 3.8.12 via pyenv (matches Synology NAS)
-pyenv install 3.8.12
-pyenv virtualenv 3.8.12 syrviscore
-pyenv activate syrviscore
-
-# Install both packages in development mode
-pip install -e "packages/syrviscore-manager[dev]"
-pip install -e "packages/syrviscore[dev]"
-
-# Verify installation
-syrvisctl --version
-syrvis --version
-```
-
-## CLI Commands
-
-### syrvisctl (Manager)
+## Quick start
 
 ```bash
-syrvisctl install [version]   # Install service from GitHub
-syrvisctl list                # List installed versions
-syrvisctl activate <version>  # Switch active version
-syrvisctl rollback            # Rollback to previous version
-syrvisctl check               # Check for updates
-syrvisctl info                # Show installation info
-syrvisctl cleanup [--keep N]  # Remove old versions
+# 1. Install the SPK (manager) on DSM, then on the NAS:
+source /var/packages/syrviscore/target/syrviscore.profile
+syrvisctl install                 # downloads + installs the service package
+sudo syrvis setup                 # interactive: network, domain, tokens, boot hooks
+syrvis start                      # bring up the core stack
+
+# 2. Run something:
+sudo syrvis service run uptime-kuma          # from the bundled catalog
+sudo syrvis profile enable monitoring        # the observability substrate
+sudo syrvis reconcile
+
+# 3. See what DNS records the instance needs:
+syrvis stack hostnames --json
 ```
 
-### syrvis (Service)
-
-```bash
-syrvis setup                  # Interactive configuration
-syrvis status                 # Show service status
-syrvis start                  # Start all services
-syrvis stop                   # Stop all services
-syrvis restart                # Restart services
-syrvis logs [service] [-f]    # View logs
-syrvis doctor [--fix]         # Diagnose issues
-```
-
-## Project Structure
-
-```
-SyrvisCore/
-├── packages/
-│   ├── syrviscore-manager/    # Manager package (SPK)
-│   │   ├── pyproject.toml
-│   │   └── src/syrviscore_manager/
-│   └── syrviscore/            # Service package
-│       ├── pyproject.toml
-│       └── src/syrviscore/
-├── spk/                       # SPK packaging
-├── build-tools/               # Build scripts
-├── tests/                     # Test suite
-│   └── dsm-sim/               # DSM simulation environment
-├── docs/                      # Documentation
-└── build/config.yaml          # Docker image versions
-```
-
-## Development
-
-### Building Packages
-
-```bash
-# Build manager wheel (includes dependency download)
-./build-tools/build-manager.sh
-
-# Build service wheel
-./build-tools/build-service.sh
-
-# Build complete SPK (bundles all dependencies)
-./build-tools/build-spk.sh
-```
-
-### Testing with DSM Simulation
-
-The project includes a DSM simulation environment for local testing:
-
-```bash
-# Initialize simulation
-make sim-setup
-
-# Run full workflow test
-make test-sim
-
-# Activate simulation for interactive testing
-source tests/dsm-sim/activate.sh
-
-# Reset simulation
-make sim-reset
-```
-
-See [Development Guide](docs/dev-guide.md) for details.
-
-### Running Tests
-
-```bash
-# Run all tests
-make test
-
-# Run with coverage
-make test-cov
-```
-
-### Code Quality
-
-```bash
-make lint        # Run ruff linter
-make format      # Format with black
-make check       # lint + test
-```
+Requirements: DSM 7.0+, Container Manager (Docker), a domain (Cloudflare for
+DNS-01 certs + optional tunnel), a reserved LAN IP for Traefik.
 
 ## Documentation
 
-- [Design Document](docs/design-doc.md) - Architecture overview
-- [SPK Installation Guide](docs/spk-installation-guide.md) - User installation guide
-- [CLI Reference - syrvisctl](docs/cli-syrvisctl.md) - Manager CLI docs
-- [CLI Reference - syrvis](docs/cli-syrvis.md) - Service CLI docs
-- [Development Guide](docs/dev-guide.md) - Local development setup
-- [Build Tools](build-tools/README.md) - Build system documentation
+The engineering handbook lives in **[`docs/wiki/`](docs/wiki/README.md)** —
+architecture, networking/macvlan, split-horizon DNS, the Layer 2 how-to, the
+service schema reference, disaster recovery. Key references:
 
-## Contributing
+- [`docs/seam-contract.md`](docs/seam-contract.md) — the deployment-facing
+  contract (hostnames report, bundle schemas, seam verbs)
+- [`docs/design-doc.md`](docs/design-doc.md) — the v3 design
+- [`docs/dashboard.md`](docs/dashboard.md) / [`docs/mcp-design.md`](docs/mcp-design.md) — the adapters
+- `packages/syrviscore-mcp/README.md` — MCP setup + operator provisioning
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Set up development environment (see above)
-4. Make your changes
-5. Run tests and linters (`make check`)
-6. Commit (`git commit -m 'Add amazing feature'`)
-7. Push (`git push origin feature/amazing-feature`)
-8. Open a Pull Request
+Naming, for orientation: “core” is the stack tier in `stack.yaml`
+(“primordial” = its always-on subset); “Layer 2” (L2) is the app tier in
+`services.d/`; a “bundle” is a validated JSON document streamed over the seam.
 
-### Code Standards
+## Development
 
-- Python 3.8+ compatibility
-- Black formatting (line length 100)
-- Ruff linting
-- Pytest for testing
-- Google-style docstrings
+```bash
+pyenv install 3.8.12 && pyenv virtualenv 3.8.12 syrviscore && pyenv activate syrviscore
+pip install -e "packages/syrviscore-manager[dev]" -e "packages/syrviscore[dev]"
+pytest tests/ packages/syrviscore/tests/          # service + manager (3.8, DSM parity)
+
+# MCP + dashboard test on modern Python (3.12), each with the platform lib:
+pip install -e packages/syrviscore -e "packages/syrviscore-mcp[dev]"
+pip install -e packages/syrviscore -e "packages/syrviscore-dashboard[dev]"
+```
+
+Docker image pins are committed in code (`DEFAULT_DOCKER_IMAGES` in
+`packages/syrviscore/src/syrviscore/compose.py`); a release may attach a
+generated `config.yaml` asset that overrides them per-version. Build scripts
+live in `build-tools/` (SPK, wheels, dev tarball, releases). CI runs the 3.8
+matrix (black + ruff + pytest), the MCP/dashboard suites, a seam-artifact
+drift check, and a full install → backup → wipe → restore cycle.
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
-
-## Links
-
-- **Issues**: [GitHub Issues](https://github.com/kevinteg/SyrvisCore/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/kevinteg/SyrvisCore/discussions)
+MIT — see [LICENSE](LICENSE).

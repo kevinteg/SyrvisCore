@@ -25,7 +25,7 @@ Split DNS makes one hostname serve both. The two "horizons" are:
 ```mermaid
 flowchart LR
     subgraph inside["Inside horizon (LAN resolver)"]
-        i["photos.example.com"] --> ip["A → 192.168.8.4<br/>(TRAEFIK_IP)"]
+        i["photos.example.com"] --> ip["A → 192.168.1.100<br/>(TRAEFIK_IP)"]
     end
     subgraph outside["Outside horizon (public DNS)"]
         o["wiki.example.com"] --> cname["CNAME → tunnel<br/>(proxied)"]
@@ -44,8 +44,17 @@ Which record a hostname needs is determined entirely by its **exposure**.
 | `tunnel` | Anywhere (behind Access) | **CNAME** `host → <tunnel>` (proxied) on **public** DNS + an Access policy | DNS-01 |
 
 `syrvis stack hostnames --json` enumerates every routed hostname on the instance and emits precisely
-this: for each host, its exposure and the concrete record to create. SyrvisCore itself creates none
-of it — that is home-tech's job.
+this: for each host, its exposure and the concrete record to create (the report is versioned — see
+[the seam contract](../seam-contract.md)). SyrvisCore itself creates none of it — that is the
+deployment repo's job.
+
+> **Exposure is declared intent, not routing enforcement.** Traefik routes
+> `internal` and `tunnel` hostnames identically (same router, same resolver).
+> A LAN client that points a `tunnel` hostname at `TRAEFIK_IP` (or curls with
+> `--resolve`) reaches the service **without** Cloudflare Access — the LAN is
+> deliberately inside the trust boundary, and Access gates only the public
+> path. If your LAN is not trusted, do not rely on Access as the only gate for
+> a tunnel-exposed service (give it its own authentication).
 
 ```mermaid
 flowchart LR
@@ -69,9 +78,9 @@ sequenceDiagram
     autonumber
     participant C as LAN client
     participant R as LAN resolver (e.g. router / Pi-hole / DSM DNS)
-    participant T as Traefik 192.168.8.4
+    participant T as Traefik 192.168.1.100
     C->>R: photos.example.com?
-    R-->>C: A 192.168.8.4
+    R-->>C: A 192.168.1.100
     C->>T: HTTPS (valid LE cert via DNS-01)
     T-->>C: Synology Photos
 ```
@@ -84,7 +93,7 @@ sequenceDiagram
 - A split-horizon setup where the same zone is served with private answers internally and public
   answers (or none) externally.
 
-The point SyrvisCore cares about: it *reports* "`photos.example.com` needs `A → 192.168.8.4`", and
+The point SyrvisCore cares about: it *reports* "`photos.example.com` needs `A → 192.168.1.100`", and
 home-tech makes it so.
 
 ---
@@ -126,12 +135,12 @@ flowchart TB
         net(["Internet client"])
     end
 
-    lan -->|"internal: A → 192.168.8.4"| traefik
-    lan -.->|"tunnel host (optional hairpin): A → 192.168.8.4"| traefik
+    lan -->|"internal: A → 192.168.1.100"| traefik
+    lan -.->|"tunnel host (optional hairpin): A → 192.168.1.100"| traefik
     net -->|"tunnel: CNAME → Cloudflare"| edge["Cloudflare edge + Access"]
     net -. "internal host: does not resolve publicly" .-x traefik
 
-    edge --> cloudflared --> traefik["Traefik 192.168.8.4"]
+    edge --> cloudflared --> traefik["Traefik 192.168.1.100"]
     traefik --> services["core UIs + Layer 2 services"]
 ```
 

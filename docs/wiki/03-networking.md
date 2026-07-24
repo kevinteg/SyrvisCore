@@ -16,14 +16,14 @@ Every SyrvisCore deployment has exactly two Docker networks:
 
 ```mermaid
 flowchart TB
-    subgraph host["Synology NAS host — 192.168.8.3"]
+    subgraph host["Synology NAS host — 192.168.1.2"]
         nginx["DSM's own nginx<br/>:80 / :443 (occupied)"]
         dsm["DSM / Photos / Drive<br/>:5000 :5001 :6690"]
-        shim["syrvis-shim<br/>(macvlan, host side)<br/>SHIM_IP 192.168.8.5"]
+        shim["syrvis-shim<br/>(macvlan, host side)<br/>SHIM_IP 192.168.1.101"]
     end
 
     subgraph macvlan["syrvis-macvlan (driver: macvlan, parent: ovs_eth0)"]
-        traefik["traefik<br/>TRAEFIK_IP 192.168.8.4<br/>:80 :443 (its own IP)"]
+        traefik["traefik<br/>TRAEFIK_IP 192.168.1.100<br/>:80 :443 (its own IP)"]
     end
 
     subgraph proxy["proxy (driver: bridge)"]
@@ -41,7 +41,7 @@ flowchart TB
 
 - **`syrvis-macvlan`** — a `macvlan` network whose parent is the NAS's physical interface
   (`NETWORK_INTERFACE`, e.g. `ovs_eth0`). Traefik is given a **dedicated LAN IP** on it
-  (`TRAEFIK_IP`, e.g. `192.168.8.4`). Because Traefik has its *own* IP, it can bind **ports 80 and
+  (`TRAEFIK_IP`, e.g. `192.168.1.100`). Because Traefik has its *own* IP, it can bind **ports 80 and
   443 without colliding with DSM's own nginx**, which already occupies those ports on the NAS's
   host IP. This is the crux of the whole design.
 - **`proxy`** — an ordinary `bridge` network that every other container joins. Traefik is attached
@@ -55,7 +55,7 @@ SyrvisCore choice. So Traefik (on `syrvis-macvlan`) cannot reach services that l
 *host* (DSM, Synology Photos, Drive) at the host IP directly.
 
 The fix is a **shim**: a second macvlan sub-interface created *on the host* (`syrvis-shim`) with its
-own IP (`SHIM_IP`, conventionally `TRAEFIK_IP + 1`, e.g. `192.168.8.5`). Now the host is reachable
+own IP (`SHIM_IP`, conventionally `TRAEFIK_IP + 1`, e.g. `192.168.1.101`). Now the host is reachable
 from the macvlan segment at `SHIM_IP`, and Traefik proxies Synology services to `https://SHIM_IP:5001`.
 This works because DSM's system services bind `0.0.0.0`, so a packet arriving on the shim interface
 is accepted. (`syrvis setup` creates the shim; a boot hook recreates it after reboot — see
@@ -63,7 +63,7 @@ is accepted. (`syrvis setup` creates the shim; a boot hook recreates it after re
 
 ```mermaid
 flowchart LR
-    t["traefik<br/>(macvlan 192.168.8.4)"] -->|"https://192.168.8.5:5001"| shim["syrvis-shim<br/>192.168.8.5"]
+    t["traefik<br/>(macvlan 192.168.1.100)"] -->|"https://192.168.1.101:5001"| shim["syrvis-shim<br/>192.168.1.101"]
     shim --> dsm["DSM / Photos / Drive<br/>bound on 0.0.0.0"]
 ```
 
@@ -104,11 +104,11 @@ sequenceDiagram
     autonumber
     participant C as LAN client
     participant DNS as LAN DNS resolver
-    participant T as Traefik (192.168.8.4)
+    participant T as Traefik (192.168.1.100)
     participant S as Container (proxy net)
 
     C->>DNS: resolve photos.example.com
-    DNS-->>C: A → 192.168.8.4  (TRAEFIK_IP)
+    DNS-->>C: A → 192.168.1.100  (TRAEFIK_IP)
     C->>T: HTTPS request (Host: photos.example.com)
     Note over T: Match Host() router,<br/>serve Let's Encrypt cert (DNS-01)
     T->>S: proxy over the proxy network
@@ -123,7 +123,7 @@ network:
 
 ```mermaid
 flowchart LR
-    C(["LAN client"]) -->|"A → 192.168.8.4"| T["traefik"]
+    C(["LAN client"]) -->|"A → 192.168.1.100"| T["traefik"]
     T -->|"https://SHIM_IP:5001"| shim["syrvis-shim → NAS host"]
     shim --> P["Synology Photos :5001"]
 ```
@@ -181,7 +181,7 @@ flowchart TB
         localuser(["LAN user"])
         subgraph nasbox["Synology NAS"]
             cd["cloudflared"]
-            traefik["traefik<br/>192.168.8.4"]
+            traefik["traefik<br/>192.168.1.100"]
             wiki["wiki (L2)"]
             photos["Synology Photos<br/>(via shim)"]
         end
@@ -190,7 +190,7 @@ flowchart TB
     remote -->|"CNAME → tunnel"| cfedge
     cfedge -->|"outbound tunnel"| cd
     cd --> traefik
-    localuser -->|"A → 192.168.8.4"| traefik
+    localuser -->|"A → 192.168.1.100"| traefik
     traefik --> wiki
     traefik --> photos
 ```
@@ -227,11 +227,11 @@ flowchart TD
 | Variable | Meaning | Example |
 |----------|---------|---------|
 | `NETWORK_INTERFACE` | Physical parent for the macvlan | `ovs_eth0` |
-| `NETWORK_SUBNET` | LAN subnet (CIDR) | `192.168.8.0/24` |
-| `NETWORK_GATEWAY` | LAN gateway | `192.168.8.1` |
-| `TRAEFIK_IP` | Traefik's dedicated LAN IP | `192.168.8.4` |
-| `SHIM_IP` | Host shim IP (Traefik → host) | `192.168.8.5` |
-| `NAS_IP` | The NAS's own host IP | `192.168.8.3` |
+| `NETWORK_SUBNET` | LAN subnet (CIDR) | `192.168.1.0/24` |
+| `NETWORK_GATEWAY` | LAN gateway | `192.168.1.1` |
+| `TRAEFIK_IP` | Traefik's dedicated LAN IP | `192.168.1.100` |
+| `SHIM_IP` | Host shim IP (Traefik → host) | `192.168.1.101` |
+| `NAS_IP` | The NAS's own host IP | `192.168.1.2` |
 | `DOMAIN` | Base domain for all routes | `example.com` |
 | `CLOUDFLARE_DNS_API_TOKEN` | Enables DNS-01 certs | *(secret)* |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Enables the Cloudflared tunnel | *(secret)* |

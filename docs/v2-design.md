@@ -1,4 +1,9 @@
-# SyrvisCore v2 Design
+# SyrvisCore v2 Design (SUPERSEDED)
+
+> **Status: historical.** The implemented architecture is v3 — see
+> `design-doc.md`, the wiki (`docs/wiki/`), and `seam-contract.md` for what is
+> current. Kept for the rationale trail (the audit-driven rewrite/refactor
+> split); do not implement from this document.
 
 Direction set 2026-07-09. Companion: `docs/code-audit-2026-07.md` (why the rewrite/refactor split below). This document is the pickup point for implementation sessions in this repo, and the reference point for sessions in home-tech and personal-assistant.
 
