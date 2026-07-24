@@ -142,6 +142,11 @@ def profile_list(ctx: ToolContext) -> Dict:
     return _run(ctx, "profile_list")
 
 
+def image_updates(ctx: ToolContext) -> Dict:
+    # Read-only: reports newer registry tags for the pinned images; never pulls.
+    return _run(ctx, "image_updates")
+
+
 def profile_enable(ctx: ToolContext, name: str) -> Dict:
     # Intent-only (declarations + seeded configs, never overwriting) — like
     # service_declare. Fail-closed against the platform's profile set.

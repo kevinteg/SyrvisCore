@@ -92,6 +92,11 @@ COMMANDS: List[Command] = [
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
+    # image_updates queries external registries (openWorldHint on the MCP side)
+    # but only READS + caches; it never pulls or changes anything.
+    Command(
+        "image_updates", "syrvis", ["updates"], read_only=True, flags=["--json"], timeout_s=120
+    ),
     # schedule list parses the managed crontab block + jobs.d — read-only. It runs
     # under sudo so the 0600-ish jobs.d declarations are readable over the seam,
     # but the CLI itself performs no privileged action (like reconcile_plan).

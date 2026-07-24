@@ -126,12 +126,37 @@ export interface LinksResponse {
   domain: string | null;
   links: LinkItem[];
 }
+export interface ImageUpdate {
+  kind: "core" | "service";
+  name: string;
+  image: string;
+  current: string | null;
+  latest: string | null;
+  update_available: boolean;
+  newer: string[];
+  error?: string | null;
+}
+export interface ImageUpdatesReport {
+  count: number;
+  update_count: number;
+  images: ImageUpdate[];
+  cached?: boolean;
+  error?: string;
+}
 export interface Updates {
   current: string | null;
   latest: string | null;
   update_available: boolean;
   dashboard_version?: string;
   error?: string;
+  // Structured view (top level keeps the version fields for the header badge).
+  version?: {
+    current: string | null;
+    latest: string | null;
+    update_available: boolean;
+    dashboard_version?: string;
+  };
+  images?: ImageUpdatesReport;
 }
 
 export const getLinks = () => api<LinksResponse>("/api/links");

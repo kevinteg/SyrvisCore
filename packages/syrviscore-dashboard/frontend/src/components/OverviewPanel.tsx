@@ -1,6 +1,7 @@
 import type { HealthSnapshot } from "../lib/api";
 import { ComponentCard } from "./ComponentCard";
 import { LinksBar } from "./LinksBar";
+import { UpdatesCard } from "./UpdatesCard";
 import { ErrorNote, Spinner } from "./ui";
 
 const ORDER = ["core", "traefik", "portainer", "cloudflared", "cloudflare_ddns", "config"];
@@ -23,6 +24,7 @@ export function OverviewPanel({
   return (
     <div className="space-y-4">
       <LinksBar />
+      <UpdatesCard />
       {isLoading && !snapshot ? (
         <Spinner label="Probing components…" />
       ) : error && !snapshot ? (

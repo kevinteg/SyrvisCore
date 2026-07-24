@@ -160,6 +160,7 @@ def load_existing_config() -> dict:
                     "SHIM_IP": "shim_ip",
                     "NAS_IP": "nas_ip",
                     "CLOUDFLARE_TUNNEL_TOKEN": "cloudflare_token",
+                    "CLOUDFLARE_DNS_API_TOKEN": "cloudflare_dns_api_token",
                     "SYNOLOGY_DSM_ENABLED": "synology_dsm",
                     "SYNOLOGY_PHOTOS_ENABLED": "synology_photos",
                     "SYNOLOGY_WEBDAV_ENABLED": "synology_webdav",

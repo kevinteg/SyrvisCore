@@ -91,6 +91,13 @@ def profile_list() -> dict:
     return _call(tools.profile_list)
 
 
+@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+def image_updates() -> dict:
+    """Report available container-image updates for every pinned image (core +
+    installed L2) by querying each registry (read-only; never pulls). Cached."""
+    return _call(tools.image_updates)
+
+
 @mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""

@@ -942,6 +942,61 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
         click.echo("(dry run — nothing written)")
 
 
+@cli.command("updates")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@click.option("--refresh", is_flag=True, help="Bypass the cache and re-query registries")
+@handle_errors
+def updates(as_json, refresh):
+    """Report available container-image updates (report-only; never pulls).
+
+    Checks every pinned image SyrvisCore runs — the core tier and installed
+    Layer 2 services — against its registry and reports newer compatible tags.
+    Applying an update stays a deliberate, declarative act: `syrvis service
+    set-image <name> <ref>` for an L2 service; a new SyrvisCore release (which
+    ships new core pins) for the core tier. Results are cached ~6h.
+    """
+    from syrviscore import image_updates
+
+    try:
+        home = get_syrvis_home()
+    except SyrvisHomeError:
+        home = None
+    report = image_updates.check_updates(home=home, refresh=refresh)
+
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2, default=str))
+        return
+
+    imgs = report.get("images", [])
+    if not imgs:
+        click.echo("No images to check (nothing installed yet).")
+        return
+    n = report.get("update_count", 0)
+    click.echo(
+        "{} image(s) checked, {} update(s) available{}:".format(
+            report.get("count", len(imgs)),
+            n,
+            " (cached)" if report.get("cached") else "",
+        )
+    )
+    click.echo()
+    for img in imgs:
+        name = img.get("name", "?")
+        if img.get("error"):
+            click.echo("  {:<22} {}  — {}".format(name, img.get("image", ""), img["error"]))
+        elif img.get("update_available"):
+            click.echo(
+                "  {:<22} {} → {}  (newer: {})".format(
+                    name,
+                    img.get("current"),
+                    img.get("latest"),
+                    ", ".join(img.get("newer", [])),
+                )
+            )
+        else:
+            click.echo("  {:<22} {}  up to date".format(name, img.get("current")))
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors

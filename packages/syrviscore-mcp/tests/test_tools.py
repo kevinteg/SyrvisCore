@@ -396,3 +396,12 @@ class TestServiceTask:
         with pytest.raises(ValidationError):
             tools.service_task(ctx, "gollum", "bad task!")
         assert runner.ids() == []  # fails before any remote call
+
+
+class TestImageUpdatesTool:
+    def test_read_only_passthrough(self):
+        report = {"count": 1, "update_count": 1, "images": [{"name": "traefik"}]}
+        ctx, runner = make_ctx({"image_updates": report})
+        out = tools.image_updates(ctx)
+        assert runner.ids() == ["image_updates"]
+        assert out["update_count"] == 1
