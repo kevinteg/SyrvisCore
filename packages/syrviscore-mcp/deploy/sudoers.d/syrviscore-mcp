@@ -24,6 +24,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service task --task * -- *, \
     /volume1/syrviscore/bin/syrvis service update -- *, \
     /volume1/syrviscore/bin/syrvis service add -- *, \
+    /volume1/syrviscore/bin/syrvis service set-image --image * -- *, \
     /volume1/syrviscore/bin/syrvis service run --image * --subdomain * --exposure * --port * -- *, \
     /volume1/syrviscore/bin/syrvis service declare --image * --subdomain * --exposure * --port * --enabled * --critical * --json -- *, \
     /volume1/syrviscore/bin/syrvis service adopt --json -- *, \

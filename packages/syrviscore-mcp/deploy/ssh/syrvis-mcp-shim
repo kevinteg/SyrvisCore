@@ -137,6 +137,9 @@ fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "add" ] && [ "${6}" = "--" ] && is_giturl "${7}"; then
   set -f; exec "$@"
 fi
+if [ $# -eq 9 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "set-image" ] && [ "${6}" = "--image" ] && is_image "${7}" && [ "${8}" = "--" ] && is_name "${9}"; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 15 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "run" ] && [ "${6}" = "--image" ] && is_image "${7}" && [ "${8}" = "--subdomain" ] && is_subdomain "${9}" && [ "${10}" = "--exposure" ] && is_exposure "${11}" && [ "${12}" = "--port" ] && is_port "${13}" && [ "${14}" = "--" ] && is_name "${15}"; then
   set -f; exec "$@"
 fi

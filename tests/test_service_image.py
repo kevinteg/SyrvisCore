@@ -155,3 +155,70 @@ class TestApplyOverrides:
     def test_bad_exposure_rejected(self):
         with pytest.raises(ValueError):
             ServiceManager._apply_overrides(self._svc(), None, "public")
+
+
+class TestSetImage:
+    def _installed(self, home, monkeypatch, image="ghcr.io/acme/app:1.0.0"):
+        sm = _manager(home)
+        ok, msg = sm.add_image("app", image, port=8080, start=False)
+        assert ok, msg
+        # Stub docker so set_image's pull/stop/start are no-ops.
+        monkeypatch.setattr(sm, "_compose", lambda *a, **k: (True, ""))
+        monkeypatch.setattr(sm, "_stop_service", lambda *a, **k: (True, ""))
+        monkeypatch.setattr(sm, "_start_service", lambda *a, **k: (True, "started"))
+        return sm
+
+    def test_repins_manifest_and_declaration(self, home, monkeypatch):
+        sm = self._installed(home, monkeypatch)
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:2.0.0")
+        assert ok, msg
+        assert "1.0.0 -> " in msg and "2.0.0" in msg
+        manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
+        assert manifest["image"] == "ghcr.io/acme/app:2.0.0"
+        assert manifest["version"] == "2.0.0"  # derived from the new tag
+        # the dual-written declaration is re-pinned too (reconcile agrees)
+        decl = yaml.safe_load((home / "config" / "services.d" / "app.yaml").read_text())
+        assert decl["image"] == "ghcr.io/acme/app:2.0.0"
+
+    def test_unpinned_image_rejected(self, home, monkeypatch):
+        sm = self._installed(home, monkeypatch)
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:latest")
+        assert not ok and "latest" in msg
+        # unchanged on rejection
+        manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
+        assert manifest["image"] == "ghcr.io/acme/app:1.0.0"
+
+    def test_same_image_is_noop(self, home, monkeypatch):
+        sm = self._installed(home, monkeypatch)
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:1.0.0")
+        assert ok and "already pinned" in msg
+
+    def test_missing_service(self, home, monkeypatch):
+        sm = _manager(home)
+        ok, msg = sm.set_image("nope", "ghcr.io/acme/app:2.0.0")
+        assert not ok and "not installed" in msg
+
+    def test_git_service_refused(self, home, monkeypatch):
+        sm = self._installed(home, monkeypatch)
+        (home / "services" / "app" / ".git").mkdir()
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:2.0.0")
+        assert not ok and "service update" in msg
+
+    def test_cli_registered_and_wired(self, home, monkeypatch):
+        import syrviscore.privilege as privilege
+        from click.testing import CliRunner
+        from syrviscore import service_manager
+        from syrviscore.cli import cli
+
+        monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
+        seen = {}
+        monkeypatch.setattr(
+            service_manager.ServiceManager,
+            "set_image",
+            lambda self, name, image: seen.update(name=name, image=image) or (True, "re-pinned"),
+        )
+        r = CliRunner().invoke(
+            cli, ["service", "set-image", "--image", "ghcr.io/acme/app:2.0.0", "--", "app"]
+        )
+        assert r.exit_code == 0, r.output
+        assert seen == {"name": "app", "image": "ghcr.io/acme/app:2.0.0"}

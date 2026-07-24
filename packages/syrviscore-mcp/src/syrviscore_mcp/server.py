@@ -285,6 +285,14 @@ def service_task(name: str, task: str) -> dict:
 
 
 @mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
+def service_set_image(name: str, image: str, confirm: str = "") -> dict:
+    """Re-pin an installed service to a new pinned image + redeploy (privileged;
+    pulls + RUNS new code). Fails closed on the registry allowlist. Two-call:
+    first returns a plan+token; re-call with confirm=<token> to proceed."""
+    return _call(tools.service_set_image, name=name, image=image, confirm=confirm)
+
+
+@mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
 def service_add(git_url: str, confirm: str = "") -> dict:
     """Add a Layer 2 service from a git URL (privileged; clones + RUNS new code).
     Fails closed unless the host is in safety.git_url_allowed_hosts. Two-call:

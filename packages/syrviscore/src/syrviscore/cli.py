@@ -520,6 +520,31 @@ def service_update(name):
         raise SyrvisError(message)
 
 
+@service.command("set-image")
+@click.argument("name")
+@click.option("--image", required=True, help="New pinned image reference (must not be :latest)")
+@handle_errors
+def service_set_image(name, image):
+    """Re-pin an image-first L2 service to a new image and redeploy (declarative update).
+
+    The apply path for a container-image update from `syrvis updates`: swaps the
+    manifest's image (re-validated: must be a pinned, audited ref), regenerates
+    config, dual-writes the declaration, then pulls + restarts. Git-based
+    services update via `syrvis service update` instead.
+
+        sudo syrvis service set-image --image traefik:v3.7.0 -- traefik
+    """
+    privilege.ensure_elevated("Re-pinning a service image requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    manager = ServiceManager()
+    success, message = manager.set_image(name, image)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 @service.command("task")
 @click.argument("name")
 @click.option(

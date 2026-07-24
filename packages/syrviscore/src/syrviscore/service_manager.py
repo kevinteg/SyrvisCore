@@ -1093,6 +1093,70 @@ class ServiceManager:
 
         return True, f"Service '{name}' is up to date (v{updated.version})"
 
+    def set_image(self, name: str, new_image: str) -> Tuple[bool, str]:
+        """Re-pin an installed Layer 2 service to ``new_image`` and redeploy.
+
+        The declarative apply path for a container-image update (the companion
+        to ``syrvis updates``): swap the manifest's ``image:``, re-validate it
+        through the full ServiceDefinition trust boundary (so the new ref must
+        be a pinned, audited image), regenerate compose + the Traefik file,
+        dual-write the services.d declaration so a later reconcile agrees, then
+        pull + restart. Git-based services keep updating via ``service update``
+        (their image comes from the repo).
+        """
+        try:
+            p = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        service_dir = p["service"]
+        manifest_path = service_dir / "syrvis-service.yaml"
+        if not manifest_path.exists():
+            return False, f"Service '{name}' is not installed"
+        if (service_dir / ".git").exists():
+            return False, (
+                f"'{name}' was installed from git — update it with "
+                "'syrvis service update' (its image comes from the repo)"
+            )
+        try:
+            current = load_service_definition(service_dir)
+        except Exception as e:  # noqa: BLE001
+            return False, f"could not load manifest for '{name}': {e}"
+
+        if new_image == current.image:
+            return True, f"Service '{name}' already pinned to {new_image}"
+
+        # Rebuild through the trust boundary: only the image + derived version
+        # change; everything else (volumes, env, traefik, tier) is preserved and
+        # re-validated. A bad/unpinned ref is rejected here before anything runs.
+        data = current.to_dict()
+        data["image"] = new_image
+        data["version"] = _image_tag(new_image)
+        try:
+            updated = ServiceDefinition.from_dict(data)
+        except ServiceValidationError as e:
+            return False, f"invalid image {new_image!r}: {e}"
+
+        old_image = current.image
+        self._write_manifest(updated, service_dir)
+        self._generate_compose_file(updated)
+        try:
+            domain = get_domain_from_env()
+            self.traefik_config.write_config(updated, domain)
+        except ValueError as e:
+            return False, f"Failed to update Traefik config: {e}"
+        try:
+            services_d.write_declaration_from_install(self.syrvis_home, updated)
+        except Exception:  # noqa: BLE001 - best-effort; the re-pin stands
+            pass
+
+        compose_path = p["compose"]
+        self._compose(name, compose_path, "pull", timeout=300)
+        self._stop_service(name, compose_path)
+        ok, msg = self._start_service(name, compose_path)
+        if not ok:
+            return False, f"re-pinned to {new_image} but restart failed: {msg}"
+        return True, f"Service '{name}' re-pinned: {old_image} -> {new_image}"
+
     # -------------------------------------------------------------------------
     # Declared one-shot tasks (operator-seam verb)
     # -------------------------------------------------------------------------

@@ -405,3 +405,40 @@ class TestImageUpdatesTool:
         out = tools.image_updates(ctx)
         assert runner.ids() == ["image_updates"]
         assert out["update_count"] == 1
+
+
+class TestServiceSetImage:
+    def _ctx(self, responses=None):
+        cfg = make_config(token_ttl_s=300, image_allowed_registries=["ghcr.io"])
+        runner = FakeRunner(cfg, responses or {})
+        return tools.ToolContext(cfg=cfg, runner=runner, secret=b"s", now=lambda: 1000), runner
+
+    def test_two_call_handshake(self):
+        ctx, runner = self._ctx({"service_list": MANAGED, "service_set_image": {"ok": True}})
+        plan = tools.service_set_image(ctx, "gollum", "ghcr.io/acme/gollum:2.0.0")
+        assert plan["needs_confirmation"] is True
+        assert "service_set_image" not in runner.ids()  # no mutation before confirm
+        tools.service_set_image(
+            ctx, "gollum", "ghcr.io/acme/gollum:2.0.0", confirm=plan["confirm_token"]
+        )
+        assert "service_set_image" in runner.ids()
+
+    def test_unmanaged_rejected(self):
+        ctx, runner = self._ctx({"service_list": {"services": []}})
+        with pytest.raises(SandboxError):
+            tools.service_set_image(ctx, "gollum", "ghcr.io/acme/gollum:2.0.0")
+
+    def test_registry_not_allowlisted_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx({"service_list": MANAGED})  # empty image allowlist
+        with pytest.raises(ValidationError):
+            tools.service_set_image(ctx, "gollum", "docker.io/acme/gollum:2.0.0")
+
+    def test_unpinned_image_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = self._ctx({"service_list": MANAGED})
+        with pytest.raises(ValidationError):
+            tools.service_set_image(ctx, "gollum", "ghcr.io/acme/gollum:latest")
+        assert runner.ids() == []

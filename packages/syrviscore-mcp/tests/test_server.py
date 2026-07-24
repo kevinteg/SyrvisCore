@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "service_stop",
     "service_update",
     "service_task",
+    "service_set_image",
     "service_add",
     "service_run",
     "service_declare",
@@ -58,6 +59,7 @@ EXPECTED_TOOLS = {
 }
 
 DESTRUCTIVE = {
+    "service_set_image",
     "activate",
     "rollback",
     "uninstall",
@@ -107,7 +109,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 43
+    assert len(EXPECTED_TOOLS) == 44
 
 
 def test_destructive_tools_have_destructive_hint():

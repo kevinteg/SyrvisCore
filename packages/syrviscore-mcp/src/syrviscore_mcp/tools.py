@@ -366,6 +366,25 @@ def service_run(
     return _with_service_state(ctx, _run(ctx, "service_run", args))
 
 
+def service_set_image(ctx: ToolContext, name: str, image: str, confirm: str = "") -> Dict:
+    # Re-pins an installed service to a new pinned image, then PULLS + RUNS it —
+    # like service_run it runs new code, so it fails closed on the registry
+    # allowlist AND requires a confirmation token. Sandbox-checked (an installed
+    # service only).
+    validate.validate_name(name)
+    validate.validate_image(image, ctx.cfg.image_allowed_registries)
+    sandbox.assert_service_managed(ctx.runner, name)
+    current = service_list(ctx)
+    entry = next((s for s in current.get("services", []) if s.get("name") == name), None)
+    plan = {"action": "service_set_image", "name": name, "image": image, "current": entry}
+    pending = _confirm_or_plan(
+        ctx, "service_set_image", {"name": name, "image": image}, confirm, [image, entry], plan
+    )
+    if pending:
+        return pending
+    return _with_service_state(ctx, _run(ctx, "service_set_image", {"name": name, "image": image}))
+
+
 def install(ctx: ToolContext, version: Optional[str] = None) -> Dict:
     if version is not None:
         validate.validate_version(version)

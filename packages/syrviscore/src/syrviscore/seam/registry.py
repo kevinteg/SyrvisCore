@@ -234,6 +234,19 @@ COMMANDS: List[Command] = [
         positional=Slot("git_url", KIND_GIT_URL),
         timeout_s=600,
     ),
+    # service set-image re-pins an installed image-first service to a new pinned
+    # image and PULLS + RUNS it — like service_run, it runs new code, so the MCP
+    # gates it with a confirmation token. Fixed argv: --image <ref> -- <name>.
+    Command(
+        "service_set_image",
+        "syrvis",
+        ["service", "set-image"],
+        sudo=True,
+        expect_json=False,
+        flags=["--image", FlagValue(Slot("image", KIND_IMAGE))],
+        positional=Slot("name", KIND_NAME),
+        timeout_s=600,
+    ),
     Command(
         "service_run",
         "syrvis",
