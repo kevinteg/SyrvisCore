@@ -761,6 +761,94 @@ def deploy(name):
         raise SyrvisError(message)
 
 
+@cli.command("apply")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (operator seam)")
+@click.option("--dry-run", is_flag=True, help="Validate and report the plan; write nothing")
+@click.option(
+    "--allow-secret-change",
+    is_flag=True,
+    help="Permit changing an existing secret value in .env (deliberate rotation)",
+)
+@handle_errors
+def apply_cmd(as_json, dry_run, allow_secret_change):
+    """Apply a core-tier instance bundle (JSON on STDIN) to this install (root-only).
+
+    The core-tier sibling of `syrvis deploy`: one syrvis-instance bundle — the
+    runtime .env content, the stack.yaml enablement, and the complete
+    services.d/ declaration set — is validated and written atomically, so a
+    deployment repo never writes files under $SYRVIS_HOME/config itself.
+    Applying only WRITES configuration; converge afterwards with
+    `syrvis stack apply` / `syrvis reconcile` (already seam verbs).
+
+    The bundle arrives on STDIN only — tokens/secrets never touch argv/ps/logs.
+    Reports name env keys, never values. Changing an EXISTING secret value
+    requires --allow-secret-change (deliberate rotation):
+
+        <instance.json> | sudo syrvis apply --json
+    """
+    privilege.ensure_elevated("Applying an instance bundle requires elevated privileges.")
+    from syrviscore.instance_bundle import (
+        InstanceBundle,
+        InstanceBundleError,
+        apply_instance_bundle,
+    )
+
+    try:
+        # Read the bundle from stdin ONLY (secrets never on argv/ps). Cap the
+        # stream so a runaway/hostile input can't OOM the box (mirrors deploy).
+        _MAX = 1024 * 1024  # 1 MiB — generous; per-section caps are tighter
+        raw = click.get_text_stream("stdin").read(_MAX + 1)
+        if len(raw) > _MAX:
+            raise SyrvisError(f"bundle too large (max {_MAX} bytes)")
+        if not raw.strip():
+            raise SyrvisError("no bundle on stdin")
+        try:
+            doc = jsonlib.loads(raw)
+        except ValueError as e:
+            raise SyrvisError(f"bundle is not valid JSON: {e}")
+        try:
+            bundle = InstanceBundle.from_dict(doc)
+            report = apply_instance_bundle(
+                bundle,
+                get_syrvis_home(),
+                allow_secret_change=allow_secret_change,
+                dry_run=dry_run,
+            )
+        except InstanceBundleError as e:
+            raise SyrvisError(str(e))
+    except SyrvisError as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2))
+        return
+    for section in ("env", "stack", "declarations"):
+        entry = report[section]
+        if entry is None:
+            click.echo(f"{section}: not in bundle")
+        elif section == "declarations":
+            click.echo(
+                "declarations: wrote {}, removed {}, unchanged {}".format(
+                    len(entry["written"]), len(entry["removed"]), len(entry["unchanged"])
+                )
+            )
+        elif section == "env":
+            click.echo(
+                "env: {} (+{} ~{} -{})".format(
+                    entry["action"],
+                    len(entry["added"]),
+                    len(entry["changed"]),
+                    len(entry["removed"]),
+                )
+            )
+        else:
+            click.echo(f"stack: {entry['action']}")
+    if dry_run:
+        click.echo("(dry run — nothing written)")
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors

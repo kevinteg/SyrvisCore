@@ -371,6 +371,30 @@ COMMANDS: List[Command] = [
         positional=Slot("name", KIND_NAME),
         timeout_s=600,
     ),
+    # apply writes the core-tier configuration from a syrvis-instance bundle
+    # (.env + stack.yaml + the services.d declaration set) atomically — the
+    # core-tier sibling of deploy. The whole bundle arrives on stdin ONLY
+    # (tokens never on argv/ps/logs); there are no argv slots at all. It only
+    # WRITES config (converge stays reconcile/stack_apply), and re-applying is
+    # idempotent, so destructive=False like deploy/secret_set. Three enumerated
+    # variants because the shim matches exact argv shapes: the read-only plan,
+    # the normal apply, and the deliberate secret-rotation apply.
+    Command(
+        "apply_plan",
+        "syrvis",
+        ["apply"],
+        sudo=True,
+        read_only=True,
+        flags=["--dry-run", "--json"],
+    ),
+    Command("apply", "syrvis", ["apply"], sudo=True, flags=["--json"]),
+    Command(
+        "apply_secrets",
+        "syrvis",
+        ["apply"],
+        sudo=True,
+        flags=["--allow-secret-change", "--json"],
+    ),
 ]
 
 COMMANDS_BY_ID = {c.id: c for c in COMMANDS}

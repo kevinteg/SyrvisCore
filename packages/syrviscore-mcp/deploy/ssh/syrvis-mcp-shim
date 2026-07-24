@@ -163,5 +163,14 @@ fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "deploy" ] && [ "${5}" = "--" ] && is_name "${6}"; then
   set -f; exec "$@"
 fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--dry-run" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--allow-secret-change" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 echo "syrvis-mcp-shim: command not on allowlist" >&2
 exit 1
