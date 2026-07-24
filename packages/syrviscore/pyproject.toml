@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrviscore"
-version = "0.3.22"
+version = "0.4.0"
 description = "SyrvisCore - Self-hosted infrastructure platform for Synology NAS"
 readme = "README.md"
 authors = [
@@ -30,7 +30,11 @@ dependencies = [
     # order-dependently with no error.
     "requests==2.32.3",
     "docker==7.1.0",
-    "python-dotenv==1.0.1",
+    # Range, not an exact pin: on the NAS (Python 3.8) this still resolves
+    # 1.0.1 deterministically (the last py3.8-compatible release), while modern
+    # co-install venvs (the MCP consumes syrviscore.seam next to fastmcp, which
+    # floors python-dotenv at >=1.1) may take a newer one.
+    "python-dotenv>=1.0.1,<2",
 ]
 
 [project.optional-dependencies]

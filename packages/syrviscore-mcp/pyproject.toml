@@ -24,6 +24,10 @@ dependencies = [
     # boundary; a clean install resolves to (and is verified against) 3.x. An
     # unbounded floor let a co-resolver select a broken 2.x, so pin the major.
     "fastmcp>=3.0,<4",
+    # The seam verb registry + generators (syrviscore.seam) live in the
+    # platform package — the MCP is a generated consumer. Not on PyPI: install
+    # from the monorepo (pip install -e packages/syrviscore).
+    "syrviscore>=0.4",
 ]
 
 [project.optional-dependencies]

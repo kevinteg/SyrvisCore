@@ -1,6 +1,6 @@
 #!/bin/sh
 # /usr/local/bin/syrvis-mcp-shim  (install 0755 root:root)
-# GENERATED from syrviscore_mcp/commands.py by deploy/gen.py — do not hand-edit.
+# GENERATED from syrviscore/seam/registry.py by syrviscore.seam.gen — do not hand-edit.
 # Forced command for the MCP operator SSH key. Re-validates the requested
 # command independently of client-side checks (defense in depth, G13).
 

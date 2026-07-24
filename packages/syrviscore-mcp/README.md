@@ -174,4 +174,7 @@ destructive with a confirmation handshake (`activate`, `rollback`, `uninstall`,
 
 The suite is fully offline (no NAS, no fastmcp needed for the logic tests).
 `deploy/sudoers.d/syrviscore-mcp` and `deploy/ssh/syrvis-mcp-shim` are generated
-artifacts; a drift test fails if they don't match `deploy/gen.py`.
+artifacts; a drift test fails if they don't match the generator. The verb
+registry and the generator live in the platform package (`syrviscore.seam`) —
+the MCP is a generated consumer, and `deploy/gen.py` here is a back-compat
+launcher for the same code (regenerate with `python -m syrviscore.seam.gen`).

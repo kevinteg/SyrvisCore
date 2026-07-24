@@ -1,5 +1,5 @@
 # /etc/sudoers.d/syrviscore-mcp  (install 0440 root:root; validate: visudo -cf)
-# GENERATED from syrviscore_mcp/commands.py by deploy/gen.py — do not hand-edit.
+# GENERATED from syrviscore/seam/registry.py by syrviscore.seam.gen — do not hand-edit.
 # Enumerated NOPASSWD boundary for the MCP operator. Only the privileged
 # SyrvisCore subcommands below are permitted; everything else needs a human.
 
