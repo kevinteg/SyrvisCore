@@ -370,9 +370,32 @@ def activate(version):
     click.echo("Activating version {}...".format(version))
     version_manager.activate_version(home, version)
     click.echo("Activated: {}".format(version))
+    _sync_seam_after_switch(home)
     click.echo()
     click.echo("You may need to restart services:")
     click.echo("  syrvis restart")
+
+
+def _sync_seam_after_switch(home):
+    """Re-render the operator seam from the newly active version (policy-gated).
+
+    Never fails the version switch — the seam is recoverable with
+    `syrvisctl seam sync`, a failed activate is not.
+    """
+    from . import seam_sync
+
+    try:
+        report = seam_sync.auto_sync_after_activate(home)
+    except Exception as e:  # noqa: BLE001 - never fail the switch on seam sync
+        click.echo("Warning: seam sync failed ({}); run: syrvisctl seam sync".format(e), err=True)
+        return
+    if report is None:
+        return  # not provisioned, or auto_seam_update off
+    click.echo(
+        "Seam synced from active version (sudoers: {}, shim: {})".format(
+            report["sudoers"], report["shim"]
+        )
+    )
 
 
 @cli.command()
@@ -451,6 +474,7 @@ def rollback(version, yes):
     click.echo("[3/3] Rollback complete!")
     click.echo()
     click.echo("Rolled back to version {}".format(version))
+    _sync_seam_after_switch(home)  # the seam narrows back with the version
     click.echo()
     click.echo("Run 'syrvis start' to start services.")
 
@@ -893,6 +917,80 @@ def restore(backup_file, path, yes):
         "      rebuild, run 'sudo syrvis setup' before/after restore so Traefik can\n"
         "      bind its IP and services survive reboot."
     )
+
+
+@cli.group("seam")
+def seam_group():
+    """Operator seam management (sudoers policy + forced-command shim)."""
+    pass
+
+
+@seam_group.command("sync")
+@click.option("--dry-run", is_flag=True, help="Report what would change; write nothing")
+@handle_errors
+def seam_sync_cmd(dry_run):
+    """Regenerate the seam artifacts from the ACTIVE service version.
+
+    Renders the sudoers policy + forced-command shim from the active version's
+    verb registry (syrviscore.seam) using the provision-time policy, and
+    installs them atomically. `syrvisctl activate`/`rollback` run this
+    automatically when the deployment was provisioned with auto_seam_update;
+    this command is the on-demand path (and the only path when auto is off).
+    """
+    from . import seam_sync
+
+    home = paths.resolve_home()
+    policy = seam_sync.load_policy()
+    if policy is None:
+        click.echo(
+            "No seam policy found ({}) — this NAS was never provisioned, or was\n"
+            "provisioned before seam policies existed. Re-run the provision script\n"
+            "(python -m syrviscore.seam.gen provision ...) to record one.".format(
+                seam_sync.SEAM_POLICY_PATH
+            ),
+            err=True,
+        )
+        sys.exit(1)
+    if not dry_run:
+        ensure_privileges(Path("/etc/sudoers.d/syrviscore-mcp"))
+    report = seam_sync.sync_seam(home, policy, dry_run=dry_run)
+    click.echo("sudoers: {}".format(report["sudoers"]))
+    click.echo("shim:    {}".format(report["shim"]))
+
+
+@seam_group.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def seam_status(as_json):
+    """Show the seam policy and whether the installed artifacts are in sync."""
+    from . import seam_sync
+
+    home = paths.resolve_home()
+    policy = seam_sync.load_policy()
+    if policy is None:
+        out = {"provisioned": False}
+        if as_json:
+            click.echo(jsonlib.dumps(out, indent=2))
+        else:
+            click.echo("Seam: not provisioned (no policy at {})".format(seam_sync.SEAM_POLICY_PATH))
+        return
+    # Comparing the installed 0440/root artifacts needs root.
+    ensure_privileges(Path("/etc/sudoers.d/syrviscore-mcp"))
+    report = seam_sync.sync_seam(home, policy, dry_run=True)
+    out = {
+        "provisioned": True,
+        "auto_seam_update": bool(policy.get("auto_seam_update", False)),
+        "operator": policy.get("operator"),
+        "in_sync": report["sudoers"] == "unchanged" and report["shim"] == "unchanged",
+        "sudoers": report["sudoers"],
+        "shim": report["shim"],
+    }
+    if as_json:
+        click.echo(jsonlib.dumps(out, indent=2))
+    else:
+        click.echo("Seam policy: auto_seam_update={}".format(out["auto_seam_update"]))
+        click.echo("sudoers: {}".format(out["sudoers"]))
+        click.echo("shim:    {}".format(out["shim"]))
 
 
 def main():

@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass
@@ -250,6 +251,7 @@ def render_provision(
     pubkey: str,
     from_cidr: str = "192.168.0.0/16",
     fullname: str = "SyrvisCore MCP operator",
+    auto_seam_update: bool = True,
 ) -> str:
     """Render a self-contained POSIX-sh provisioning script to run on the NAS.
 
@@ -505,6 +507,37 @@ TMP_SHIM="$RUN_DIR/shim.new"
         "fi\n"
     )
 
+    # The seam policy records this deployment's paths + the auto_seam_update
+    # choice for `syrvisctl activate`/`syrvisctl seam sync`, which re-render the
+    # sudoers/shim from the ACTIVE service version's registry. With auto ON,
+    # activating a release updates the enforcement boundary (trust anchor: the
+    # release channel + this root-held file); with auto OFF the boundary stays
+    # pinned until a human runs `syrvisctl seam sync`.
+    policy_json = json.dumps(
+        {
+            "auto_seam_update": auto_seam_update,
+            "operator": cfg.operator,
+            "syrvis_home": cfg.syrvis_home,
+            "syrvisctl_path": cfg.syrvisctl_path,
+            "shim_path": cfg.shim_path,
+        },
+        indent=2,
+    )
+    policy_block = (
+        "\n# --- 6. seam policy (consumed by syrvisctl activate / seam sync) ------------\n"
+        'STEP="write seam policy"\n'
+        'POLICY_PATH="$STATE_DIR/seam-policy.json"\n'
+        'say "recording seam policy -> $POLICY_PATH (auto_seam_update='
+        + ("true" if auto_seam_update else "false")
+        + ')"\n'
+        'if [ "$DRYRUN" = 1 ]; then\n'
+        "  printf '   [dry-run] would write %s\\n' \"$POLICY_PATH\"\n"
+        "else\n"
+        "cat > \"$POLICY_PATH\" <<'SYRVIS_POLICY_EOF'\n" + policy_json + "\nSYRVIS_POLICY_EOF\n"
+        '  chmod 600 "$POLICY_PATH"\n'
+        "fi\n"
+    )
+
     key_and_finish = r"""capture_original "$SHIM_PATH"
 run "install -m 0755 -o root -g root '$TMP_SHIM' '$SHIM_PATH'"
 
@@ -542,7 +575,9 @@ else
     run "chmod 700 '$SSH_DIR'"
     run "chmod 600 '$AUTH'"
 fi
+"""
 
+    finish = r"""
 # --- Done ------------------------------------------------------------------
 STEP="done"
 say "provisioning complete."
@@ -562,7 +597,16 @@ To undo everything this installed:
   # then remove the '$OPERATOR' account via DSM Control Panel if this script created it
 VERIFY
 """
-    return var_block + helpers + sudoers_block + sudoers_install + shim_block + key_and_finish
+    return (
+        var_block
+        + helpers
+        + sudoers_block
+        + sudoers_install
+        + shim_block
+        + key_and_finish
+        + policy_block
+        + finish
+    )
 
 
 def _cfg_from_args(args) -> DeployConfig:
@@ -597,6 +641,13 @@ def main(argv) -> int:
         default="192.168.0.0/16",
         help="source CIDR allowed to use the key",
     )
+    p_prov.add_argument(
+        "--no-auto-seam-update",
+        dest="auto_seam_update",
+        action="store_false",
+        help="pin the seam: activate/rollback will NOT regenerate the sudoers/shim "
+        "from the active version (update on demand with `syrvisctl seam sync`)",
+    )
 
     p_check = sub.add_parser("check", help="verify committed artifacts match the defaults")
     p_check.add_argument("dir", help="the deploy/ directory to check")
@@ -618,7 +669,14 @@ def main(argv) -> int:
         sys.stdout.write(render_shim(cfg))
     elif args.cmd == "provision":
         pubkey = Path(args.pubkey).read_text()
-        sys.stdout.write(render_provision(cfg, pubkey, from_cidr=args.from_cidr))
+        sys.stdout.write(
+            render_provision(
+                cfg,
+                pubkey,
+                from_cidr=args.from_cidr,
+                auto_seam_update=args.auto_seam_update,
+            )
+        )
     return 0
 
 
