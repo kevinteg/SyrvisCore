@@ -25,6 +25,12 @@ from . import exposure as exposure_mod
 from .config_reader import read_config
 from .traefik_config import PRIMORDIAL_UIS
 
+# The report schema version. This JSON is a cross-repo contract — a deployment
+# repo reconciles its DNS/tunnel/Access state against it (docs/seam-contract.md)
+# — so consumers can gate on the version. Bump only on a breaking shape change;
+# additive fields do not bump it.
+REPORT_VERSION = 1
+
 # Primordial core UIs Traefik always routes — derived from the single catalog in
 # traefik_config so the subdomain mapping can't drift between consumers.
 _PRIMORDIAL_UIS = tuple((ui["service"], ui["subdomain"]) for ui in PRIMORDIAL_UIS)
@@ -62,7 +68,13 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
     try:
         cfg = read_config(env_path=env_path)
     except Exception as exc:  # noqa: BLE001 - SYRVIS_HOME unresolved, etc.
-        return {"domain": None, "traefik_ip": None, "entries": [], "error": str(exc)}
+        return {
+            "version": REPORT_VERSION,
+            "domain": None,
+            "traefik_ip": None,
+            "entries": [],
+            "error": str(exc),
+        }
 
     domain = cfg.domain or ""
     traefik_ip = (cfg.values.get("TRAEFIK_IP") or "").strip() or None
@@ -162,4 +174,9 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    return {"domain": domain or None, "traefik_ip": traefik_ip, "entries": entries}
+    return {
+        "version": REPORT_VERSION,
+        "domain": domain or None,
+        "traefik_ip": traefik_ip,
+        "entries": entries,
+    }

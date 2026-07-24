@@ -116,3 +116,13 @@ def test_missing_config_degrades_gracefully(tmp_path, monkeypatch):
     monkeypatch.setenv("DSM_SIM_ACTIVE", "0")
     report = hostnames.build_report(env_path=str(tmp_path / "nope" / ".env"))
     assert report["entries"] == [] or "error" in report
+
+
+def test_report_carries_schema_version(monkeypatch, tmp_path):
+    """The report is a cross-repo contract (docs/seam-contract.md) — consumers
+    gate on the version field, on the error path too."""
+    from syrviscore import hostnames
+
+    monkeypatch.delenv("SYRVIS_HOME", raising=False)
+    report = hostnames.build_report(env_path="/nonexistent/.env")
+    assert report["version"] == hostnames.REPORT_VERSION == 1
