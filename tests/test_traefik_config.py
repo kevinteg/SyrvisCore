@@ -316,3 +316,80 @@ class TestCoreFileProviderRoutes:
         assert "synology-dsm" in parsed["http"]["services"]
         assert "portainer" in parsed["http"]["services"]
         assert "insecure-skip-verify" in parsed["http"]["serversTransports"]
+
+
+class TestAcmeConfigurable:
+    """ACME CA server + DNS-01 provider/resolvers/credentials are .env-driven."""
+
+    def _acme(self, monkeypatch, **env):
+        for k in (
+            "CLOUDFLARE_DNS_API_TOKEN",
+            "TRAEFIK_ACME_CHALLENGE",
+            "TRAEFIK_ACME_CA_SERVER",
+            "TRAEFIK_ACME_DNS_PROVIDER",
+            "TRAEFIK_ACME_DNS_RESOLVERS",
+            "TRAEFIK_ACME_DNS_ENV",
+        ):
+            monkeypatch.delenv(k, raising=False)
+        for k, v in env.items():
+            monkeypatch.setenv(k, v)
+        return yaml.safe_load(generate_traefik_static_config())["certificatesResolvers"][
+            "letsencrypt"
+        ]["acme"]
+
+    def test_default_is_http01_no_caserver(self, monkeypatch):
+        acme = self._acme(monkeypatch)
+        assert "httpChallenge" in acme
+        assert "caServer" not in acme  # unset = LE production (Traefik default)
+
+    def test_ca_server_staging_switch(self, monkeypatch):
+        staging = "https://acme-staging-v02.api.letsencrypt.org/directory"
+        acme = self._acme(monkeypatch, CLOUDFLARE_DNS_API_TOKEN="t", TRAEFIK_ACME_CA_SERVER=staging)
+        assert acme["caServer"] == staging
+
+    def test_dns_default_provider_cloudflare(self, monkeypatch):
+        acme = self._acme(monkeypatch, CLOUDFLARE_DNS_API_TOKEN="t")
+        assert acme["dnsChallenge"]["provider"] == "cloudflare"
+        assert acme["dnsChallenge"]["resolvers"] == ["1.1.1.1:53", "1.0.0.1:53"]
+
+    def test_dns_provider_and_resolvers_overridable(self, monkeypatch):
+        acme = self._acme(
+            monkeypatch,
+            TRAEFIK_ACME_DNS_PROVIDER="desec",
+            TRAEFIK_ACME_DNS_ENV="DESEC_TOKEN",
+            TRAEFIK_ACME_DNS_RESOLVERS="9.9.9.9:53, 149.112.112.112:53",
+        )
+        assert acme["dnsChallenge"]["provider"] == "desec"
+        assert acme["dnsChallenge"]["resolvers"] == ["9.9.9.9:53", "149.112.112.112:53"]
+
+    def test_dns_env_alone_activates_dns01(self, monkeypatch):
+        # a non-Cloudflare provider has no CLOUDFLARE_DNS_API_TOKEN; the presence
+        # of a forwarded credential env is enough to select DNS-01.
+        acme = self._acme(monkeypatch, TRAEFIK_ACME_DNS_ENV="DESEC_TOKEN")
+        assert "dnsChallenge" in acme
+
+
+class TestTraefikAcmeEnvPassthrough:
+    def test_cloudflare_default_only(self, monkeypatch):
+        from syrviscore.compose import ComposeGenerator
+
+        monkeypatch.delenv("TRAEFIK_ACME_DNS_ENV", raising=False)
+        env = ComposeGenerator._traefik_acme_env()
+        assert "CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:-}" in env
+
+    def test_extra_credentials_forwarded(self, monkeypatch):
+        from syrviscore.compose import ComposeGenerator
+
+        monkeypatch.setenv("TRAEFIK_ACME_DNS_ENV", "DESEC_TOKEN, DO_AUTH_TOKEN")
+        env = ComposeGenerator._traefik_acme_env()
+        assert "DESEC_TOKEN=${DESEC_TOKEN:-}" in env
+        assert "DO_AUTH_TOKEN=${DO_AUTH_TOKEN:-}" in env
+
+    def test_junk_names_rejected(self, monkeypatch):
+        from syrviscore.compose import ComposeGenerator
+
+        monkeypatch.setenv("TRAEFIK_ACME_DNS_ENV", "BAD;NAME, $(evil), CF_DNS_API_TOKEN")
+        env = ComposeGenerator._traefik_acme_env()
+        # metachar names dropped; the CF default is never duplicated
+        assert not any(";" in e or "$(" in e for e in env)
+        assert sum(1 for e in env if e.startswith("CF_DNS_API_TOKEN=")) == 1

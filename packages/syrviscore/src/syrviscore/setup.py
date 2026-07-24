@@ -192,10 +192,38 @@ def prompt_configuration(defaults: dict) -> dict:
     config = {}
 
     # Domain and email
-    config["domain"] = click.prompt("  Domain name", default=defaults.get("domain", "example.com"))
+    from .service_schema import DOMAIN_RE
+
+    while True:
+        domain = (
+            click.prompt("  Domain name", default=defaults.get("domain", "example.com"))
+            .strip()
+            .lower()
+        )
+        if DOMAIN_RE.fullmatch(domain):
+            break
+        click.echo(
+            "    '{}' is not a valid domain (need a dot-separated name, "
+            "e.g. example.com)".format(domain),
+            err=True,
+        )
+    config["domain"] = domain
     # For email, prefer existing value, else derive from domain
     default_email = defaults.get("email") or f"admin@{config['domain']}"
     config["email"] = click.prompt("  Email for Let's Encrypt", default=default_email)
+
+    # DNS-01 token — REQUIRED for valid certs on internal / private-IP
+    # (split-horizon) hosts like dsm/portainer/dash, which the whole design
+    # targets. Without it Traefik falls back to HTTP-01, which cannot issue a
+    # cert for a host that only resolves on the LAN. Cloudflare is the default
+    # provider (set TRAEFIK_ACME_DNS_PROVIDER + TRAEFIK_ACME_DNS_ENV in .env for
+    # another). Optional (blank = HTTP-01 only), but strongly recommended.
+    config["cloudflare_dns_api_token"] = click.prompt(
+        "  Cloudflare DNS API token for Let's Encrypt DNS-01 certs "
+        "(Zone:DNS:Edit; blank = HTTP-01 only, no internal-host certs)",
+        default=defaults.get("cloudflare_dns_api_token", ""),
+        hide_input=True,
+    )
 
     click.echo()
     click.echo("  Network Configuration (for macvlan):")

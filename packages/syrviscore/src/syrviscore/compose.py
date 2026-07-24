@@ -197,6 +197,31 @@ class ComposeGenerator:
                 raise
             raise ValueError(f"Invalid Traefik IP '{network_config['traefik_ip']}': {e}")
 
+    @staticmethod
+    def _traefik_acme_env() -> list:
+        """The Traefik container's env: TZ + the ACME DNS-01 credential(s).
+
+        Cloudflare is the default (lego reads ``CF_DNS_API_TOKEN``, fed from
+        ``CLOUDFLARE_DNS_API_TOKEN``). For any OTHER lego provider, list its
+        credential env var names in ``TRAEFIK_ACME_DNS_ENV`` (comma-separated)
+        and they are forwarded from ``.env`` into the container — so a
+        non-Cloudflare provider works without editing code. Values are never
+        inlined here; each is a ``${VAR:-}`` compose interpolation.
+        """
+        env = [
+            "TZ=${TZ:-UTC}",
+            # Cloudflare DNS-01 token (the default provider). Harmless when unset.
+            "CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:-}",
+        ]
+        extra = os.getenv("TRAEFIK_ACME_DNS_ENV", "")
+        seen = {"CF_DNS_API_TOKEN"}
+        for name in (n.strip() for n in extra.split(",")):
+            # Only forward real env var names; never re-add the CF default.
+            if name and name.replace("_", "").isalnum() and name not in seen:
+                env.append("{0}=${{{0}:-}}".format(name))
+                seen.add(name)
+        return env
+
     def _generate_traefik_service(self, network_config: Dict[str, str]) -> Dict[str, Any]:
         """
         Generate Traefik service configuration with macvlan network.
@@ -222,12 +247,7 @@ class ComposeGenerator:
                 "proxy": {},
             },
             # No port bindings needed - traefik has its own IP via macvlan
-            "environment": [
-                "TZ=UTC",
-                # Cloudflare DNS-01 challenge token (lego reads CF_DNS_API_TOKEN).
-                # Enables cert issuance/renewal for internal names on a private IP.
-                "CF_DNS_API_TOKEN=${CLOUDFLARE_DNS_API_TOKEN:-}",
-            ],
+            "environment": self._traefik_acme_env(),
             # No docker socket: routing is file-provider only (core, Synology
             # passthrough, and L2 routes are all generated files under /config),
             # so Traefik holds no host-level authority at all.
