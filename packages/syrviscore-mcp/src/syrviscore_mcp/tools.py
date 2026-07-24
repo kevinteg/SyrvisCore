@@ -271,6 +271,16 @@ def service_adopt(ctx: ToolContext, name: str) -> Dict:
     return _run(ctx, "service_adopt", {"name": name})
 
 
+def service_task(ctx: ToolContext, name: str, task: str) -> Dict:
+    # Runs a task the manifest DECLARES (schema-audited argv) inside the
+    # service's own container — the operator picks a task name, never supplies
+    # code. Membership-checked like every name-targeted tool.
+    validate.validate_name(name)
+    validate.validate_name(task)
+    sandbox.assert_service_managed(ctx.runner, name)
+    return _run(ctx, "service_task", {"name": name, "task": task})
+
+
 def service_start(ctx: ToolContext, name: str) -> Dict:
     validate.validate_name(name)
     sandbox.assert_service_managed(ctx.runner, name)

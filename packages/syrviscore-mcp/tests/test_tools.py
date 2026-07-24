@@ -375,3 +375,24 @@ class TestBackupTools:
         ctx, runner = make_ctx()
         with pytest.raises(ValidationError):
             tools.backup_cleanup(ctx, keep=99)
+
+
+class TestServiceTask:
+    def test_runs_declared_task_for_managed_service(self):
+        ctx, runner = make_ctx({"service_list": MANAGED, "service_task": {"ok": True}})
+        tools.service_task(ctx, "gollum", "reindex")
+        assert "service_task" in runner.ids()
+
+    def test_unmanaged_service_rejected(self):
+        ctx, runner = make_ctx({"service_list": {"services": []}})
+        with pytest.raises(SandboxError):
+            tools.service_task(ctx, "gollum", "reindex")
+        assert "service_task" not in runner.ids()
+
+    def test_bad_task_name_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx({"service_list": MANAGED})
+        with pytest.raises(ValidationError):
+            tools.service_task(ctx, "gollum", "bad task!")
+        assert runner.ids() == []  # fails before any remote call

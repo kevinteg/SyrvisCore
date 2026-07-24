@@ -1094,6 +1094,51 @@ class ServiceManager:
         return True, f"Service '{name}' is up to date (v{updated.version})"
 
     # -------------------------------------------------------------------------
+    # Declared one-shot tasks (operator-seam verb)
+    # -------------------------------------------------------------------------
+
+    _TASK_TIMEOUT_S = 300
+
+    def run_task(self, name: str, task: str) -> Tuple[bool, str]:
+        """Run a DECLARED one-shot task inside the service's running container.
+
+        Tasks are pre-declared, schema-audited argvs in the installed manifest
+        (``tasks: {name: {command: [...]}}``) — the encapsulated alternative to
+        a break-glass ``docker exec`` (e.g. a DB bootstrap). The task runs in
+        the service's OWN container under its existing confinement, so it
+        grants no authority the container did not already have; the argv comes
+        from the installed manifest only — never from the caller.
+        """
+        try:
+            paths_ = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        manifest_path = paths_["service"] / "syrvis-service.yaml"
+        if not manifest_path.exists():
+            return False, f"Service '{name}' is not installed"
+        try:
+            service = load_service_definition(manifest_path)
+        except Exception as e:  # noqa: BLE001 - unreadable/invalid manifest
+            return False, f"could not load manifest for '{name}': {e}"
+        if task not in service.tasks:
+            declared = ", ".join(sorted(service.tasks)) or "(none)"
+            return False, f"unknown task '{task}' for service '{name}' (declared: {declared})"
+
+        argv = ["docker", "exec", service.container_name] + list(service.tasks[task])
+        try:
+            result = subprocess.run(
+                argv, capture_output=True, text=True, timeout=self._TASK_TIMEOUT_S
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"task '{task}' timed out after {self._TASK_TIMEOUT_S}s"
+        except OSError as e:
+            return False, f"could not run docker: {e}"
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.returncode != 0:
+            return False, f"task '{task}' failed (exit {result.returncode}):\n{output}"
+        return True, output or f"task '{task}' completed"
+
+    # -------------------------------------------------------------------------
     # Secret management (operator-seam verb)
     # -------------------------------------------------------------------------
 

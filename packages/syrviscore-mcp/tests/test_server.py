@@ -36,6 +36,7 @@ EXPECTED_TOOLS = {
     "service_start",
     "service_stop",
     "service_update",
+    "service_task",
     "service_add",
     "service_run",
     "service_declare",
@@ -100,7 +101,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 39
+    assert len(EXPECTED_TOOLS) == 40
 
 
 def test_destructive_tools_have_destructive_hint():

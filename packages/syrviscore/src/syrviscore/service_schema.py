@@ -84,8 +84,16 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # services.d/deploy declaration may set it — never a git/image/catalog
         # service) is enforced at install time in _install_from_definition.
         "tier",
+        # Declared one-shot tasks ({name: {command: [...]}}) the operator can
+        # run inside the service's own container via `syrvis service task` —
+        # e.g. a DB bootstrap. Same trust class + audit rules as `command`.
+        "tasks",
     }
 )
+
+# tasks sub-schema: each task is exactly one audited exec-form argv.
+ALLOWED_TASK_KEYS = frozenset({"command"})
+MAX_TASKS = 16
 
 ALLOWED_TIERS = frozenset({"", "infra"})
 
@@ -286,6 +294,47 @@ def _validate_command(data: Any) -> List[str]:
     return list(data)
 
 
+def _validate_tasks(data: Any) -> Dict[str, List[str]]:
+    """Validate declared one-shot tasks (``tasks: {name: {command: [...]}}``).
+
+    A task is a pre-declared, audited argv the operator can execute inside the
+    service's OWN running container (``syrvis service task``) — e.g. a DB
+    bootstrap — instead of a raw break-glass ``docker exec``. Trust class:
+    identical to ``command:`` (see :func:`_validate_command`) — it runs under
+    the container's existing confinement and grants no authority the image did
+    not already have, so it gets the same audit rules: exec form only, every
+    argument literal, no ``$``.
+    """
+    if not isinstance(data, dict) or not data:
+        raise ServiceValidationError(
+            "tasks must be a non-empty mapping of name -> {command: [...]}"
+        )
+    if len(data) > MAX_TASKS:
+        raise ServiceValidationError("too many tasks ({}; max {})".format(len(data), MAX_TASKS))
+    out: Dict[str, List[str]] = {}
+    for task_name, spec in data.items():
+        if not isinstance(task_name, str) or not NAME_RE.fullmatch(task_name):
+            raise ServiceValidationError(
+                "Invalid task name {!r}: must match [a-z0-9][a-z0-9_-]{{0,63}}".format(task_name)
+            )
+        if not isinstance(spec, dict):
+            raise ServiceValidationError("task {!r} must be a mapping".format(task_name))
+        unknown = set(spec.keys()) - ALLOWED_TASK_KEYS
+        if unknown:
+            raise ServiceValidationError(
+                "task {!r} has unknown keys {} (allowed: command)".format(
+                    task_name, ", ".join(sorted(unknown))
+                )
+            )
+        if "command" not in spec:
+            raise ServiceValidationError("task {!r} is missing 'command'".format(task_name))
+        try:
+            out[task_name] = _validate_command(spec["command"])
+        except ServiceValidationError as e:
+            raise ServiceValidationError("task {!r}: {}".format(task_name, e))
+    return out
+
+
 def _validate_volume(vol: str, tier: str = "") -> str:
     """Validate a volume entry against the mount policy.
 
@@ -418,6 +467,10 @@ class ServiceDefinition:
     # image's default CMD. Needed by argv-driven images (e.g. VictoriaMetrics'
     # vmagent/vmalert) that have no env-var-only configuration path.
     command: List[str] = field(default_factory=list)
+    # Declared one-shot tasks: {task_name: argv}. Audited like `command`
+    # (_validate_tasks); executed inside the RUNNING container by
+    # `syrvis service task <name> --task <task>` (e.g. a DB bootstrap).
+    tasks: Dict[str, List[str]] = field(default_factory=dict)
     # Privileged tier selector (design/22): "" (default) | "infra". `infra` unlocks
     # the enumerated read-only host-mount allowlist; only an operator-authored
     # declaration may set it (install-time authorship gate).
@@ -495,6 +548,10 @@ class ServiceDefinition:
         command: List[str] = []
         if data.get("command") is not None:
             command = _validate_command(data["command"])
+
+        tasks: Dict[str, List[str]] = {}
+        if data.get("tasks") is not None:
+            tasks = _validate_tasks(data["tasks"])
 
         tier = data.get("tier", "")
         if tier not in ALLOWED_TIERS:
@@ -593,6 +650,7 @@ class ServiceDefinition:
             traefik=traefik,
             environment=environment,
             command=command,
+            tasks=tasks,
             tier=tier,
             env_file=env_file,
             volumes=volumes,
@@ -655,6 +713,8 @@ class ServiceDefinition:
             result["environment"] = self.environment
         if self.command:
             result["command"] = self.command
+        if self.tasks:
+            result["tasks"] = {name: {"command": argv} for name, argv in self.tasks.items()}
         if self.tier:
             result["tier"] = self.tier
         if self.env_file:

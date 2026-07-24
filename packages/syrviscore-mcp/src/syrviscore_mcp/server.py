@@ -255,6 +255,14 @@ def service_update(name: str) -> dict:
     return _call(tools.service_update, name=name)
 
 
+@mcp.tool
+def service_task(name: str, task: str) -> dict:
+    """Run a task DECLARED in a service's manifest (tasks: block) inside its
+    running container (privileged). The argv is pre-audited manifest content —
+    the operator picks a task name, never supplies code."""
+    return _call(tools.service_task, name=name, task=task)
+
+
 @mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
 def service_add(git_url: str, confirm: str = "") -> dict:
     """Add a Layer 2 service from a git URL (privileged; clones + RUNS new code).

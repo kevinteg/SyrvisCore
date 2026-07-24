@@ -184,6 +184,22 @@ COMMANDS: List[Command] = [
         expect_json=False,
         positional=Slot("name", KIND_NAME),
     ),
+    # service task runs a DECLARED, schema-audited one-shot argv inside the
+    # service's own RUNNING container (docker exec) — the encapsulated
+    # alternative to a break-glass docker exec (e.g. a DB bootstrap). The argv
+    # comes from the installed manifest only; the operator picks a task NAME,
+    # never supplies code, and the task runs under the container's existing
+    # confinement (no authority the container did not already have).
+    Command(
+        "service_task",
+        "syrvis",
+        ["service", "task"],
+        sudo=True,
+        expect_json=False,
+        flags=["--task", FlagValue(Slot("task", KIND_NAME))],
+        positional=Slot("name", KIND_NAME),
+        timeout_s=600,
+    ),
     Command(
         "service_update",
         "syrvis",

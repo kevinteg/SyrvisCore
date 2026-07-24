@@ -500,6 +500,36 @@ def service_update(name):
         raise SyrvisError(message)
 
 
+@service.command("task")
+@click.argument("name")
+@click.option(
+    "--task",
+    "task_name",
+    required=True,
+    help="Declared task to run (a name from the manifest's tasks: block)",
+)
+@handle_errors
+def service_task(name, task_name):
+    """Run a DECLARED one-shot task inside a service's running container.
+
+    Tasks are pre-declared, schema-audited argvs in the service manifest
+    (tasks: {name: {command: [...]}}) — the encapsulated alternative to a raw
+    `docker exec` for things like a DB bootstrap. The argv comes from the
+    installed manifest only; this command picks a task NAME, never code:
+
+        sudo syrvis service task --task init-legal-db -- immich-db
+    """
+    privilege.ensure_elevated("Running a service task requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    manager = ServiceManager()
+    success, message = manager.run_task(name, task_name)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 # =============================================================================
 # Scheduled jobs command group (OPTIONAL; dormant with empty config/jobs.d)
 # =============================================================================
