@@ -5,4 +5,4 @@ Never elevates itself; never builds a shell string; never runs arbitrary
 commands on the NAS. See docs/mcp-design.md.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
