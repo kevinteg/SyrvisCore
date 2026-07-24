@@ -1,0 +1,29 @@
+# Bundled catalog template — Alertmanager (routing/dedup/silences).
+# Routes what vmalert fires. The profile seeds a null-receiver default config
+# in data/alertmanager/config/ — a deployment overrides it (via a bundle) with
+# its real receivers (ntfy, email, ...).
+name: alertmanager
+version: "v0.33.1"
+image: prom/alertmanager:v0.33.1
+description: "Alert routing and deduplication"
+homepage: "https://prometheus.io/docs/alerting/latest/alertmanager/"
+
+restart: unless-stopped
+
+command:
+  - "--config.file=/etc/alertmanager/alertmanager.yml"
+  - "--storage.path=/alertmanager"
+  - "--web.external-url=http://alertmanager:9093"
+
+volumes:
+  - "config:/etc/alertmanager:ro"
+  - "data:/alertmanager:rw"
+
+resources:
+  memory: "128m"
+
+healthcheck:
+  test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9093/-/healthy || exit 1"]
+  interval: 30s
+  timeout: 5s
+  retries: 5

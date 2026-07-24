@@ -1,0 +1,41 @@
+# vmagent scrape config — GENERIC default seeded by `syrvis profile enable
+# monitoring` (written only if absent; a deployment overrides it by streaming
+# its own via `syrvis deploy` or editing data/vmagent/config/scrape.yml).
+# Prometheus scrape_configs format. Targets are container names on the proxy net.
+
+global:
+  scrape_interval: 60s
+  scrape_timeout: 30s
+
+scrape_configs:
+  # Host OS metrics (node_exporter, infra tier). -> up{job="node"}
+  - job_name: node
+    static_configs:
+      - targets:
+          - node-exporter:9100
+
+  # Container state (docker-health-exporter -> docker-socket-proxy).
+  # -> up{job="docker-health"} + docker_container_running / _health_status.
+  - job_name: docker-health
+    static_configs:
+      - targets:
+          - docker-health-exporter:9066
+
+  # Hardware health via SNMP (RAID/SMART/UPS/temps) — deployment-specific:
+  # needs an snmp-exporter service plus an snmp.yml carrying your SNMPv3
+  # credentials (stream both via `syrvis deploy`). Standard snmp_exporter
+  # indirection shown; replace <NAS_IP> and enable when ready.
+  # - job_name: snmp-synology
+  #   metrics_path: /snmp
+  #   params:
+  #     module: [synology]
+  #     auth: [synology_v3]
+  #   static_configs:
+  #     - targets: ["<NAS_IP>"]
+  #   relabel_configs:
+  #     - source_labels: [__address__]
+  #       target_label: __param_target
+  #     - source_labels: [__param_target]
+  #       target_label: instance
+  #     - target_label: __address__
+  #       replacement: snmp-exporter:9116

@@ -1,0 +1,31 @@
+# Bundled catalog template — vmagent (metrics collector).
+# Scrapes the targets in data/vmagent/config/scrape.yml (the `monitoring`
+# profile seeds a generic default; a deployment overrides it via a bundle) and
+# remote-writes to victoria-metrics over the proxy network.
+name: vmagent
+version: "v1.147.0"
+image: victoriametrics/vmagent:v1.147.0
+description: "Metrics collector (scrapes exporters, writes to victoria-metrics)"
+homepage: "https://docs.victoriametrics.com/vmagent/"
+
+restart: unless-stopped
+
+command:
+  - "--promscrape.config=/etc/vmagent/scrape.yml"
+  - "--remoteWrite.url=http://victoria-metrics:8428/api/v1/write"
+  # Buffer to disk if VM is briefly down; bounded so it can't fill the volume.
+  - "--remoteWrite.tmpDataPath=/vmagent-remotewrite-data"
+  - "--remoteWrite.maxDiskUsagePerURL=512MB"
+
+volumes:
+  - "config:/etc/vmagent:ro"
+  - "buffer:/vmagent-remotewrite-data:rw"
+
+resources:
+  memory: "256m"
+
+healthcheck:
+  test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8429/health || exit 1"]
+  interval: 30s
+  timeout: 5s
+  retries: 5

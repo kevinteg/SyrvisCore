@@ -1,0 +1,17 @@
+# Bundled catalog template — docker-health-exporter (container state metrics).
+# Plain L2 (no host access): reads container running/health/restart state
+# through docker-socket-proxy and serves /metrics on :9066 for vmagent.
+name: docker-health-exporter
+version: "v1.0"
+image: fviolence/docker-health-exporter:v1.0
+description: "Container health metrics via docker-socket-proxy"
+homepage: "https://github.com/fviolence/docker-health-exporter"
+
+restart: unless-stopped
+
+environment:
+  - "DOCKER_HOST=tcp://docker-socket-proxy:2375"
+  - "PORT=9066"
+
+resources:
+  memory: "128m"

@@ -1,0 +1,23 @@
+# vmalert rules — GENERIC default seeded by `syrvis profile enable monitoring`
+# (written only if absent; a deployment overrides with its own rule set).
+groups:
+  - name: critical
+    interval: 60s
+    rules:
+      # A scrape target stopped answering (exporter or its subject down).
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "scrape target {{ $labels.job }}/{{ $labels.instance }} is down"
+
+      # A managed container reports unhealthy (docker-health-exporter).
+      - alert: ContainerUnhealthy
+        expr: docker_container_health_status == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "container {{ $labels.name }} is unhealthy"

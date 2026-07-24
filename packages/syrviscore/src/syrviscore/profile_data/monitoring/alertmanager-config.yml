@@ -1,0 +1,14 @@
+# Alertmanager config — GENERIC default seeded by `syrvis profile enable
+# monitoring` (written only if absent). This default routes everything to a
+# NULL receiver: alerts are visible in the Alertmanager UI/API but notify
+# nobody. A deployment overrides this file (via `syrvis deploy` or directly in
+# data/alertmanager/config/) with its real receivers (ntfy, email, webhook...).
+route:
+  receiver: "null"
+  group_by: ["alertname"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 12h
+
+receivers:
+  - name: "null"

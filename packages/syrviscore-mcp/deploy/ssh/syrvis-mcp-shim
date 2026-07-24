@@ -62,6 +62,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "service" ] && [ "${3}" = "catalog" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "profile" ] && [ "${3}" = "list" ] && [ "${4}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
@@ -102,6 +105,9 @@ if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "disable" ] && [ "${6}" = "--" ] && is_stacksvc "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "profile" ] && [ "${5}" = "enable" ] && [ "${6}" = "--json" ] && [ "${7}" = "--" ] && is_name "${8}"; then
   set -f; exec "$@"
 fi
 if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "backup" ] && [ "${5}" = "create" ]; then

@@ -91,6 +91,7 @@ COMMANDS: List[Command] = [
     ),
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
+    Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
     # schedule list parses the managed crontab block + jobs.d — read-only. It runs
     # under sudo so the 0600-ish jobs.d declarations are readable over the seam,
     # but the CLI itself performs no privileged action (like reconcile_plan).
@@ -153,6 +154,17 @@ COMMANDS: List[Command] = [
         sudo=True,
         expect_json=False,
         positional=Slot("name", KIND_STACK_SERVICE),
+    ),
+    # profile enable writes services.d declarations for a platform-curated set
+    # (catalog-pinned images) + seeds default configs, never overwriting —
+    # intent-only like service_declare (reconcile converges later).
+    Command(
+        "profile_enable",
+        "syrvis",
+        ["profile", "enable"],
+        sudo=True,
+        flags=["--json"],
+        positional=Slot("name", KIND_NAME),
     ),
     # backup create reads the whole tree (incl. 0600 config) into an archive —
     # sudo, but additive and idempotent: no token.

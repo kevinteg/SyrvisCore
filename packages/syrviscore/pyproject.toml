@@ -60,8 +60,14 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # catalog_templates ships the bundled service catalog; the build/*.yaml glob is
-# the per-version config.yaml slot (populated by `syrvisctl install --config`).
-syrviscore = ["py.typed", "build/*.yaml", "catalog_templates/*.yaml"]
+# the per-version config.yaml slot (populated by `syrvisctl install --config`);
+# profile_data ships the generic default configs profiles seed.
+syrviscore = [
+    "py.typed",
+    "build/*.yaml",
+    "catalog_templates/*.yaml",
+    "profile_data/*/*.yml",
+]
 
 [tool.black]
 line-length = 100

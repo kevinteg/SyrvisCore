@@ -1,0 +1,27 @@
+# Bundled catalog template — docker-socket-proxy (read-only socket gateway).
+# tier: infra — the ONE service that mounts the docker socket (ro); everything
+# else that needs container state talks to this proxy, which permits only the
+# enumerated GET endpoints below (POST=0 is the real gate). Installs only from
+# an operator-authored declaration (profile/apply), like node-exporter.
+name: docker-socket-proxy
+version: "v0.4.2"
+image: tecnativa/docker-socket-proxy:v0.4.2
+description: "Read-only docker API gateway (infra tier)"
+homepage: "https://github.com/Tecnativa/docker-socket-proxy"
+
+restart: unless-stopped
+tier: infra
+
+environment:
+  - "CONTAINERS=1"
+  - "IMAGES=1"
+  - "VERSION=1"
+  - "PING=1"
+  - "INFO=1"
+  - "POST=0"
+
+volumes:
+  - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+resources:
+  memory: "64m"

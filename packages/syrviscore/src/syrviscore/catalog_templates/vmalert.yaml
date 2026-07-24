@@ -1,0 +1,30 @@
+# Bundled catalog template — vmalert (alert rule evaluation).
+# Evaluates data/vmalert/config/rules-critical.yml (profile seeds a generic
+# default) against victoria-metrics and notifies alertmanager.
+name: vmalert
+version: "v1.147.0"
+image: victoriametrics/vmalert:v1.147.0
+description: "Alert rule evaluator (victoria-metrics -> alertmanager)"
+homepage: "https://docs.victoriametrics.com/vmalert/"
+
+restart: unless-stopped
+
+command:
+  - "--rule=/etc/vmalert/rules-critical.yml"
+  - "--datasource.url=http://victoria-metrics:8428"
+  - "--remoteWrite.url=http://victoria-metrics:8428"
+  - "--notifier.url=http://alertmanager:9093"
+  - "--evaluationInterval=60s"
+  - "--configCheckInterval=30s"
+
+volumes:
+  - "config:/etc/vmalert:ro"
+
+resources:
+  memory: "256m"
+
+healthcheck:
+  test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8880/-/healthy || exit 1"]
+  interval: 30s
+  timeout: 5s
+  retries: 5

@@ -15,6 +15,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis stack apply, \
     /volume1/syrviscore/bin/syrvis stack enable -- *, \
     /volume1/syrviscore/bin/syrvis stack disable -- *, \
+    /volume1/syrviscore/bin/syrvis profile enable --json -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl backup create, \
     /volume1/syrviscore/bin/syrvis verify --fix --json, \
     /volume1/syrviscore/bin/syrvis verify --smoke --fix --json, \

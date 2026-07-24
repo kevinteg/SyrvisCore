@@ -23,6 +23,7 @@ EXPECTED_TOOLS = {
     "reconcile_plan",
     "schedule_list",
     "service_catalog",
+    "profile_list",
     # privileged, non-destructive
     "start",
     "stop",
@@ -32,6 +33,7 @@ EXPECTED_TOOLS = {
     "stack_enable",
     "stack_disable",
     "backup_create",
+    "profile_enable",
     "reconcile",
     "service_start",
     "service_stop",
@@ -79,6 +81,7 @@ READ_ONLY = {
     "reconcile_plan",
     "schedule_list",
     "service_catalog",
+    "profile_list",
 }
 IDEMPOTENT = {
     "reconcile",
@@ -87,6 +90,7 @@ IDEMPOTENT = {
     "stack_enable",
     "stack_disable",
     "backup_create",
+    "profile_enable",
 }
 
 
@@ -101,7 +105,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 40
+    assert len(EXPECTED_TOOLS) == 42
 
 
 def test_destructive_tools_have_destructive_hint():

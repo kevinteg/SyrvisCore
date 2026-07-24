@@ -1,0 +1,26 @@
+# Bundled catalog template — node_exporter (host CPU/memory/load/filesystem).
+# tier: infra — needs the enumerated read-only host mounts (/proc /sys /), so
+# it installs only from an operator-authored declaration (`syrvis profile
+# enable monitoring` writes one); `service run node-exporter` is refused by the
+# authorship gate by design.
+name: node-exporter
+version: "v1.12.1"
+image: prom/node-exporter:v1.12.1
+description: "Host OS metrics exporter (infra tier)"
+homepage: "https://github.com/prometheus/node_exporter"
+
+restart: unless-stopped
+tier: infra
+
+command:
+  - "--path.procfs=/host/proc"
+  - "--path.sysfs=/host/sys"
+  - "--path.rootfs=/rootfs"
+
+volumes:
+  - "/proc:/host/proc:ro"
+  - "/sys:/host/sys:ro"
+  - "/:/rootfs:ro"
+
+resources:
+  memory: "128m"

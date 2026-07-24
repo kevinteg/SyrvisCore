@@ -128,6 +128,23 @@ def service_catalog(ctx: ToolContext) -> Dict:
     return _run(ctx, "service_catalog")
 
 
+def profile_list(ctx: ToolContext) -> Dict:
+    return _run(ctx, "profile_list")
+
+
+def profile_enable(ctx: ToolContext, name: str) -> Dict:
+    # Intent-only (declarations + seeded configs, never overwriting) — like
+    # service_declare. Fail-closed against the platform's profile set.
+    from syrviscore.profiles import PROFILES
+
+    validate.validate_name(name)
+    if name not in PROFILES:
+        raise ValidationError(
+            f"unknown profile {name!r} (available: {', '.join(sorted(PROFILES))})"
+        )
+    return _run(ctx, "profile_enable", {"name": name})
+
+
 def logs(ctx: ToolContext, service: Optional[str] = None, tail: int = 100) -> Dict:
     validate.validate_tail(tail)
     if service is not None:

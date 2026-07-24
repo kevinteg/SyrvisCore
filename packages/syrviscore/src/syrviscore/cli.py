@@ -685,6 +685,75 @@ def schedule_sync(as_json):
 
 
 # =============================================================================
+# Profile command group (platform-curated service sets)
+# =============================================================================
+
+
+@cli.group()
+def profile():
+    """Platform-curated service profiles (e.g. the monitoring stack)."""
+    pass
+
+
+@profile.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def profile_list(as_json):
+    """List available profiles and their member services."""
+    from syrviscore import profiles
+
+    entries = profiles.list_profiles()
+    if as_json:
+        click.echo(jsonlib.dumps({"profiles": entries}, indent=2))
+        return
+    for entry in entries:
+        click.echo("{} — {}".format(entry["name"], entry["description"]))
+        click.echo("  services: {}".format(", ".join(entry["services"])))
+
+
+@profile.command("enable")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@click.option("--dry-run", is_flag=True, help="Report what would be declared; write nothing")
+@handle_errors
+def profile_enable(name, as_json, dry_run):
+    """Declare a profile's services + seed default configs (then reconcile).
+
+    Writes a services.d declaration for each member (platform-pinned catalog
+    images; infra-tier members get their host mounts because the declaration
+    is operator-authored) and seeds generic default configs — never
+    overwriting anything that already exists. Converge with `syrvis reconcile`.
+    """
+    from syrviscore import profiles
+    from syrviscore.paths import get_syrvis_home
+
+    if not dry_run:
+        privilege.ensure_elevated("Declaring profile services requires elevated privileges.")
+    try:
+        report = profiles.enable_profile(name, get_syrvis_home(), dry_run=dry_run)
+    except SyrvisError as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2))
+        return
+    click.echo(
+        "declared: {} (kept existing: {})".format(
+            ", ".join(report["declared"]) or "(none)",
+            ", ".join(report["existing_declarations_kept"]) or "(none)",
+        )
+    )
+    click.echo(
+        "configs seeded: {} (kept existing: {})".format(
+            ", ".join(report["configs_written"]) or "(none)",
+            ", ".join(report["configs_kept"]) or "(none)",
+        )
+    )
+    click.echo("(dry run — nothing written)" if dry_run else "Run 'syrvis reconcile' to converge.")
+
+
+# =============================================================================
 # Secret command group (Layer 2 service secrets — operator seam)
 # =============================================================================
 

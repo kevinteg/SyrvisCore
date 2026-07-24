@@ -1,0 +1,24 @@
+# Bundled catalog template — VictoriaMetrics (single-node TSDB).
+# The storage substrate of the `monitoring` profile: vmagent remote-writes here,
+# vmalert + any console query it at http://victoria-metrics:8428.
+name: victoria-metrics
+version: "v1.147.0"
+image: victoriametrics/victoria-metrics:v1.147.0
+description: "Time-series database (monitoring substrate)"
+homepage: "https://victoriametrics.com/"
+
+restart: unless-stopped
+
+volumes:
+  - "vmdata:/victoria-metrics-data:rw"
+
+resources:
+  # Memory only: some NAS kernels (e.g. avoton/3.10) reject a CPU quota
+  # ("NanoCPUs can not be set"), so profile templates never set cpus.
+  memory: "512m"
+
+healthcheck:
+  test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8428/health || exit 1"]
+  interval: 30s
+  timeout: 5s
+  retries: 5

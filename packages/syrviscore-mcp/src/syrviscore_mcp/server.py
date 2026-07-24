@@ -86,6 +86,12 @@ def service_catalog() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def profile_list() -> dict:
+    """List platform-curated service profiles (e.g. monitoring) (read-only)."""
+    return _call(tools.profile_list)
+
+
+@mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""
     return _call(tools.logs, service=service, tail=tail)
@@ -194,6 +200,14 @@ def backup_create() -> dict:
     """Create a full backup archive of the active install (privileged; additive).
     Returns the CLI output plus the post-op backup list."""
     return _call(tools.backup_create)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def profile_enable(name: str) -> dict:
+    """Declare a platform-curated profile's services (catalog-pinned images) +
+    seed default configs — never overwriting existing declarations/configs
+    (privileged; intent only — follow with reconcile)."""
+    return _call(tools.profile_enable, name=name)
 
 
 @mcp.tool(annotations={"idempotentHint": True})
