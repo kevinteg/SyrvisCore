@@ -29,10 +29,12 @@ MANIFEST
 *.spk
 build-spk-tmp/
 
-# Build directory - BUT keep build/config.yaml versioned
+# Build directories — scratch output only. Docker image pins are committed in
+# code (DEFAULT_DOCKER_IMAGES in packages/syrviscore/src/syrviscore/compose.py);
+# build/config.yaml is a generated release asset, never versioned here.
 build/*
-!build/config.yaml
 !build/.gitkeep
+packages/*/build/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

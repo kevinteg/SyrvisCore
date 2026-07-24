@@ -32,7 +32,7 @@ _BASE_MANIFEST: Dict[str, Any] = {
     },
 }
 
-_INSTANCE_DOMAIN = "konsume.org"
+_INSTANCE_DOMAIN = "example.com"
 
 
 def _manifest(**traefik_overrides) -> Dict[str, Any]:
@@ -55,7 +55,7 @@ class TestTraefikRouterRule:
         from syrviscore.service_schema import ServiceDefinition
         from syrviscore.traefik_config import ServiceTraefikConfig
 
-        svc = ServiceDefinition.from_dict(_manifest(domain="tegtmeier.me"))
+        svc = ServiceDefinition.from_dict(_manifest(domain="example.org"))
         cfg_gen = ServiceTraefikConfig.__new__(ServiceTraefikConfig)  # skip __init__
 
         config = cfg_gen.generate_config(svc, _INSTANCE_DOMAIN)
@@ -63,8 +63,8 @@ class TestTraefikRouterRule:
         assert config, "expected non-empty config"
         routers = config["http"]["routers"]
         # Both the http-redirect router and the https router must use the overridden domain.
-        assert routers["photos-http"]["rule"] == "Host(`photos.tegtmeier.me`)"
-        assert routers["photos"]["rule"] == "Host(`photos.tegtmeier.me`)"
+        assert routers["photos-http"]["rule"] == "Host(`photos.example.org`)"
+        assert routers["photos"]["rule"] == "Host(`photos.example.org`)"
 
     def test_no_domain_override_uses_instance_domain(self):
         """When domain is absent the router rule uses the instance domain (regression)."""
@@ -97,13 +97,13 @@ class TestTraefikRouterRule:
         """domain survives a to_dict/from_dict round-trip (manifest serialization)."""
         from syrviscore.service_schema import ServiceDefinition
 
-        svc = ServiceDefinition.from_dict(_manifest(domain="tegtmeier.me"))
+        svc = ServiceDefinition.from_dict(_manifest(domain="example.org"))
         serialized = svc.to_dict()
 
-        assert serialized["traefik"]["domain"] == "tegtmeier.me"
+        assert serialized["traefik"]["domain"] == "example.org"
 
         restored = ServiceDefinition.from_dict(serialized)
-        assert restored.traefik.domain == "tegtmeier.me"
+        assert restored.traefik.domain == "example.org"
 
     def test_no_domain_not_in_serialized_dict(self):
         """When domain is empty it is omitted from to_dict() output (no noise)."""
@@ -180,7 +180,7 @@ class TestHostnamesReport:
         svc_info = {
             "name": "photos",
             "subdomain": "photos",
-            "domain": "tegtmeier.me",
+            "domain": "example.org",
             "exposure": "tunnel",
             "status": "running",
         }
@@ -188,9 +188,9 @@ class TestHostnamesReport:
 
         entry = next((e for e in report["entries"] if e["service"] == "photos"), None)
         assert entry is not None, "photos entry missing from report"
-        assert entry["hostname"] == "photos.tegtmeier.me"
+        assert entry["hostname"] == "photos.example.org"
         assert entry["record"]["type"] == "CNAME"  # tunnel exposure => CNAME
-        assert entry["record"]["name"] == "photos.tegtmeier.me"
+        assert entry["record"]["name"] == "photos.example.org"
 
     def test_no_domain_override_uses_instance_domain_in_report(self):
         """Layer 2 service without domain override uses the instance domain."""
@@ -213,7 +213,7 @@ class TestHostnamesReport:
         svc_info = {
             "name": "myapp",
             "subdomain": "app",
-            "domain": "tegtmeier.me",
+            "domain": "example.org",
             "exposure": "tunnel",
             "status": "running",
         }
@@ -221,7 +221,7 @@ class TestHostnamesReport:
 
         entry = next((e for e in report["entries"] if e["service"] == "myapp"), None)
         assert entry is not None
-        assert entry["hostname"] == "app.tegtmeier.me"
+        assert entry["hostname"] == "app.example.org"
         assert entry["record"]["type"] == "CNAME"
 
     def test_internal_exposure_with_custom_domain_emits_a_record(self):
@@ -229,7 +229,7 @@ class TestHostnamesReport:
         svc_info = {
             "name": "myapp",
             "subdomain": "app",
-            "domain": "tegtmeier.me",
+            "domain": "example.org",
             "exposure": "internal",
             "status": "running",
         }
@@ -297,7 +297,7 @@ class TestInvalidDomainRejected:
 
     def test_rejects_trailing_dot(self):
         """Trailing dots are not allowed (FQDN syntax rejected at schema level)."""
-        self._expect_invalid("tegtmeier.me.")
+        self._expect_invalid("example.org.")
 
     def test_rejects_uppercase(self):
         """Domain values are normalized to lowercase; uppercase in the raw YAML
@@ -306,9 +306,9 @@ class TestInvalidDomainRejected:
         This test verifies uppercase is accepted after lowercasing."""
         from syrviscore.service_schema import ServiceDefinition
 
-        # from_dict lowercases the domain; "Tegtmeier.ME" → "tegtmeier.me"
-        svc = ServiceDefinition.from_dict(_manifest(domain="Tegtmeier.ME"))
-        assert svc.traefik.domain == "tegtmeier.me"
+        # from_dict lowercases the domain; "Example.ORG" → "example.org"
+        svc = ServiceDefinition.from_dict(_manifest(domain="Example.ORG"))
+        assert svc.traefik.domain == "example.org"
 
     def test_rejects_label_with_underscore(self):
         """Underscores are not valid in DNS labels per SUBDOMAIN_RE."""
@@ -325,14 +325,14 @@ class TestInvalidDomainRejected:
     def test_valid_two_label_domain_accepted(self):
         from syrviscore.service_schema import ServiceDefinition
 
-        svc = ServiceDefinition.from_dict(_manifest(domain="tegtmeier.me"))
-        assert svc.traefik.domain == "tegtmeier.me"
+        svc = ServiceDefinition.from_dict(_manifest(domain="example.org"))
+        assert svc.traefik.domain == "example.org"
 
     def test_valid_three_label_domain_accepted(self):
         from syrviscore.service_schema import ServiceDefinition
 
-        svc = ServiceDefinition.from_dict(_manifest(domain="sub.tegtmeier.me"))
-        assert svc.traefik.domain == "sub.tegtmeier.me"
+        svc = ServiceDefinition.from_dict(_manifest(domain="sub.example.org"))
+        assert svc.traefik.domain == "sub.example.org"
 
 
 # ---------------------------------------------------------------------------
@@ -360,34 +360,34 @@ class TestSubdomainCollisionPerDomain:
         }
 
     def test_same_subdomain_different_domains_no_conflict(self, tmp_path):
-        """photos.konsume.org and photos.tegtmeier.me are distinct: no collision."""
+        """photos.example.com and photos.example.org are distinct: no collision."""
         from syrviscore.service_manager import ServiceManager
 
         home = self._make_syrvis_home(tmp_path)
         mgr = ServiceManager(syrvis_home=home)
 
-        # Patch list() to return one installed service on konsume.org.
-        existing = [self._installed_service_info("photos-konsume", "photos", domain="")]
+        # Patch list() to return one installed service on example.com.
+        existing = [self._installed_service_info("photos-default", "photos", domain="")]
 
         with patch.object(mgr, "list", return_value=existing):
-            # Should NOT find a conflict when the new service uses tegtmeier.me.
-            owner = mgr._subdomain_in_use("photos", domain="tegtmeier.me")
+            # Should NOT find a conflict when the new service uses example.org.
+            owner = mgr._subdomain_in_use("photos", domain="example.org")
 
         assert owner is None, (
             "Expected no conflict but _subdomain_in_use returned {!r}".format(owner)
         )
 
     def test_same_subdomain_same_domain_is_a_conflict(self, tmp_path):
-        """photos.tegtmeier.me added twice IS a conflict."""
+        """photos.example.org added twice IS a conflict."""
         from syrviscore.service_manager import ServiceManager
 
         home = self._make_syrvis_home(tmp_path)
         mgr = ServiceManager(syrvis_home=home)
 
-        existing = [self._installed_service_info("photos", "photos", domain="tegtmeier.me")]
+        existing = [self._installed_service_info("photos", "photos", domain="example.org")]
 
         with patch.object(mgr, "list", return_value=existing):
-            owner = mgr._subdomain_in_use("photos", domain="tegtmeier.me")
+            owner = mgr._subdomain_in_use("photos", domain="example.org")
 
         assert owner == "photos"
 
@@ -412,10 +412,10 @@ class TestSubdomainCollisionPerDomain:
         home = self._make_syrvis_home(tmp_path)
         mgr = ServiceManager(syrvis_home=home)
 
-        existing = [self._installed_service_info("photos", "photos", domain="tegtmeier.me")]
+        existing = [self._installed_service_info("photos", "photos", domain="example.org")]
 
         with patch.object(mgr, "list", return_value=existing):
-            owner = mgr._subdomain_in_use("photos", domain="tegtmeier.me", exclude="photos")
+            owner = mgr._subdomain_in_use("photos", domain="example.org", exclude="photos")
 
         assert owner is None
 

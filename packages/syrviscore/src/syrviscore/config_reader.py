@@ -7,7 +7,7 @@ web adapter import ``read_config`` so they apply *one* secret-masking rule and
 
 It reads the **runtime** ``.env`` at ``$SYRVIS_HOME/config/.env`` — the schema
 ``setup.py`` actually writes (``DOMAIN``, ``ACME_EMAIL``, ``CLOUDFLARE_TUNNEL_TOKEN``,
-``NETWORK_*`` …) — never the stale repo-root ``.env.template`` (``TRAEFIK_DOMAIN`` …).
+``NETWORK_*`` …; the repo-root ``.env.template`` mirrors the same schema).
 
 Kept import-light and Python 3.8-clean: it is imported by the on-NAS CLI (DSM
 Python 3.8.12) as well as the 3.12 dashboard container.
@@ -34,8 +34,7 @@ _TOKEN_COMPONENTS = {
 # Synology entries are derived from the SYNOLOGY_SERVICES catalog in traefik_config so
 # adding a new passthrough service there automatically surfaces it here.
 _BOOL_COMPONENTS = {
-    "synology_{}".format(key): conf["env_enabled"]
-    for key, conf in SYNOLOGY_SERVICES.items()
+    "synology_{}".format(key): conf["env_enabled"] for key, conf in SYNOLOGY_SERVICES.items()
 }
 
 _TRUTHY = ("true", "1", "yes", "on")

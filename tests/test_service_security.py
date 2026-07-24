@@ -256,13 +256,25 @@ class TestComposeGenerationContainment:
         assert svc_dict["command"] == payload
         # nothing leaked out as a sibling compose key
         forbidden = {
-            "privileged", "cap_add", "devices", "network_mode",
-            "entrypoint", "user", "pid", "ipc", "cgroup_parent",
+            "privileged",
+            "cap_add",
+            "devices",
+            "network_mode",
+            "entrypoint",
+            "user",
+            "pid",
+            "ipc",
+            "cgroup_parent",
         }
         assert set(svc_dict) & forbidden == set()
         # only the keys we intentionally emit are present
         assert set(svc_dict) <= {
-            "image", "container_name", "restart", "networks", "security_opt", "command",
+            "image",
+            "container_name",
+            "restart",
+            "networks",
+            "security_opt",
+            "command",
         }
 
     def test_command_control_chars_accepted_and_inert(self, tmp_path):
@@ -468,28 +480,47 @@ class TestInfraTier:
     may set tier: infra — never a git/image/catalog service)."""
 
     def test_non_infra_rejects_any_host_mount(self):
-        for vol in ("/proc:/host/proc:ro", "/var/run/docker.sock:/var/run/docker.sock:ro",
-                    "/:/rootfs:ro"):
+        for vol in (
+            "/proc:/host/proc:ro",
+            "/var/run/docker.sock:/var/run/docker.sock:ro",
+            "/:/rootfs:ro",
+        ):
             with pytest.raises(ServiceValidationError):
                 ServiceDefinition.from_dict(base_service(volumes=[vol]))
 
     def test_infra_accepts_allowlisted_ro_host_mounts(self):
-        svc = ServiceDefinition.from_dict(base_service(
-            tier="infra",
-            volumes=["/proc:/host/proc:ro", "/sys:/host/sys:ro", "/:/rootfs:ro",
-                     "/var/run/docker.sock:/var/run/docker.sock:ro", "data:/data:rw"]))
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                tier="infra",
+                volumes=[
+                    "/proc:/host/proc:ro",
+                    "/sys:/host/sys:ro",
+                    "/:/rootfs:ro",
+                    "/var/run/docker.sock:/var/run/docker.sock:ro",
+                    "data:/data:rw",
+                ],
+            )
+        )
         assert svc.tier == "infra"
         assert len(svc.volumes) == 5  # host mounts + a normal named volume
 
     def test_infra_host_mount_must_be_readonly(self):
-        for vol in ("/proc:/host/proc:rw", "/:/rootfs", "/var/run/docker.sock:/var/run/docker.sock:rw"):
+        for vol in (
+            "/proc:/host/proc:rw",
+            "/:/rootfs",
+            "/var/run/docker.sock:/var/run/docker.sock:rw",
+        ):
             with pytest.raises(ServiceValidationError, match="read-only"):
                 ServiceDefinition.from_dict(base_service(tier="infra", volumes=[vol]))
 
     def test_infra_non_allowlisted_host_path_still_refused(self):
         # only /proc,/sys,/,docker.sock — NOT /etc, a volume, a look-alike sock, or '..'
-        for vol in ("/etc:/host/etc:ro", "/volume4:/data:ro", "/var/run/x.sock:/s:ro",
-                    "/proc/../etc:/x:ro"):
+        for vol in (
+            "/etc:/host/etc:ro",
+            "/volume4:/data:ro",
+            "/var/run/x.sock:/s:ro",
+            "/proc/../etc:/x:ro",
+        ):
             with pytest.raises(ServiceValidationError):
                 ServiceDefinition.from_dict(base_service(tier="infra", volumes=[vol]))
 
@@ -505,6 +536,7 @@ class TestInfraTier:
     def _mgr(self, tmp_path):
         import os
         from syrviscore.service_manager import ServiceManager
+
         os.environ.setdefault("DOMAIN", "example.com")
         m = ServiceManager(syrvis_home=tmp_path)
         m._ensure_directories()
@@ -514,10 +546,13 @@ class TestInfraTier:
 
     def test_authorship_gate_allows_operator_and_emits_host_mounts(self, tmp_path):
         import yaml
+
         mgr = self._mgr(tmp_path)
-        svc = ServiceDefinition.from_dict(base_service(
-            name="node-exporter", tier="infra",
-            volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]))
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter", tier="infra", volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]
+            )
+        )
         # install_declaration sets source_url="services.d:node-exporter" -> operator -> allowed
         ok, msg = mgr.install_declaration(svc, start=False)
         assert ok, msg
@@ -528,8 +563,9 @@ class TestInfraTier:
 
     def test_authorship_gate_rejects_git_source(self, tmp_path):
         mgr = self._mgr(tmp_path)
-        svc = ServiceDefinition.from_dict(base_service(
-            name="evil", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc = ServiceDefinition.from_dict(
+            base_service(name="evil", tier="infra", volumes=["/proc:/host/proc:ro"])
+        )
         svc.source_url = "https://github.com/attacker/evil.git"  # a repo, NOT services.d:
         sp = mgr.services_dir / "evil"
         sp.mkdir(parents=True, exist_ok=True)
@@ -544,37 +580,47 @@ class TestInfraTier:
         # infra; both succeed and the update emits the allowlisted host mounts.
         import yaml
         from syrviscore.bundle import DeployBundle
+
         mgr = self._mgr(tmp_path)
-        benign = ServiceDefinition.from_dict(base_service(
-            name="node-exporter", image="prom/node-exporter:v1.12.1"))
-        ok, msg = mgr.deploy_bundle(DeployBundle(service=benign))          # fresh
+        benign = ServiceDefinition.from_dict(
+            base_service(name="node-exporter", image="prom/node-exporter:v1.12.1")
+        )
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=benign))  # fresh
         assert ok, msg
-        infra = ServiceDefinition.from_dict(base_service(
-            name="node-exporter", image="prom/node-exporter:v1.12.1",
-            tier="infra", volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]))
-        ok, msg = mgr.deploy_bundle(DeployBundle(service=infra))           # update
+        infra = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter",
+                image="prom/node-exporter:v1.12.1",
+                tier="infra",
+                volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"],
+            )
+        )
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=infra))  # update
         assert ok, msg
         assert infra.source_url == "deploy:node-exporter"  # marked operator-authored
-        vols = yaml.safe_load(
-            (tmp_path / "compose" / "node-exporter.yaml").read_text()
-        )["services"]["node-exporter"]["volumes"]
+        vols = yaml.safe_load((tmp_path / "compose" / "node-exporter.yaml").read_text())[
+            "services"
+        ]["node-exporter"]["volumes"]
         assert "/proc:/host/proc:ro" in vols and "/:/rootfs:ro" in vols
 
     def test_compose_emit_is_defense_in_depth(self, tmp_path):
         # Even if the schema were bypassed (volumes mutated AFTER validation), the
         # emit must never produce a non-allowlisted or writable host bind.
         import yaml
+
         mgr = self._mgr(tmp_path)
-        svc = ServiceDefinition.from_dict(base_service(
-            name="ne", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc = ServiceDefinition.from_dict(
+            base_service(name="ne", tier="infra", volumes=["/proc:/host/proc:ro"])
+        )
         svc.volumes.append("/etc:/host/etc:ro")  # inject non-allowlisted host path
         with pytest.raises(ServiceValidationError, match="escapes the service data directory"):
             mgr._generate_compose_file(svc)
         # a :rw allowlisted mount is forced back to :ro by the emit
-        svc2 = ServiceDefinition.from_dict(base_service(
-            name="ne2", tier="infra", volumes=["/proc:/host/proc:ro"]))
+        svc2 = ServiceDefinition.from_dict(
+            base_service(name="ne2", tier="infra", volumes=["/proc:/host/proc:ro"])
+        )
         svc2.volumes[:] = ["/:/rootfs:rw"]
-        vols = yaml.safe_load(
-            mgr._generate_compose_file(svc2).read_text()
-        )["services"]["ne2"]["volumes"]
+        vols = yaml.safe_load(mgr._generate_compose_file(svc2).read_text())["services"]["ne2"][
+            "volumes"
+        ]
         assert vols == ["/:/rootfs:ro"]

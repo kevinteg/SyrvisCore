@@ -7,16 +7,13 @@ Verifies:
 """
 
 from pathlib import Path
-from typing import List, Optional
 from unittest.mock import MagicMock
 
-import pytest
 
 from syrviscore_mcp.commands import COMMANDS_BY_ID, get_command
 from syrviscore_mcp.remote import RemoteRunner, build_remote_tokens
 
 from .conftest import make_config
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,9 +62,7 @@ class TestStdinNotInTokens:
 
         argv = proc.last["argv"]
         full_cmd = " ".join(str(a) for a in argv)
-        assert "topsecret" not in full_cmd, (
-            f"secret leaked into argv: {full_cmd}"
-        )
+        assert "topsecret" not in full_cmd, f"secret leaked into argv: {full_cmd}"
 
     def test_stdin_passed_as_input_kwarg(self):
         """The captured subprocess call must receive input='<secret content>'."""

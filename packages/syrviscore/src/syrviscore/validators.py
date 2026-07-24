@@ -1012,7 +1012,8 @@ class SystemValidator:
         locking the unprivileged operator out of service_list/verify."""
         if not self.install_dir:
             return CheckResult(
-                name="Config tree readable", passed=False,
+                name="Config tree readable",
+                passed=False,
                 message="Cannot check - install dir unknown",
             )
         from . import privileged_ops as _po
@@ -1020,7 +1021,8 @@ class SystemValidator:
         exists, gid = _po.get_docker_group_info()
         if not exists or gid is None:
             return CheckResult(
-                name="Config tree readable", passed=False,
+                name="Config tree readable",
+                passed=False,
                 message="docker group missing (fix docker_group first)",
             )
         targets = [self.install_dir / "config" / "docker-compose.yaml"]
@@ -1035,7 +1037,8 @@ class SystemValidator:
                 bad.append(p.name)
         if not bad:
             return CheckResult(
-                name="Config tree readable", passed=True,
+                name="Config tree readable",
+                passed=True,
                 message=f"config + manifests readable by docker (gid {gid})",
             )
         return CheckResult(
@@ -1058,7 +1061,8 @@ class SystemValidator:
         """
         if not self.install_dir:
             return CheckResult(
-                name="Schedule block", passed=False,
+                name="Schedule block",
+                passed=False,
                 message="Cannot check - install dir unknown",
             )
         try:
@@ -1073,19 +1077,22 @@ class SystemValidator:
             plan = _schedule.compute_plan(self.install_dir)
         except Exception as e:  # noqa: BLE001 - never let a jobs.d issue crash verify
             return CheckResult(
-                name="Schedule block", passed=False,
+                name="Schedule block",
+                passed=False,
                 message="Could not evaluate jobs.d: {}".format(e),
             )
 
         if invalid:
             return CheckResult(
-                name="Schedule block", passed=False,
+                name="Schedule block",
+                passed=False,
                 message="{} invalid job declaration(s)".format(len(invalid)),
                 details="; ".join("{}: {}".format(r["file"], r["error"]) for r in invalid[:3]),
             )
         if not plan.get("changed"):
             return CheckResult(
-                name="Schedule block", passed=True,
+                name="Schedule block",
+                passed=True,
                 message="managed crontab block in sync with jobs.d",
             )
         return CheckResult(

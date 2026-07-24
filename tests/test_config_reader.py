@@ -82,10 +82,10 @@ def test_bool_components_derived_from_catalog():
     """_BOOL_COMPONENTS must include every service in SYNOLOGY_SERVICES (catalog-derived)."""
     for key, conf in SYNOLOGY_SERVICES.items():
         component_name = "synology_{}".format(key)
-        assert component_name in _BOOL_COMPONENTS, (
-            "{} missing from _BOOL_COMPONENTS; add it to SYNOLOGY_SERVICES catalog".format(
-                component_name
-            )
+        assert (
+            component_name in _BOOL_COMPONENTS
+        ), "{} missing from _BOOL_COMPONENTS; add it to SYNOLOGY_SERVICES catalog".format(
+            component_name
         )
         assert _BOOL_COMPONENTS[component_name] == conf["env_enabled"]
 

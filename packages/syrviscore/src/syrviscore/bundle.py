@@ -224,7 +224,10 @@ def _norm(rel: str) -> str:
 
 
 def _guard_total_size(secrets: Dict[str, str]) -> None:
-    total = sum(len(k.encode()) + len(v.encode("utf-8", errors="surrogateescape")) for k, v in secrets.items())
+    total = sum(
+        len(k.encode()) + len(v.encode("utf-8", errors="surrogateescape"))
+        for k, v in secrets.items()
+    )
     if total > BUNDLE_MAX_BYTES:
         raise BundleValidationError(
             "secrets section too large ({} bytes; max {})".format(total, BUNDLE_MAX_BYTES)

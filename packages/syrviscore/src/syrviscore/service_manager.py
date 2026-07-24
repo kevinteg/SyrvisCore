@@ -366,7 +366,7 @@ class ServiceManager:
 
         Uniqueness is checked on the full hostname (subdomain + effective domain), not
         the subdomain alone — two services may share a subdomain on different zones
-        (e.g. photos.konsume.org and photos.tegtmeier.me are distinct hosts).
+        (e.g. photos.example.com and photos.example.org are distinct hosts).
         ``domain`` should be the per-service effective domain (empty string when the
         service uses the instance domain, which is fine — both sides default the same
         way so the comparison is still correct).
@@ -1127,7 +1127,7 @@ class ServiceManager:
 
         # --- name re-validation ----------------------------------------------
         try:
-            paths_map = self._service_paths(name)
+            self._service_paths(name)
         except ServiceValidationError as e:
             return False, str(e)
 
@@ -1149,9 +1149,7 @@ class ServiceManager:
 
         # --- path containment check ------------------------------------------
         data_dir_for_svc = self.data_dir / name
-        env_file_path = Path(
-            os.path.realpath(str(data_dir_for_svc / declared.env_file))
-        )
+        env_file_path = Path(os.path.realpath(str(data_dir_for_svc / declared.env_file)))
         data_root = os.path.realpath(str(data_dir_for_svc))
         if not str(env_file_path).startswith(data_root + os.sep):
             return False, (
@@ -1258,9 +1256,7 @@ class ServiceManager:
         conf_path = Path(os.path.realpath(str(config_dir / f"{name}.conf")))
         config_root = os.path.realpath(str(config_dir))
         if not str(conf_path).startswith(config_root + os.sep):
-            return False, (
-                f"conf file for {name!r} escapes the config directory (path traversal)"
-            )
+            return False, (f"conf file for {name!r} escapes the config directory (path traversal)")
 
         # --- config dir must already exist (created by install) --------------
         # Do NOT mkdir the home — a missing config/ means a broken/absent install.
@@ -1355,9 +1351,7 @@ class ServiceManager:
         if service.tier == "infra" and not str(service.source_url or "").startswith(
             OPERATOR_AUTHORED_PREFIXES
         ):
-            return False, (
-                "tier: infra is only permitted for an operator-authored declaration"
-            )
+            return False, ("tier: infra is only permitted for an operator-authored declaration")
 
         # 1. Declaration + install/manifest. The declaration is written in BOTH
         #    branches OUTSIDE the rollback boundary (a failed deploy keeps the

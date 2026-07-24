@@ -142,8 +142,8 @@ def build_report(env_path: Optional[str] = None) -> Dict[str, Any]:
 
     # 4) Layer 2 services (each carries its own subdomain + exposure, and an
     # optional per-service domain override so a service may route on a zone
-    # other than the instance domain, e.g. photos.tegtmeier.me vs the default
-    # <subdomain>.konsume.org).
+    # other than the instance domain, e.g. photos.example.org vs the default
+    # <subdomain>.example.com).
     try:
         from .service_manager import ServiceManager
 

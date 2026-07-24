@@ -192,11 +192,23 @@ def _snmp_bundle():
             "service": base_manifest(
                 env_file="secrets.env",
                 volumes=["config:/etc/snmp_exporter:ro"],
-                command=["--config.file=/etc/snmp_exporter/snmp.yml", "--config.expand-environment-variables"],
+                command=[
+                    "--config.file=/etc/snmp_exporter/snmp.yml",
+                    "--config.expand-environment-variables",
+                ],
                 networks=["proxy"],
             ),
-            "configs": [{"dest": "config/snmp.yml", "content": "auths:\n  synology_v3:\n    username: ${SNMP_V3_USER}\n"}],
-            "secrets": {"SNMP_V3_USER": "snmp-monitor", "SNMP_V3_AUTH_PASS": "a", "SNMP_V3_PRIV_PASS": "p"},
+            "configs": [
+                {
+                    "dest": "config/snmp.yml",
+                    "content": "auths:\n  synology_v3:\n    username: ${SNMP_V3_USER}\n",
+                }
+            ],
+            "secrets": {
+                "SNMP_V3_USER": "snmp-monitor",
+                "SNMP_V3_AUTH_PASS": "a",
+                "SNMP_V3_PRIV_PASS": "p",
+            },
         }
     )
 
@@ -255,11 +267,17 @@ class TestDeployBundleApply:
         changed = DeployBundle.from_dict(
             {
                 "service": base_manifest(
-                    version="v0.30.2", env_file="secrets.env",
-                    volumes=["config:/etc/snmp_exporter:ro"], networks=["proxy"],
+                    version="v0.30.2",
+                    env_file="secrets.env",
+                    volumes=["config:/etc/snmp_exporter:ro"],
+                    networks=["proxy"],
                 ),
                 "configs": [{"dest": "config/snmp.yml", "content": "changed\n"}],
-                "secrets": {"SNMP_V3_USER": "u", "SNMP_V3_AUTH_PASS": "a", "SNMP_V3_PRIV_PASS": "p"},
+                "secrets": {
+                    "SNMP_V3_USER": "u",
+                    "SNMP_V3_AUTH_PASS": "a",
+                    "SNMP_V3_PRIV_PASS": "p",
+                },
             }
         )
         ok, msg = mgr.deploy_bundle(changed)
@@ -284,7 +302,9 @@ class TestDeployBundleApply:
 
     def test_configless_update_does_not_restart(self, tmp_path):
         mgr = _manager(tmp_path)
-        b = DeployBundle.from_dict(base_bundle(service=base_manifest(name="vm", networks=["proxy"])))
+        b = DeployBundle.from_dict(
+            base_bundle(service=base_manifest(name="vm", networks=["proxy"]))
+        )
         assert mgr.deploy_bundle(b)[0]  # fresh
         calls = []
         mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
@@ -319,8 +339,10 @@ class TestDeployBundleApply:
         b = DeployBundle.from_dict(
             {
                 "service": base_manifest(
-                    name="svc", env_file="secrets.env",
-                    volumes=["config:/etc/x:ro"], networks=["proxy"],
+                    name="svc",
+                    env_file="secrets.env",
+                    volumes=["config:/etc/x:ro"],
+                    networks=["proxy"],
                 ),
                 "configs": [
                     {"dest": "config/public.yml", "content": "a"},

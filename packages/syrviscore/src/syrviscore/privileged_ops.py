@@ -923,9 +923,7 @@ def ensure_config_tree_readable(install_dir: Optional[Path] = None) -> Tuple[boo
             _fix(manifest, False)
 
     if failed:
-        return False, "config tree: fixed {}, failed: {}".format(
-            len(fixed), "; ".join(failed[:4])
-        )
+        return False, "config tree: fixed {}, failed: {}".format(len(fixed), "; ".join(failed[:4]))
     return True, "config tree readable by docker group (gid {}): {} path(s)".format(gid, len(fixed))
 
 

@@ -230,9 +230,7 @@ def validate_cron_spec(spec: str) -> str:
         raise ValidationError("cron spec must be a string")
     fields = spec.split()
     if len(fields) != 5:
-        raise ValidationError(
-            f"cron spec must have exactly 5 fields (got {len(fields)})"
-        )
+        raise ValidationError(f"cron spec must have exactly 5 fields (got {len(fields)})")
     for field in fields:
         if not field or set(field) - _CRON_FIELD_CHARS:
             raise ValidationError(

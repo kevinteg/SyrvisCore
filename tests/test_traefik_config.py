@@ -214,8 +214,13 @@ class TestSynologyCatalog:
         assert "synology-webdav-secure" in routers
         assert routers["synology-webdav-secure"]["tls"]["certResolver"] == "letsencrypt"
         assert "synology-webdav" in services
-        assert "192.168.1.101:5006" in services["synology-webdav"]["loadBalancer"]["servers"][0]["url"]
-        assert services["synology-webdav"]["loadBalancer"]["serversTransport"] == "insecure-skip-verify@file"
+        assert (
+            "192.168.1.101:5006" in services["synology-webdav"]["loadBalancer"]["servers"][0]["url"]
+        )
+        assert (
+            services["synology-webdav"]["loadBalancer"]["serversTransport"]
+            == "insecure-skip-verify@file"
+        )
 
     def test_webdav_disabled_by_default(self):
         """WebDAV is absent when SYNOLOGY_WEBDAV_ENABLED is not set."""

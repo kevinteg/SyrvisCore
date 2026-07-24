@@ -99,7 +99,11 @@ def _clone_configured_source(git_url: str) -> Tuple[bool, str, Optional[Path]]:
     config file), but the hardening is kept regardless. Caller owns the temp dir.
     """
     if not _is_git_url(git_url):
-        return False, "configured jobs.source is not a supported git URL: {!r}".format(git_url), None
+        return (
+            False,
+            "configured jobs.source is not a supported git URL: {!r}".format(git_url),
+            None,
+        )
 
     env = dict(os.environ)
     # `file` is allowed alongside the network transports because the source is
@@ -335,7 +339,9 @@ def apply_schedule(syrvis_home: Path) -> Dict[str, Any]:
         if not job.enabled:
             continue
         if not (jobs_dir / name).is_file():
-            skipped.append({"name": name, "reason": "jobs/{} not present — run schedule sync".format(name)})
+            skipped.append(
+                {"name": name, "reason": "jobs/{} not present — run schedule sync".format(name)}
+            )
             continue
         desired[name] = job.crontab_line(jobs_dir)
 
@@ -376,7 +382,10 @@ def sync_from_source(syrvis_home: Path) -> Dict[str, Any]:
     source = get_configured_source(syrvis_home)
     if not source:
         return {
-            "ok": True, "applied": False, "source": None, "synced": [],
+            "ok": True,
+            "applied": False,
+            "source": None,
+            "synced": [],
             "message": "no config/jobs.source configured — scheduled jobs dormant",
         }
 

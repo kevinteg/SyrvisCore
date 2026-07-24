@@ -402,16 +402,16 @@ class ServiceTraefikConfig:
 
         Args:
             service: Service definition
-            domain: Instance base domain (e.g., "konsume.org").  When the service
+            domain: Instance base domain (e.g., "example.com").  When the service
                 declaration includes a ``traefik.domain`` override, the effective
                 hostname uses that domain instead.  Both the HTTP-redirect router
                 and the HTTPS/TLS router use the effective hostname.
 
                 DNS-01 note: wildcard certs are issued per-zone by the Cloudflare
                 DNS-01 provider (CF_DNS_API_TOKEN).  A domain override only works
-                correctly when the target zone (e.g. tegtmeier.me) is also within
-                the scope of that token — CF_DNS_API_TOKEN already spans
-                konsume.org + tegtmeier.me, so both zones are covered.
+                correctly when the target zone (e.g. example.org) is also within
+                the scope of that token — scope CF_DNS_API_TOKEN to every zone
+                the instance routes.
 
         Returns:
             Traefik configuration dictionary

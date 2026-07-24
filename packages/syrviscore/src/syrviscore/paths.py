@@ -3,7 +3,7 @@ Path management for SyrvisCore.
 
 Handles versioned directory structure and provides helpers for common paths.
 
-Directory Structure (v2):
+Directory Structure (v3, split packages):
     /volume1/syrviscore/
     ├── current -> versions/0.1.0/     # Symlink to active version
     ├── versions/
@@ -17,6 +17,7 @@ Directory Structure (v2):
 
 import os
 import json
+import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from datetime import datetime
@@ -106,7 +107,7 @@ def get_syrvis_home() -> Path:
 
 
 # =============================================================================
-# Versioned Directory Structure (v2)
+# Versioned Directory Structure (v3)
 # =============================================================================
 
 
@@ -358,12 +359,7 @@ def update_manifest(updates: Dict[str, Any]) -> None:
         return base
 
     deep_merge(manifest, updates)
-    manifest_path.write_text(json.dumps(manifest, indent=2))
-    # Make manifest world-readable so doctor can read it without sudo
-    try:
-        manifest_path.chmod(0o644)
-    except OSError:
-        pass  # May fail if not owner, but that's OK
+    _write_manifest_atomic(manifest_path, manifest)
 
 
 def save_manifest(manifest: Dict[str, Any]) -> None:
@@ -373,13 +369,31 @@ def save_manifest(manifest: Dict[str, Any]) -> None:
     Args:
         manifest: Complete manifest dictionary to save
     """
-    manifest_path = get_manifest_path()
-    manifest_path.write_text(json.dumps(manifest, indent=2))
-    # Make manifest world-readable so doctor can read it without sudo
+    _write_manifest_atomic(get_manifest_path(), manifest)
+
+
+def _write_manifest_atomic(manifest_path: Path, manifest: Dict[str, Any]) -> None:
+    """Write the manifest atomically (temp file + rename), 0644.
+
+    Matches syrviscore_manager.manifest.save_manifest so a crash mid-write can
+    never leave a truncated manifest. 0644 keeps it world-readable so doctor
+    can read it without sudo.
+    """
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(manifest_path.parent), prefix=".manifest-", suffix=".tmp"
+    )
     try:
-        manifest_path.chmod(0o644)
-    except OSError:
-        pass  # May fail if not owner, but that's OK
+        with os.fdopen(fd, "w") as f:
+            json.dump(manifest, f, indent=2)
+        os.chmod(tmp_name, 0o644)
+        os.replace(tmp_name, str(manifest_path))
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def verify_setup_complete() -> bool:

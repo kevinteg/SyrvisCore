@@ -33,8 +33,10 @@ SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 
 # Domain override: dot-separated DNS labels (≥2 labels), each matching SUBDOMAIN_RE.
 # Used to allow a service to route on a zone other than the instance DOMAIN.
-# Example: "tegtmeier.me", "photos.example.com"
-DOMAIN_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,}[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+# Example: "example.com", "photos.example.com"
+DOMAIN_RE = re.compile(
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,}[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
 
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -566,7 +568,7 @@ class ServiceDefinition:
             if traefik.domain and not DOMAIN_RE.fullmatch(traefik.domain):
                 raise ServiceValidationError(
                     "Invalid traefik domain {!r}: must be a dot-separated domain with "
-                    "at least 2 labels (e.g. 'tegtmeier.me'), each label matching "
+                    "at least 2 labels (e.g. 'example.com'), each label matching "
                     "[a-z0-9][a-z0-9-]{{0,61}}[a-z0-9]".format(traefik.domain)
                 )
             if not isinstance(traefik.port, int) or not 1 <= traefik.port <= 65535:

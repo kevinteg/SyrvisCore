@@ -88,11 +88,12 @@ def test_synology_webdav_in_report(home):
     """Enabling SYNOLOGY_WEBDAV_ENABLED produces a files.<domain> internal A-record entry."""
     _write_env(
         home,
-        "DOMAIN=example.com\nTRAEFIK_IP=192.168.1.100\n"
-        "SYNOLOGY_WEBDAV_ENABLED=true\n",
+        "DOMAIN=example.com\nTRAEFIK_IP=192.168.1.100\n" "SYNOLOGY_WEBDAV_ENABLED=true\n",
     )
     entries = _by_service(hostnames.build_report())
-    assert "synology_webdav" in entries, "synology_webdav should appear when SYNOLOGY_WEBDAV_ENABLED=true"
+    assert (
+        "synology_webdav" in entries
+    ), "synology_webdav should appear when SYNOLOGY_WEBDAV_ENABLED=true"
     webdav = entries["synology_webdav"]
     assert webdav["hostname"] == "files.example.com"
     assert webdav["subdomain"] == "files"

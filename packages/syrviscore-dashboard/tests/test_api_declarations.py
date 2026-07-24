@@ -41,7 +41,9 @@ class FakeManager:
 def _wire(monkeypatch, declared, invalid, installed, statuses):
     fake = FakeManager(statuses)
     monkeypatch.setattr(service_manager_mod, "ServiceManager", lambda: fake)
-    monkeypatch.setattr(services_d_mod, "load_declarations", lambda home: (declared, invalid))
+    monkeypatch.setattr(
+        services_d_mod, "load_declarations", lambda home, tolerant=False: (declared, invalid)
+    )
     monkeypatch.setattr(services_d_mod, "_installed_manifests", lambda mgr: installed)
     return fake
 
@@ -127,7 +129,7 @@ def test_declarations_library_failure_degrades(client, monkeypatch):
     fake = FakeManager()
     monkeypatch.setattr(service_manager_mod, "ServiceManager", lambda: fake)
 
-    def boom(home):
+    def boom(home, tolerant=False):
         raise RuntimeError("services.d exploded")
 
     monkeypatch.setattr(services_d_mod, "load_declarations", boom)

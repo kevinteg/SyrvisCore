@@ -2,6 +2,7 @@
 compose operator-readable (docker group) WITHOUT ever touching config/.env, which
 carries secrets and must stay 0600. Regression for the operator-read gap that
 locked syrvis-operator out of service_list/verify (design/04 §7)."""
+
 import os
 from pathlib import Path
 
@@ -55,7 +56,7 @@ def test_get_domain_from_env_tolerates_unreadable_env(tmp_path, monkeypatch):
     home = tmp_path / "syrviscore"
     (home / "config").mkdir(parents=True)
     env = home / "config" / ".env"
-    env.write_text("DOMAIN=konsume.org\n")
+    env.write_text("DOMAIN=example.com\n")
     env.chmod(0o000)  # unreadable by the (non-root) test/operator user
     monkeypatch.setenv("SYRVIS_HOME", str(home))
     try:
@@ -70,7 +71,8 @@ def test_remediation_dispatch_wired(tmp_path, monkeypatch):
     the "no fix wired up" default (the H3-style dispatch-drift regression)."""
     seen = {}
     monkeypatch.setattr(
-        privileged_ops, "ensure_config_tree_readable",
+        privileged_ops,
+        "ensure_config_tree_readable",
         lambda d: (seen.setdefault("dir", d), (True, "ok"))[1],
     )
     ok, _ = remediation.apply_fix("config_tree_perms", tmp_path)
