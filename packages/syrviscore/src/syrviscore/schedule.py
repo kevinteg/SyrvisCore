@@ -23,6 +23,7 @@ The managed block is delimited; only it is ever rewritten (DSM's own lines + the
 header are preserved). The cron spec lives only in the YAML — never an MCP argv.
 """
 
+import hashlib
 import os
 import shutil
 import stat
@@ -318,7 +319,28 @@ def compute_plan(syrvis_home: Path) -> Dict[str, Any]:
         jobs_d.validate_cron_spec(" ".join(line.split()[:5]))
     plan["invalid"] = invalid
     plan["source"] = get_configured_source(syrvis_home)
+    plan["scripts"] = _script_integrity(declarations, jobs_dir)
     return plan
+
+
+def _script_integrity(declarations: Dict[str, Any], jobs_dir: Path) -> Dict[str, Any]:
+    """Per-job installed-script state: presence + sha256.
+
+    Lets a deployment verify over the operator seam (``schedule list --json``)
+    that the root-owned ``jobs/<name>`` scripts match its source — without a
+    break-glass login just to hash files.
+    """
+    out: Dict[str, Any] = {}
+    for name in sorted(declarations):
+        script = jobs_dir / name
+        entry: Dict[str, Any] = {"present": script.is_file()}
+        if entry["present"]:
+            try:
+                entry["sha256"] = hashlib.sha256(script.read_bytes()).hexdigest()
+            except OSError as e:
+                entry["error"] = str(e)
+        out[name] = entry
+    return out
 
 
 def apply_schedule(syrvis_home: Path) -> Dict[str, Any]:

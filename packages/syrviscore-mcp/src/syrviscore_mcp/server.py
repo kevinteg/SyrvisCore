@@ -80,6 +80,12 @@ def stack_hostnames() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def service_catalog() -> dict:
+    """List the bundled Layer 2 service catalog templates (read-only)."""
+    return _call(tools.service_catalog)
+
+
+@mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""
     return _call(tools.logs, service=service, tail=tail)
@@ -165,6 +171,29 @@ def stack_apply() -> dict:
     """Regenerate docker-compose.yaml from the declared stack (privileged;
     idempotent). Run start/restart afterward to apply the new compose."""
     return _call(tools.stack_apply)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def stack_enable(name: str) -> dict:
+    """Declare a core-tier service enabled in config/stack.yaml (privileged;
+    intent only — follow with stack_apply, then start). Known services:
+    cloudflared, dashboard, cloudflare_ddns (traefik/portainer are always on)."""
+    return _call(tools.stack_enable, name=name)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def stack_disable(name: str) -> dict:
+    """Declare an optional core-tier service disabled in config/stack.yaml
+    (privileged; intent only — follow with stack_apply). Primordial services
+    (traefik, portainer) cannot be disabled."""
+    return _call(tools.stack_disable, name=name)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def backup_create() -> dict:
+    """Create a full backup archive of the active install (privileged; additive).
+    Returns the CLI output plus the post-op backup list."""
+    return _call(tools.backup_create)
 
 
 @mcp.tool(annotations={"idempotentHint": True})
@@ -300,6 +329,13 @@ def cleanup(keep: int = 2, confirm: str = "") -> dict:
     """Remove old versions, keeping the newest N. Two-call handshake.
     (privileged, destructive)."""
     return _call(tools.cleanup, keep=keep, confirm=confirm)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+def backup_cleanup(keep: int = 3, confirm: str = "") -> dict:
+    """Remove old backup archives, keeping the newest N versions' backups.
+    Two-call handshake (privileged, destructive — backups are the DR path)."""
+    return _call(tools.backup_cleanup, keep=keep, confirm=confirm)
 
 
 @mcp.tool(annotations=DESTRUCTIVE)

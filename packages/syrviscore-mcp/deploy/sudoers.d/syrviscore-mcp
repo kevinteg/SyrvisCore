@@ -13,6 +13,9 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis stop, \
     /volume1/syrviscore/bin/syrvis restart, \
     /volume1/syrviscore/bin/syrvis stack apply, \
+    /volume1/syrviscore/bin/syrvis stack enable -- *, \
+    /volume1/syrviscore/bin/syrvis stack disable -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl backup create, \
     /volume1/syrviscore/bin/syrvis verify --fix --json, \
     /volume1/syrviscore/bin/syrvis verify --smoke --fix --json, \
     /volume1/syrviscore/bin/syrvis service start -- *, \
@@ -31,6 +34,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /var/packages/syrviscore/target/venv/bin/syrvisctl uninstall -y -- *, \
     /var/packages/syrviscore/target/venv/bin/syrvisctl cleanup --keep * -y, \
     /volume1/syrviscore/bin/syrvis service remove -y -- *, \
+    /var/packages/syrviscore/target/venv/bin/syrvisctl backup cleanup --keep * -y, \
     /volume1/syrviscore/bin/syrvis schedule apply --json, \
     /volume1/syrviscore/bin/syrvis schedule sync --json, \
     /volume1/syrviscore/bin/syrvis secret set -- *, \

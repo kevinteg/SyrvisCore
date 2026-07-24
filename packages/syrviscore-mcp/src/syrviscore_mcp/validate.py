@@ -257,6 +257,20 @@ def validate_keep(keep: int) -> int:
     return keep
 
 
+def validate_stack_service(name: str, disable: bool = False) -> str:
+    """Fail-closed gate for stack_enable/stack_disable slots: only the
+    platform's core-tier service set, and never disabling a primordial one.
+    The set lives in the seam registry (drift-tested against syrviscore.stack).
+    """
+    from syrviscore.seam.registry import STACK_PRIMORDIAL, STACK_SERVICES
+
+    if not isinstance(name, str) or name not in STACK_SERVICES:
+        raise ValidationError(f"unknown core service {name!r} (known: {', '.join(STACK_SERVICES)})")
+    if disable and name in STACK_PRIMORDIAL:
+        raise ValidationError(f"{name!r} is primordial and cannot be disabled")
+    return name
+
+
 def assert_safe_token(value: str, what: str = "argument") -> str:
     """Belt-and-braces check used by remote.py on every token before it is sent."""
     _reject_metachars(value, what)

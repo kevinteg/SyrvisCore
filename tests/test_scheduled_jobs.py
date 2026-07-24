@@ -592,3 +592,27 @@ def test_materialize_rejects_missing_named_script(tmp_path):
     ok, msg = schedule.materialize_job_script(checkout, "login-alert", home / "jobs")
     assert not ok
     assert "login-alert" in msg
+
+
+# ---------------------------------------------------------------------------
+# script integrity in the plan (seam-readable job hashes)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_plan_reports_script_integrity(tmp_path, monkeypatch):
+    """`schedule list --json` carries per-job script presence + sha256, so a
+    deployment can verify installed root-owned scripts over the operator seam
+    instead of hashing them over a break-glass login."""
+    import hashlib
+
+    home = _jobs_home(tmp_path)
+    _declare(home, "aaa-present", "schedule: '0 3 * * *'\nenabled: true\n")
+    _declare(home, "bbb-missing", "schedule: '0 4 * * *'\nenabled: true\n")
+    (home / "jobs" / "aaa-present").write_text("#!/bin/sh\necho hi\n")
+    monkeypatch.setattr(schedule, "read_crontab", lambda *a, **k: _DSM_CRONTAB)
+
+    plan = schedule.compute_plan(home)
+    scripts = plan["scripts"]
+    assert scripts["aaa-present"]["present"] is True
+    assert scripts["aaa-present"]["sha256"] == hashlib.sha256(b"#!/bin/sh\necho hi\n").hexdigest()
+    assert scripts["bbb-missing"] == {"present": False}

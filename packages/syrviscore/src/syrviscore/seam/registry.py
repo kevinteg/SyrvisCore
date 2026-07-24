@@ -35,6 +35,14 @@ KIND_EXPOSURE = "exposure"
 KIND_PORT = "port"
 KIND_PRUNE_POLICY = "prune_policy"
 KIND_BOOLEAN = "boolean"
+KIND_STACK_SERVICE = "stack_service"
+
+# The core-tier service set for KIND_STACK_SERVICE slots. Duplicated from
+# syrviscore.stack (ALL_SERVICES / PRIMORDIAL) so the generator stays
+# stdlib-only when run straight from the source tree; a drift test asserts
+# the two stay identical.
+STACK_SERVICES = ("traefik", "portainer", "cloudflared", "dashboard", "cloudflare_ddns")
+STACK_PRIMORDIAL = ("traefik", "portainer")
 
 
 @dataclass(frozen=True)
@@ -82,6 +90,7 @@ COMMANDS: List[Command] = [
         positional=Slot("service", KIND_NAME, optional=True),
     ),
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
+    Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     # schedule list parses the managed crontab block + jobs.d — read-only. It runs
     # under sudo so the 0600-ish jobs.d declarations are readable over the seam,
     # but the CLI itself performs no privileged action (like reconcile_plan).
@@ -124,6 +133,37 @@ COMMANDS: List[Command] = [
     Command("stop", "syrvis", ["stop"], sudo=True, expect_json=False),
     Command("restart", "syrvis", ["restart"], sudo=True, expect_json=False),
     Command("stack_apply", "syrvis", ["stack", "apply"], sudo=True, expect_json=False),
+    # stack enable/disable write core-tier intent to config/stack.yaml only;
+    # nothing runs until stack_apply + start (like service_declare). Rich
+    # settings (subdomain/exposure) flow through the instance bundle (apply) —
+    # the seam keeps the imperative form minimal. The CLI rejects disabling a
+    # primordial service; the client validates the same set fail-closed.
+    Command(
+        "stack_enable",
+        "syrvis",
+        ["stack", "enable"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_STACK_SERVICE),
+    ),
+    Command(
+        "stack_disable",
+        "syrvis",
+        ["stack", "disable"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_STACK_SERVICE),
+    ),
+    # backup create reads the whole tree (incl. 0600 config) into an archive —
+    # sudo, but additive and idempotent: no token.
+    Command(
+        "backup_create",
+        "syrvisctl",
+        ["backup", "create"],
+        sudo=True,
+        expect_json=False,
+        timeout_s=600,
+    ),
     Command("verify_fix", "syrvis", ["verify"], sudo=True, flags=["--fix", "--json"]),
     Command(
         "verify_fix_smoke", "syrvis", ["verify"], sudo=True, flags=["--smoke", "--fix", "--json"]
@@ -288,6 +328,17 @@ COMMANDS: List[Command] = [
         expect_json=False,
         flags=["-y"],
         positional=Slot("name", KIND_NAME),
+    ),
+    # backup cleanup DELETES old backup archives (disaster-recovery artifacts),
+    # so it takes the two-call token like cleanup.
+    Command(
+        "backup_cleanup",
+        "syrvisctl",
+        ["backup", "cleanup"],
+        sudo=True,
+        destructive=True,
+        expect_json=False,
+        flags=["--keep", FlagValue(Slot("keep", KIND_KEEP)), "-y"],
     ),
     # schedule apply reconciles config/jobs.d -> jobs/ scripts + the managed
     # /etc/crontab block. It mutates root cron, so it is DESTRUCTIVE (two-call HMAC

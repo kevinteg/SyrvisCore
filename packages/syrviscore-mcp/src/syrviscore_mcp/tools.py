@@ -124,6 +124,10 @@ def stack_hostnames(ctx: ToolContext) -> Dict:
     return _run(ctx, "stack_hostnames")
 
 
+def service_catalog(ctx: ToolContext) -> Dict:
+    return _run(ctx, "service_catalog")
+
+
 def logs(ctx: ToolContext, service: Optional[str] = None, tail: int = 100) -> Dict:
     validate.validate_tail(tail)
     if service is not None:
@@ -188,6 +192,33 @@ def verify_fix(ctx: ToolContext, smoke: bool = False) -> Dict:
 
 def stack_apply(ctx: ToolContext) -> Dict:
     return _run(ctx, "stack_apply")
+
+
+def stack_enable(ctx: ToolContext, name: str) -> Dict:
+    # Writes core-tier intent to config/stack.yaml only (like service_declare);
+    # nothing runs until stack_apply + start. Fail-closed against the platform's
+    # core service set.
+    validate.validate_stack_service(name)
+    return _run(ctx, "stack_enable", {"name": name})
+
+
+def stack_disable(ctx: ToolContext, name: str) -> Dict:
+    # Intent-only like stack_enable; primordial services are rejected here AND
+    # by the CLI (defense in depth).
+    validate.validate_stack_service(name, disable=True)
+    return _run(ctx, "stack_disable", {"name": name})
+
+
+def backup_create(ctx: ToolContext) -> Dict:
+    # Additive + idempotent (a new archive); sudo only to read 0600 config into
+    # it. Follow with the backup list as ground truth (the CLI has no --json).
+    result = _run(ctx, "backup_create")
+    try:
+        after = _run(ctx, "backup_list")
+        result["backups"] = after.get("backups")
+    except McpError:
+        pass
+    return result
 
 
 def reconcile(ctx: ToolContext) -> Dict:
@@ -352,6 +383,25 @@ def cleanup(ctx: ToolContext, keep: int = 2, confirm: str = "") -> Dict:
     if pending:
         return pending
     return _with_version_state(ctx, _run(ctx, "cleanup", {"keep": keep}))
+
+
+def backup_cleanup(ctx: ToolContext, keep: int = 3, confirm: str = "") -> Dict:
+    # Deletes old backup archives — disaster-recovery artifacts — so it takes
+    # the two-call token. Binding the current backup list into the state hash
+    # voids the token if the archives change in between.
+    validate.validate_keep(keep)
+    current = backup_list(ctx)
+    plan = {"action": "backup_cleanup", "keep": keep, "backups": current.get("backups")}
+    pending = _confirm_or_plan(ctx, "backup_cleanup", {"keep": keep}, confirm, [current], plan)
+    if pending:
+        return pending
+    result = _run(ctx, "backup_cleanup", {"keep": keep})
+    try:
+        after = _run(ctx, "backup_list")
+        result["backups"] = after.get("backups")
+    except McpError:
+        pass
+    return result
 
 
 def reconcile_prune(ctx: ToolContext, prune: str, confirm: str = "") -> Dict:

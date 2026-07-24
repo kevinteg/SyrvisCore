@@ -22,12 +22,16 @@ EXPECTED_TOOLS = {
     "cleanup_preview",
     "reconcile_plan",
     "schedule_list",
+    "service_catalog",
     # privileged, non-destructive
     "start",
     "stop",
     "restart",
     "verify_fix",
     "stack_apply",
+    "stack_enable",
+    "stack_disable",
+    "backup_create",
     "reconcile",
     "service_start",
     "service_stop",
@@ -46,6 +50,7 @@ EXPECTED_TOOLS = {
     "reconcile_prune",
     "schedule_apply",
     "schedule_sync",
+    "backup_cleanup",
 }
 
 DESTRUCTIVE = {
@@ -57,6 +62,7 @@ DESTRUCTIVE = {
     "reconcile_prune",
     "schedule_apply",
     "schedule_sync",
+    "backup_cleanup",
 }
 READ_ONLY = {
     "status",
@@ -71,8 +77,16 @@ READ_ONLY = {
     "cleanup_preview",
     "reconcile_plan",
     "schedule_list",
+    "service_catalog",
 }
-IDEMPOTENT = {"reconcile", "service_declare", "service_adopt"}
+IDEMPOTENT = {
+    "reconcile",
+    "service_declare",
+    "service_adopt",
+    "stack_enable",
+    "stack_disable",
+    "backup_create",
+}
 
 
 def _tools():
@@ -86,7 +100,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 34
+    assert len(EXPECTED_TOOLS) == 39
 
 
 def test_destructive_tools_have_destructive_hint():

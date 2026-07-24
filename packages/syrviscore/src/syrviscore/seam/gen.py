@@ -24,10 +24,10 @@ from pathlib import Path
 # so this makes the sudoers/shim/provision artifacts reproducible from any
 # Python 3.8+ without setting up a venv. parents[2] is the package's src/ dir.
 try:
-    from syrviscore.seam.registry import COMMANDS, Command, FlagValue
+    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue
 except ImportError:  # pragma: no cover
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from syrviscore.seam.registry import COMMANDS, Command, FlagValue
+    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue
 
 
 @dataclass(frozen=True)
@@ -116,6 +116,7 @@ _SLOT_PREDICATE = {
     "port": "is_port",
     "prune_policy": "is_prune",
     "boolean": "is_bool",
+    "stack_service": "is_stacksvc",
 }
 
 
@@ -195,6 +196,9 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "is_subdomain() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }",
         "is_exposure()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }",
+        "is_stacksvc()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^("
+        + "|".join(STACK_SERVICES)
+        + ")$'; }",
         "is_prune()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }",
         "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
         "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "

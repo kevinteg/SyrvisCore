@@ -13,6 +13,7 @@ is_port() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 is_giturl()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }
 is_subdomain() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }
 is_exposure()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }
+is_stacksvc()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(traefik|portainer|cloudflared|dashboard|cloudflare_ddns)$'; }
 is_prune()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }
 is_bool()      { printf '%s' "$1" | LC_ALL=C grep -Eq '^(true|false)$'; }
 is_image()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }
@@ -58,6 +59,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "stack" ] && [ "${3}" = "hostnames" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "service" ] && [ "${3}" = "catalog" ] && [ "${4}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
@@ -92,6 +96,15 @@ if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "apply" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "enable" ] && [ "${6}" = "--" ] && is_stacksvc "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "disable" ] && [ "${6}" = "--" ] && is_stacksvc "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "backup" ] && [ "${5}" = "create" ]; then
   set -f; exec "$@"
 fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "verify" ] && [ "${5}" = "--fix" ] && [ "${6}" = "--json" ]; then
@@ -146,6 +159,9 @@ if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/
   set -f; exec "$@"
 fi
 if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "remove" ] && [ "${6}" = "-y" ] && [ "${7}" = "--" ] && is_name "${8}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${4}" = "backup" ] && [ "${5}" = "cleanup" ] && [ "${6}" = "--keep" ] && is_keep "${7}" && [ "${8}" = "-y" ]; then
   set -f; exec "$@"
 fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "apply" ] && [ "${6}" = "--json" ]; then

@@ -322,3 +322,56 @@ class TestPerProcessKey:
 
         with pytest.raises(ConfirmationError):
             tools.activate(ctx2, "0.1.0", confirm=token)
+
+
+class TestStackTools:
+    def test_stack_enable_valid(self):
+        ctx, runner = make_ctx({"stack_enable": {"ok": True}})
+        tools.stack_enable(ctx, "dashboard")
+        assert runner.ids() == ["stack_enable"]
+
+    def test_stack_enable_unknown_service_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx()
+        with pytest.raises(ValidationError, match="unknown core service"):
+            tools.stack_enable(ctx, "nginx")
+        assert runner.ids() == []  # fail-closed: nothing sent
+
+    def test_stack_disable_primordial_rejected(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx()
+        with pytest.raises(ValidationError, match="primordial"):
+            tools.stack_disable(ctx, "traefik")
+        assert runner.ids() == []
+
+    def test_stack_disable_optional_ok(self):
+        ctx, runner = make_ctx({"stack_disable": {"ok": True}})
+        tools.stack_disable(ctx, "cloudflared")
+        assert runner.ids() == ["stack_disable"]
+
+
+class TestBackupTools:
+    BACKUPS = {"backups": [{"version": "0.2.0", "file": "b.tar.gz"}]}
+
+    def test_backup_create_merges_backup_list(self):
+        ctx, runner = make_ctx({"backup_create": {"ok": True}, "backup_list": self.BACKUPS})
+        out = tools.backup_create(ctx)
+        assert runner.ids() == ["backup_create", "backup_list"]
+        assert out["backups"] == self.BACKUPS["backups"]
+
+    def test_backup_cleanup_handshake(self):
+        ctx, runner = make_ctx({"backup_list": self.BACKUPS, "backup_cleanup": {"ok": True}})
+        plan = tools.backup_cleanup(ctx, keep=3)
+        assert plan["needs_confirmation"] is True
+        assert "backup_cleanup" not in runner.ids()  # no mutation before confirm
+        tools.backup_cleanup(ctx, keep=3, confirm=plan["confirm_token"])
+        assert "backup_cleanup" in runner.ids()
+
+    def test_backup_cleanup_keep_bounds(self):
+        from syrviscore_mcp.errors import ValidationError
+
+        ctx, runner = make_ctx()
+        with pytest.raises(ValidationError):
+            tools.backup_cleanup(ctx, keep=99)

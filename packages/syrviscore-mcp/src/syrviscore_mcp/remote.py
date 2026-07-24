@@ -45,6 +45,7 @@ _KIND_VALIDATORS = {
     "port": lambda v, cfg: str(validate.validate_port(v)),
     "prune_policy": lambda v, cfg: validate.validate_prune_policy(v),
     "boolean": lambda v, cfg: validate.validate_bool_flag(v),
+    "stack_service": lambda v, cfg: validate.validate_stack_service(v),
 }
 
 
