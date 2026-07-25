@@ -1,17 +1,32 @@
-# Bundled catalog template — docker-health-exporter (container state metrics).
-# Plain L2 (no host access): reads container running/health/restart state
-# through docker-socket-proxy and serves /metrics on :9066 for vmagent.
+# Bundled catalog template — the estate container-state exporter. Emits container
+# running / health / restart / started metrics via docker-socket-proxy (no host
+# access), scraped by vmagent at :9066 → up{job="docker-health"}.
+#
+# IMAGE: karugaru/docker_state_exporter — MIT, ~240 LoC Go, auditable — pinned by
+# DIGEST. Upstream publishes only :latest, so the digest is the only stable pin,
+# and this replaces the previous ANONYMOUS, unmaintained fviolence image. It emits
+# container_state_* metrics; the vmagent scrape relabels them back to the estate's
+# stable docker_container_* contract (profile_data/monitoring/vmagent-scrape.yml),
+# so the dashboards, alert rules, and dashboard.py's Collector need NO change.
+#
+# HARDENING PATH (upstream runs as root): images/docker-state-exporter/ builds a
+# non-root, owned `ghcr.io/<org>/docker-state-exporter`; re-pin here once CI
+# publishes it. The socket-proxy (POST=0, CONTAINERS-only) already bounds the risk.
 name: docker-health-exporter
-version: "v1.0"
-image: fviolence/docker-health-exporter:v1.0
-description: "Container health metrics via docker-socket-proxy"
-homepage: "https://github.com/fviolence/docker-health-exporter"
+version: "1.0.0"
+image: karugaru/docker_state_exporter@sha256:99d984a57dd11d0d3b53d56481dec51be7a0ad7c2a7aa80a95db2facd294c60a
+description: "Container state metrics (docker_state_exporter) via docker-socket-proxy"
+homepage: "https://github.com/karugaru/docker_state_exporter"
 
 restart: unless-stopped
 
+# Reach the Docker API via the socket-proxy over `proxy` (NOT the host socket).
+# The docker SDK's NewEnvClient() honors DOCKER_HOST. Serve /metrics on :9066 so
+# the scrape target is unchanged (upstream defaults to :8080).
 environment:
   - "DOCKER_HOST=tcp://docker-socket-proxy:2375"
-  - "PORT=9066"
+command:
+  - "-listen-address=:9066"
 
 resources:
   memory: "128m"
