@@ -109,26 +109,38 @@ log_success "All required files present"
 log_info "Staging INFO with version ${VERSION}"
 sed "s/^version=.*/version=\"${VERSION}\"/" spk/INFO > "$BUILD_DIR/INFO"
 
-# Find the MANAGER wheel file and dependencies
-log_info "Looking for manager wheel file and dependencies"
-WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore_manager-*.whl 2>/dev/null | head -1)
+# Find the MANAGER wheel file and dependencies.
+# PIN to MANAGER_VERSION — never bundle whatever wheel happens to be in dist/.
+# A stale older wheel there (e.g. syrviscore_manager-0.2.0) sorts BEFORE the
+# current one, and the old `ls | head -1` grabbed it, shipping an old manager
+# under a new SPK (the same class as release-service.sh's EXPECTED_WHEEL guard,
+# and the reason build-manager.sh cleans dist/ first). If the exact-version wheel
+# or the deps dir is absent, rebuild (build-manager.sh wipes stale wheels + deps).
+log_info "Looking for manager wheel ${MANAGER_VERSION} + dependencies"
 DEPS_DIR="$PROJECT_ROOT/dist/manager-deps"
+WHEEL_FILE="$PROJECT_ROOT/dist/syrviscore_manager-${MANAGER_VERSION}-py3-none-any.whl"
 
-if [ -z "$WHEEL_FILE" ] || [ ! -d "$DEPS_DIR" ]; then
-    log_warn "Manager wheel or dependencies not found, building..."
+if [ ! -f "$WHEEL_FILE" ] || [ ! -d "$DEPS_DIR" ]; then
+    log_warn "Manager wheel ${MANAGER_VERSION} or its deps not present — (re)building..."
     "$SCRIPT_DIR/build-manager.sh"
-    WHEEL_FILE=$(ls "$PROJECT_ROOT/dist"/syrviscore_manager-*.whl 2>/dev/null | head -1)
 fi
 
-if [ -z "$WHEEL_FILE" ]; then
-    log_error "Failed to find or build manager wheel"
-    log_error "Run ./build-tools/build-manager.sh first"
+if [ ! -f "$WHEEL_FILE" ]; then
+    log_error "Expected manager wheel not found after build: $(basename "$WHEEL_FILE")"
+    log_error "build-manager.sh must produce syrviscore_manager-${MANAGER_VERSION}-py3-none-any.whl"
     exit 1
 fi
 
 if [ ! -d "$DEPS_DIR" ]; then
     log_error "Dependencies directory not found: $DEPS_DIR"
     log_error "Run ./build-tools/build-manager.sh first"
+    exit 1
+fi
+
+# Guard the deps dir too: build-manager.sh wipes it and re-stages the CURRENT
+# manager wheel, so a lingering old manager wheel here means a partial build.
+if ls "$DEPS_DIR"/syrviscore_manager-*.whl 2>/dev/null | grep -qv "syrviscore_manager-${MANAGER_VERSION}-"; then
+    log_error "Stale manager wheel in $DEPS_DIR (expected only ${MANAGER_VERSION}); run build-manager.sh"
     exit 1
 fi
 
