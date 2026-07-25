@@ -88,12 +88,33 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # run inside the service's own container via `syrvis service task` —
         # e.g. a DB bootstrap. Same trust class + audit rules as `command`.
         "tasks",
+        # Optional per-service metric panels ({panels: [{title, expr, ...}]})
+        # consumed by the dashboard generator (`syrvis dashboard generate`) to
+        # add domain-specific rows/panels for this service. Pure PRESENTATION
+        # metadata: the exprs only ever land in a Grafana dashboard JSON a human
+        # provisions — SyrvisCore never executes them and they never reach the
+        # shell/compose — so this block grants NO authority (unlike command/
+        # tasks/volumes) and, uniquely, permits '$' (the ${container} token).
+        "dashboard",
     }
 )
 
 # tasks sub-schema: each task is exactly one audited exec-form argv.
 ALLOWED_TASK_KEYS = frozenset({"command"})
 MAX_TASKS = 16
+
+# dashboard sub-schema: optional presentation-only metric panels for the
+# generated Grafana dashboard (see dashboard.py). NOT a trust boundary — the
+# strings only ever render into a dashboard JSON, never executed — so the checks
+# here are for well-formedness (bounded counts/lengths, no control chars), not
+# safety. '$' IS allowed (the ${container} substitution token).
+ALLOWED_DASHBOARD_KEYS = frozenset({"panels"})
+ALLOWED_PANEL_KEYS = frozenset({"title", "expr", "kind", "unit"})
+ALLOWED_PANEL_KINDS = frozenset({"stat", "timeseries", "table", "gauge"})
+MAX_DASHBOARD_PANELS = 12
+MAX_PANEL_TITLE = 120
+MAX_PANEL_EXPR = 512
+UNIT_RE = re.compile(r"^[A-Za-z0-9/%_.-]{0,32}$")
 
 ALLOWED_TIERS = frozenset({"", "infra"})
 
@@ -335,6 +356,92 @@ def _validate_tasks(data: Any) -> Dict[str, List[str]]:
     return out
 
 
+def _no_control_chars(value: str) -> bool:
+    """True if the string has no ASCII control characters (incl. newlines/tabs)."""
+    return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def _validate_dashboard(data: Any) -> Dict[str, Any]:
+    """Validate the optional ``dashboard:`` block (metric panels for the row).
+
+    Presentation-only metadata for ``dashboard.py`` — the panel exprs render
+    into a Grafana dashboard JSON and are NEVER executed by SyrvisCore or the
+    shell, so this validates well-formedness (structure, bounded counts and
+    lengths, no control characters), not safety. Unlike ``command``/``volumes``,
+    ``$`` is permitted: authors write ``${container}`` and PromQL selectors.
+
+    Shape::
+
+        dashboard:
+          panels:
+            - {title: "Queue depth", expr: 'immich_job_queue{...}', kind: timeseries, unit: short}
+    """
+    if not isinstance(data, dict):
+        raise ServiceValidationError("dashboard must be a mapping")
+    unknown = set(data.keys()) - ALLOWED_DASHBOARD_KEYS
+    if unknown:
+        raise ServiceValidationError(
+            "dashboard: unknown keys {} (allowed: {})".format(
+                ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_DASHBOARD_KEYS))
+            )
+        )
+    panels = data.get("panels", [])
+    if not isinstance(panels, list):
+        raise ServiceValidationError("dashboard.panels must be a list")
+    if len(panels) > MAX_DASHBOARD_PANELS:
+        raise ServiceValidationError(
+            "dashboard.panels: too many panels ({}; max {})".format(
+                len(panels), MAX_DASHBOARD_PANELS
+            )
+        )
+    out_panels: List[Dict[str, Any]] = []
+    for i, panel in enumerate(panels):
+        if not isinstance(panel, dict):
+            raise ServiceValidationError("dashboard.panels[{}] must be a mapping".format(i))
+        unknown = set(panel.keys()) - ALLOWED_PANEL_KEYS
+        if unknown:
+            raise ServiceValidationError(
+                "dashboard.panels[{}]: unknown keys {} (allowed: {})".format(
+                    i, ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_PANEL_KEYS))
+                )
+            )
+        title = panel.get("title")
+        if not isinstance(title, str) or not title.strip() or len(title) > MAX_PANEL_TITLE:
+            raise ServiceValidationError(
+                "dashboard.panels[{}].title must be a non-empty string (<= {} chars)".format(
+                    i, MAX_PANEL_TITLE
+                )
+            )
+        expr = panel.get("expr")
+        if not isinstance(expr, str) or not expr.strip() or len(expr) > MAX_PANEL_EXPR:
+            raise ServiceValidationError(
+                "dashboard.panels[{}].expr must be a non-empty string (<= {} chars)".format(
+                    i, MAX_PANEL_EXPR
+                )
+            )
+        if not _no_control_chars(title) or not _no_control_chars(expr):
+            raise ServiceValidationError(
+                "dashboard.panels[{}]: title/expr must not contain control characters".format(i)
+            )
+        kind = panel.get("kind", "timeseries")
+        if kind not in ALLOWED_PANEL_KINDS:
+            raise ServiceValidationError(
+                "dashboard.panels[{}].kind {!r}: allowed: {}".format(
+                    i, kind, ", ".join(sorted(ALLOWED_PANEL_KINDS))
+                )
+            )
+        unit = panel.get("unit", "")
+        if not isinstance(unit, str) or not UNIT_RE.fullmatch(unit):
+            raise ServiceValidationError(
+                "dashboard.panels[{}].unit {!r}: must match {}".format(i, unit, UNIT_RE.pattern)
+            )
+        out: Dict[str, Any] = {"title": title, "expr": expr, "kind": kind}
+        if unit:
+            out["unit"] = unit
+        out_panels.append(out)
+    return {"panels": out_panels}
+
+
 def _validate_volume(vol: str, tier: str = "") -> str:
     """Validate a volume entry against the mount policy.
 
@@ -485,6 +592,11 @@ class ServiceDefinition:
     restart: str = "unless-stopped"
     healthcheck: Optional[Dict[str, Any]] = None
     resources: Optional[Dict[str, str]] = None
+    # Optional presentation-only metric panels for the generated Grafana
+    # dashboard (dashboard.py). None == the service gets only the standard
+    # container panels. {"panels": [{title, expr, kind, unit?}]} adds
+    # domain-specific panels to this service's row. Never executed by Core.
+    dashboard: Optional[Dict[str, Any]] = None
     # Orchestration (services.d): declared-but-off, and health severity.
     enabled: bool = True
     critical: bool = False
@@ -614,6 +726,10 @@ class ServiceDefinition:
         if data.get("resources") is not None:
             resources = _validate_resources(data["resources"])
 
+        dashboard = None
+        if data.get("dashboard") is not None:
+            dashboard = _validate_dashboard(data["dashboard"])
+
         traefik = TraefikConfig.from_dict(data.get("traefik"))
         if traefik.enabled:
             if not SUBDOMAIN_RE.fullmatch(traefik.subdomain or ""):
@@ -660,6 +776,7 @@ class ServiceDefinition:
             restart=restart,
             healthcheck=healthcheck,
             resources=resources,
+            dashboard=dashboard,
             enabled=data.get("enabled", True),
             critical=data.get("critical", False),
         )
@@ -733,6 +850,8 @@ class ServiceDefinition:
             result["healthcheck"] = self.healthcheck
         if self.resources:
             result["resources"] = self.resources
+        if self.dashboard:
+            result["dashboard"] = self.dashboard
         if not self.enabled:
             result["enabled"] = False
         if self.critical:

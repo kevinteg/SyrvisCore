@@ -1890,6 +1890,68 @@ def stack_hostnames(as_json, exposure):
     click.echo()
 
 
+@cli.group()
+def dashboard():
+    """Generate a Grafana dashboard for the SyrvisCore layers (metrics platform)."""
+    pass
+
+
+@dashboard.command("generate")
+@click.option("--json", "as_json", is_flag=True, help="Emit the Grafana dashboard JSON to stdout")
+@click.option(
+    "--output", "-o", type=click.Path(), default=None, help="Write the JSON to a file instead"
+)
+@click.option(
+    "--datasource", default="victoriametrics", help="Grafana datasource UID the panels query"
+)
+@click.option("--title", default="SyrvisCore — service metrics", help="Dashboard title")
+@click.option(
+    "--uid", default="syrvis-overview", help="Dashboard UID (stable across regenerations)"
+)
+@handle_errors
+def dashboard_generate(as_json, output, datasource, title, uid):
+    """Emit an auto-generated Grafana dashboard for this instance's services.
+
+    A top-level overview row scoped to the SyrvisCore-managed containers, then
+    one row per service (core tier + every Layer 2 service) keyed by its
+    container_name — the standard measurements (running, health, restarts,
+    uptime) plus any domain panels a service declares in its manifest
+    ``dashboard:`` block. A deployment repo drops this into Grafana
+    provisioning (design/16). Deterministic: it projects the DECLARED set, so
+    it runs without touching the Docker daemon.
+    """
+    from pathlib import Path
+
+    from syrviscore import dashboard as dashboard_mod
+
+    # Load .env so any config-derived enablement reflects the configured instance.
+    try:
+        env_path = get_env_path()
+        if env_path.exists():
+            load_dotenv(env_path, override=True)
+    except Exception:
+        pass
+
+    collector = dashboard_mod.Collector(datasource_uid=datasource)
+    model = dashboard_mod.generate(collector=collector, title=title, uid=uid)
+    text = dashboard_mod.to_json(model)
+
+    if output:
+        Path(output).write_text(text + "\n")
+        click.echo("Wrote {} ({} panels) to {}".format(model["uid"], len(model["panels"]), output))
+        return
+    if as_json:
+        click.echo(text)
+        return
+
+    rows = [p for p in model["panels"] if p["type"] == "row"]
+    click.echo("Dashboard '{}' (uid {})".format(model["title"], model["uid"]))
+    click.echo("  {} panels across {} rows".format(len(model["panels"]), len(rows)))
+    for r in rows:
+        click.echo("    - {}".format(r["title"]))
+    click.echo("\nRe-run with --json (stdout) or -o <file> to emit the Grafana JSON.")
+
+
 # =============================================================================
 # Core command group (kept for backwards compatibility)
 # =============================================================================
