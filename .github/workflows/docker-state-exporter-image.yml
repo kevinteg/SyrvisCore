@@ -1,0 +1,43 @@
+# Build + push the owned, non-root docker-state-exporter image (no local Docker
+# needed). The fviolence-replacement hardening (security audit 2026-07-24): our
+# own build of the vendored MIT exporter on a distroless non-root base. A failed
+# build pushes nothing, so the estate's upstream-digest pin keeps working until
+# this succeeds and the digest is adopted (see images/docker-state-exporter/README).
+name: docker-state-exporter-image
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "images/docker-state-exporter/**"
+      - ".github/workflows/docker-state-exporter-image.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: images/docker-state-exporter
+          file: images/docker-state-exporter/Dockerfile
+          push: true
+          # Amd64 only — the estate NAS is x86_64 (Avoton).
+          platforms: linux/amd64
+          provenance: true
+          sbom: true
+          tags: |
+            ghcr.io/kevinteg/docker-state-exporter:1.0.0
+            ghcr.io/kevinteg/docker-state-exporter:latest
