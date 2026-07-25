@@ -2,19 +2,18 @@
 # running / health / restart / started metrics via docker-socket-proxy (no host
 # access), scraped by vmagent at :9066 → up{job="docker-health"}.
 #
-# IMAGE: karugaru/docker_state_exporter — MIT, ~240 LoC Go, auditable — pinned by
-# DIGEST. Upstream publishes only :latest, so the digest is the only stable pin,
-# and this replaces the previous ANONYMOUS, unmaintained fviolence image. It emits
+# IMAGE: the OWNED, non-root build (images/docker-state-exporter/) — our CI rebuild
+# of karugaru/docker_state_exporter (MIT, ~240 LoC Go, vendored + auditable) on a
+# distroless static base, USER nonroot, provenance+SBOM. Pinned by DIGEST. This
+# replaces the previous ANONYMOUS, unmaintained, root fviolence image. It emits
 # container_state_* metrics; the vmagent scrape relabels them back to the estate's
 # stable docker_container_* contract (profile_data/monitoring/vmagent-scrape.yml),
 # so the dashboards, alert rules, and dashboard.py's Collector need NO change.
-#
-# HARDENING PATH (upstream runs as root): images/docker-state-exporter/ builds a
-# non-root, owned `ghcr.io/<org>/docker-state-exporter`; re-pin here once CI
-# publishes it. The socket-proxy (POST=0, CONTAINERS-only) already bounds the risk.
+# (Interim upstream pin if you don't build the owned image:
+#  karugaru/docker_state_exporter@sha256:99d984a57dd11d0d3b53d56481dec51be7a0ad7c2a7aa80a95db2facd294c60a)
 name: docker-health-exporter
 version: "1.0.0"
-image: karugaru/docker_state_exporter@sha256:99d984a57dd11d0d3b53d56481dec51be7a0ad7c2a7aa80a95db2facd294c60a
+image: ghcr.io/kevinteg/docker-state-exporter@sha256:a8af92185465704bb67893e39019a5dec9cd5091c3df7344c62f150a5053d511
 description: "Container state metrics (docker_state_exporter) via docker-socket-proxy"
 homepage: "https://github.com/karugaru/docker_state_exporter"
 
