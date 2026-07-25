@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrviscore-manager"
-version = "0.3.0"
+# Single source of truth: src/syrviscore_manager/__version__.py (see below).
+dynamic = ["version"]
 description = "SyrvisCore Manager - Version management for SyrvisCore on Synology NAS"
 readme = "README.md"
 authors = [
@@ -40,6 +41,9 @@ syrvisctl = "syrviscore_manager.cli:cli"
 [project.urls]
 Homepage = "https://github.com/kevinteg/SyrvisCore"
 Repository = "https://github.com/kevinteg/SyrvisCore"
+
+[tool.setuptools.dynamic]
+version = { attr = "syrviscore_manager.__version__.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

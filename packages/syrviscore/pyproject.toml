@@ -4,7 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "syrviscore"
-version = "0.4.1"
+# Single source of truth: src/syrviscore/__version__.py. Bump it ONCE; the wheel
+# version is read from it (was a static duplicate here — bumping only one of the
+# two shipped old code under a new tag, twice). See [tool.setuptools.dynamic].
+dynamic = ["version"]
 description = "SyrvisCore - Self-hosted infrastructure platform for Synology NAS"
 readme = "README.md"
 authors = [
@@ -57,6 +60,11 @@ Issues = "https://github.com/kevinteg/SyrvisCore/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+# Read the wheel version from the module's __version__ (a plain string literal,
+# so setuptools parses it statically — no import/execution at build time).
+version = { attr = "syrviscore.__version__.__version__" }
 
 [tool.setuptools.package-data]
 # catalog_templates ships the bundled service catalog; the build/*.yaml glob is
