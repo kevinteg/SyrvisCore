@@ -301,6 +301,14 @@ def apply_reconcile_plan(
             }
         )
 
+    # Any applied action changed the deployed image set; drop the updates cache
+    # so a just-reconciled service stops showing an "available" update it no
+    # longer has (its "current" is frozen in that cache otherwise).
+    if any(r["ok"] for r in results):
+        from . import image_updates
+
+        image_updates.invalidate_cache()
+
     return results
 
 

@@ -2,7 +2,7 @@
 Docker Compose configuration generator for SyrvisCore.
 
 Generates docker-compose.yaml with the core-tier services: Traefik, Portainer,
-Cloudflared, the SyrvisCore dashboard, and (optionally) Cloudflare DDNS.
+Cloudflared, and the SyrvisCore dashboard.
 
 Image versions come from, in order of precedence:
 1. an explicit ``config_path`` handed to :class:`ComposeGenerator`;
@@ -37,8 +37,8 @@ DEFAULT_DOCKER_IMAGES = {
     },
     "portainer": {
         "image": "portainer/portainer-ce",
-        "tag": "2.33.8-alpine",
-        "full_image": "portainer/portainer-ce:2.33.8-alpine@sha256:8409efc23937ec9f02f19d26831f3a700d18fbf9a5f8d628b88e8b942ae4c7e8",
+        "tag": "2.43.0-alpine",
+        "full_image": "portainer/portainer-ce:2.43.0-alpine@sha256:b39d73976b94d945f6e62ac727ca65d1cf9b46dc9d2c3c0e833ef0422469f09e",
         "description": "",
     },
     "cloudflared": {
@@ -54,8 +54,8 @@ DEFAULT_DOCKER_IMAGES = {
     # dashboard container each upgrade — so it never serves a stale snapshot.
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.4.6",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.6@sha256:f70455c9f1bf7bbd8fc9e01eb1400f2640112b38370879db9e78884000a22a12",
+        "tag": "0.4.7",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.7",
         "description": "SyrvisCore web dashboard",
     },
 }

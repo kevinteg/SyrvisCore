@@ -1654,6 +1654,15 @@ def _regenerate_compose():
             msg += " — restarted Traefik to apply static config change"
         if removed:
             msg += " — stopped disabled: {}".format(", ".join(removed))
+
+        # A regenerated compose may carry new core image pins (e.g. after a
+        # service upgrade); drop the updates cache so the report reflects them.
+        try:
+            from syrviscore import image_updates
+
+            image_updates.invalidate_cache()
+        except Exception:  # noqa: BLE001
+            pass
         return True, msg
     except Exception as e:  # noqa: BLE001
         return False, str(e)

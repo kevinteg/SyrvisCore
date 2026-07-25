@@ -333,6 +333,27 @@ def _cache_path(home: Path) -> Path:
     return Path(home) / "data" / ".image-updates-cache.json"
 
 
+def invalidate_cache(home: Optional[Path] = None) -> None:
+    """Drop the cached updates report so the next check re-derives from the
+    current pins.
+
+    Called after a deploy changes the deployed image set: the report caches
+    "current" (from the declared pin) frozen at check time, so a just-applied
+    update would keep showing as "available" until the TTL expires. Dropping the
+    cache makes the next read (CLI/dashboard/MCP) reflect reality immediately.
+    """
+    from . import paths
+
+    try:
+        resolved = Path(home) if home is not None else paths.get_syrvis_home()
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        _cache_path(resolved).unlink()
+    except OSError:
+        pass
+
+
 def check_updates(
     home: Optional[Path] = None,
     refresh: bool = False,

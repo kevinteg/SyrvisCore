@@ -382,3 +382,36 @@ class TestUpdatesCli:
         )
         CliRunner().invoke(cli, ["updates", "--refresh"])
         assert seen.get("refresh") is True
+
+
+class TestInvalidateCache:
+    def test_removes_report_and_is_idempotent(self, tmp_path):
+        cache = iu._cache_path(tmp_path)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text('{"checked_at": 0, "images": []}')
+        assert cache.exists()
+
+        iu.invalidate_cache(tmp_path)
+        assert not cache.exists()
+
+        # A second call (nothing to remove) must not raise.
+        iu.invalidate_cache(tmp_path)
+
+    def test_reconcile_invalidates_after_applied_action(self, tmp_path, monkeypatch):
+        """A successful reconcile action drops the cache so a just-updated service
+        stops showing an 'available' update it no longer has."""
+        from syrviscore import services_d
+
+        cache = iu._cache_path(tmp_path)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text('{"checked_at": 0, "images": []}')
+        monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+
+        class FakeManager:
+            def start(self, name):
+                return True, "started"
+
+        plan = {"actions": [{"kind": "start", "name": "grafana"}]}
+        results = services_d.apply_reconcile_plan(FakeManager(), {}, plan)
+        assert results[0]["ok"] is True
+        assert not cache.exists()  # invalidated
