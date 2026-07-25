@@ -233,6 +233,14 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
 
     home = paths.resolve_home(explicit=install_path, create=True)
 
+    # Was a version already active before this install? If so this is an UPGRADE
+    # of a configured instance (install auto-activates the new version), not a
+    # fresh setup — the "next steps" guidance differs.
+    try:
+        prior_active = manifest.get_active_version(home)
+    except Exception:
+        prior_active = None
+
     if wheel_file:
         version_manager.install_from_wheel(
             home,
@@ -270,9 +278,21 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
         click.echo("  source {}".format(profile_path))
         click.echo()
 
-    click.echo("Next steps:")
-    click.echo("  1. Run 'syrvis setup' to configure the service")
-    click.echo("  2. Run 'syrvis start' to start the services")
+    active = manifest.get_active_version(home)
+    if prior_active and prior_active != active:
+        # Upgrade of an already-configured instance: the new version is ALREADY
+        # active (install activates it — no separate `activate` needed). What's
+        # left is to apply it so running containers pick up the new images.
+        click.echo("{} is now active (upgraded from {}).".format(active, prior_active))
+        click.echo()
+        click.echo("Next step — apply it so containers pick up the new images:")
+        click.echo("  syrvis stack apply && syrvis start")
+        click.echo("  (Layer-2 services: 'syrvis reconcile')")
+    else:
+        # Fresh install: onboard.
+        click.echo("Next steps:")
+        click.echo("  1. Run 'syrvis setup' to configure the service")
+        click.echo("  2. Run 'syrvis start' to start the services")
 
 
 @cli.command()

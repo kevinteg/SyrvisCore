@@ -81,6 +81,21 @@ class TestInstallWheel:
         )
         assert result.exit_code == 0, result.output
 
+    def test_fresh_shows_setup_upgrade_shows_apply(self, runner, home, tmp_path, fake_venv_backend):
+        # Fresh install: onboarding guidance.
+        fresh = cli_install_wheel(runner, home, make_wheel(tmp_path, "0.1.0"))
+        assert fresh.exit_code == 0, fresh.output
+        assert "Run 'syrvis setup'" in fresh.output
+        assert "is now active" not in fresh.output
+
+        # Upgrade of the configured instance: the new version is ALREADY active
+        # (install activates it), so guidance is to apply it — not re-run setup.
+        up = cli_install_wheel(runner, home, make_wheel(tmp_path, "0.2.0"))
+        assert up.exit_code == 0, up.output
+        assert "0.2.0 is now active (upgraded from 0.1.0)" in up.output
+        assert "syrvis stack apply && syrvis start" in up.output
+        assert "Run 'syrvis setup'" not in up.output
+
 
 class TestListCommand:
     def test_list_json_empty(self, runner):
