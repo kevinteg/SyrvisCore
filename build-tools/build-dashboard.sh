@@ -11,8 +11,11 @@ set -eu
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
+# Lockstep: the dashboard image is tagged at the SERVICE version (the dashboard
+# package version is kept synced to it), so the compose pin and the published
+# image always agree.
 VERSION=$(grep '^__version__' \
-  "$REPO_ROOT/packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py" \
+  "$REPO_ROOT/packages/syrviscore/src/syrviscore/__version__.py" \
   | cut -d'"' -f2)
 
 IMAGE="${IMAGE:-ghcr.io/kevinteg/syrviscore-dashboard}"

@@ -1,8 +1,9 @@
 # Build + push the SyrvisCore dashboard container image from CI (no local Docker
-# needed). The dashboard bakes the `syrviscore` library into its image, so it must
-# be rebuilt whenever the dashboard package (its version, or the syrviscore it
-# pulls in) changes — otherwise its baked schema lags the CLI and it mis-flags
-# valid declarations. Tags the image at the dashboard's own __version__.
+# needed). The dashboard bakes the `syrviscore` library into its image and ships
+# in LOCKSTEP with the service: it is tagged at syrviscore.__version__ and must be
+# rebuilt whenever EITHER the dashboard package or the syrviscore it bakes changes
+# — otherwise its baked schema lags the CLI (mis-flagging valid declarations) or
+# the compose pin points at a tag CI never published.
 name: dashboard-image
 
 on:
@@ -11,6 +12,7 @@ on:
     branches: [main]
     paths:
       - "packages/syrviscore-dashboard/**"
+      - "packages/syrviscore/**"
       - ".github/workflows/dashboard-image.yml"
 
 permissions:
@@ -23,14 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve dashboard version
+      - name: Resolve service version (lockstep tag)
         id: ver
         run: |
           v=$(grep '^__version__' \
-            packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py \
+            packages/syrviscore/src/syrviscore/__version__.py \
             | cut -d'"' -f2)
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Dashboard version: $v"
+          echo "Service version (image tag): $v"
 
       - uses: docker/login-action@v3
         with:

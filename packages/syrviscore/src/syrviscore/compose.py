@@ -43,14 +43,20 @@ DEFAULT_DOCKER_IMAGES = {
     },
     "cloudflared": {
         "image": "cloudflare/cloudflared",
-        "tag": "2026.7.1",
-        "full_image": "cloudflare/cloudflared:2026.7.1@sha256:188bb03589a32affed3cf4d0590565ffe67b78866e6b5582574afab2b705bafe",
+        "tag": "2026.7.3",
+        "full_image": "cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf",
         "description": "",
     },
+    # The dashboard image is built in LOCKSTEP with the service version: its tag
+    # equals syrviscore.__version__, CI publishes ghcr .../syrviscore-dashboard:
+    # <service-version> on release, and the pin here tracks it. Because the pin
+    # therefore changes every release, `apply-instance --converge` recreates the
+    # dashboard container each upgrade — so it never serves a stale snapshot.
+    # Digest is added by the release step once CI has published the tag.
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.1.7",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.7@sha256:e778c1115f06edb55358439ccc36cbc58a67fbf632b59aeee24e61903de148ba",
+        "tag": "0.4.6",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.6",
         "description": "SyrvisCore web dashboard",
     },
 }

@@ -537,12 +537,16 @@ class TestDashboard:
 class TestImagePinLockstep:
     """The built-in image pins must stay in lockstep with sibling packages."""
 
-    def test_dashboard_tag_matches_dashboard_version(self):
-        """compose.py's dashboard tag must equal syrviscore_dashboard.__version__ —
-        the GHCR image CI publishes is tagged with that version, so a mismatch
-        means the core stack pulls a stale (or nonexistent) dashboard image."""
+    def test_dashboard_tag_matches_service_version(self):
+        """The dashboard is built in LOCKSTEP with the service version: CI publishes
+        the GHCR image tagged with syrviscore.__version__, the dashboard package is
+        synced to that version, and the compose pin tracks it. Assert all three
+        agree — a mismatch means the core stack pulls a stale/nonexistent image, or
+        the pin fails to bump on a release (which is what let the dashboard go
+        stale before the lockstep)."""
         import re
 
+        from syrviscore.__version__ import __version__ as service_version
         from syrviscore.compose import DEFAULT_DOCKER_IMAGES
 
         version_file = (
@@ -553,16 +557,17 @@ class TestImagePinLockstep:
             / "syrviscore_dashboard"
             / "__version__.py"
         )
-        if not version_file.exists():
-            pytest.skip("dashboard package not present in this checkout")
-
-        match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text())
-        assert match, "could not parse dashboard __version__"
-        dashboard_version = match.group(1)
+        if version_file.exists():
+            match = re.search(r'__version__\s*=\s*"([^"]+)"', version_file.read_text())
+            assert match, "could not parse dashboard __version__"
+            assert match.group(1) == service_version, (
+                "dashboard __version__ must be synced to the service version "
+                "(lockstep) — run the release sync"
+            )
 
         entry = DEFAULT_DOCKER_IMAGES["dashboard"]
-        assert entry["tag"] == dashboard_version
+        assert entry["tag"] == service_version
         # full_image is repo:tag or repo:tag@sha256:… (digest-pinned) — the tag
-        # segment (before any digest) must still equal the dashboard version.
+        # segment (before any digest) must still equal the service version.
         ref = entry["full_image"].split("@", 1)[0]
-        assert ref.endswith(":" + dashboard_version)
+        assert ref.endswith(":" + service_version)

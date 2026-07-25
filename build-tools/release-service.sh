@@ -54,6 +54,16 @@ TAG="v${VERSION}"
 log_info "Version: $VERSION"
 log_info "Tag: $TAG"
 
+# Lockstep: keep the dashboard package version equal to the service version so the
+# GHCR image (tagged at the service version by CI) and the compose pin agree.
+# Bump only syrviscore/__version__.py; this syncs the dashboard automatically.
+DASH_VERSION_FILE="$PROJECT_ROOT/packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py"
+if [ -f "$DASH_VERSION_FILE" ]; then
+    sed -i.bak "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" "$DASH_VERSION_FILE"
+    rm -f "${DASH_VERSION_FILE}.bak"
+    log_info "Synced dashboard __version__ -> ${VERSION}"
+fi
+
 # The wheel MUST match THIS release's version. Never reuse whatever wheel happens
 # to be in dist/ (a stale wheel from a prior version would ship old code under the
 # new tag — the 0.3.10-shipped-0.3.9 bug). Pin the filename to $VERSION and rebuild
