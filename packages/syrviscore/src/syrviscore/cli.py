@@ -1986,26 +1986,36 @@ def dashboard():
 @dashboard.command("generate")
 @click.option("--json", "as_json", is_flag=True, help="Emit the Grafana dashboard JSON to stdout")
 @click.option(
-    "--output", "-o", type=click.Path(), default=None, help="Write the JSON to a file instead"
+    "--all",
+    "emit_all",
+    is_flag=True,
+    help="Emit the overview PLUS one deep-dive dashboard per service",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(),
+    default=None,
+    help="Write to a file (overview) or, with --all, a DIRECTORY of <uid>.json files",
 )
 @click.option(
     "--datasource", default="victoriametrics", help="Grafana datasource UID the panels query"
 )
-@click.option("--title", default="SyrvisCore — service metrics", help="Dashboard title")
+@click.option("--title", default="SyrvisCore — service metrics", help="Overview dashboard title")
 @click.option(
-    "--uid", default="syrvis-overview", help="Dashboard UID (stable across regenerations)"
+    "--uid", default="syrvis-overview", help="Overview dashboard UID (stable across regenerations)"
 )
 @handle_errors
-def dashboard_generate(as_json, output, datasource, title, uid):
+def dashboard_generate(as_json, emit_all, output, datasource, title, uid):
     """Emit an auto-generated Grafana dashboard for this instance's services.
 
-    A top-level overview row scoped to the SyrvisCore-managed containers, then
-    one row per service (core tier + every Layer 2 service) keyed by its
-    container_name — the standard measurements (running, health, restarts,
-    uptime) plus any domain panels a service declares in its manifest
-    ``dashboard:`` block. A deployment repo drops this into Grafana
-    provisioning (design/16). Deterministic: it projects the DECLARED set, so
-    it runs without touching the Docker daemon.
+    Default: a top-level overview (an aggregate row scoped to the SyrvisCore
+    containers, then one row per service keyed by container_name). With --all:
+    the overview PLUS a per-service DEEP-DIVE dashboard each — a header (what the
+    service is + links, from its manifest description/homepage + `dashboard:`
+    about/links), the standard measurements, and the service's own declared
+    metric panels. A deployment repo drops these into Grafana provisioning
+    (design/16). Deterministic: projects the DECLARED set, no Docker daemon.
     """
     from pathlib import Path
 
@@ -2020,9 +2030,27 @@ def dashboard_generate(as_json, output, datasource, title, uid):
         pass
 
     collector = dashboard_mod.Collector(datasource_uid=datasource)
+
+    if emit_all:
+        models = dashboard_mod.generate_all(collector=collector)
+        if output:
+            out_dir = Path(output)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for m in models:
+                (out_dir / "{}.json".format(m["uid"])).write_text(dashboard_mod.to_json(m) + "\n")
+            click.echo("Wrote {} dashboard(s) to {}/".format(len(models), out_dir))
+            return
+        if as_json:
+            click.echo(jsonlib.dumps({"dashboards": models}, indent=2, default=str))
+            return
+        click.echo("{} dashboard(s):".format(len(models)))
+        for m in models:
+            click.echo("  - {:<26} {} panels".format(m["uid"], len(m["panels"])))
+        click.echo("\nRe-run with --json (stdout) or -o <dir> to emit the Grafana JSON files.")
+        return
+
     model = dashboard_mod.generate(collector=collector, title=title, uid=uid)
     text = dashboard_mod.to_json(model)
-
     if output:
         Path(output).write_text(text + "\n")
         click.echo("Wrote {} ({} panels) to {}".format(model["uid"], len(model["panels"]), output))
@@ -2030,13 +2058,12 @@ def dashboard_generate(as_json, output, datasource, title, uid):
     if as_json:
         click.echo(text)
         return
-
     rows = [p for p in model["panels"] if p["type"] == "row"]
     click.echo("Dashboard '{}' (uid {})".format(model["title"], model["uid"]))
     click.echo("  {} panels across {} rows".format(len(model["panels"]), len(rows)))
     for r in rows:
         click.echo("    - {}".format(r["title"]))
-    click.echo("\nRe-run with --json (stdout) or -o <file> to emit the Grafana JSON.")
+    click.echo("\nRe-run with --all (per-service), --json (stdout), or -o <path>.")
 
 
 @cli.group()

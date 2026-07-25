@@ -211,3 +211,81 @@ def test_dashboard_block_enforces_panel_cap():
     panels = [{"title": "t%d" % i, "expr": "x"} for i in range(13)]
     with pytest.raises(ServiceValidationError):
         ServiceDefinition.from_dict(_svc(dashboard={"panels": panels}))
+
+
+def test_dashboard_block_about_and_links():
+    sd = ServiceDefinition.from_dict(
+        _svc(
+            dashboard={
+                "about": "The family photo library.\nSupervised by Immich.",
+                "links": [{"title": "docs", "url": "https://immich.app/docs"}],
+                "panels": [],
+            }
+        )
+    )
+    assert sd.dashboard["about"].startswith("The family")
+    assert sd.dashboard["links"][0]["url"] == "https://immich.app/docs"
+
+
+def test_dashboard_links_reject_non_http_and_bad_shape():
+    with pytest.raises(ServiceValidationError):
+        ServiceDefinition.from_dict(
+            _svc(dashboard={"links": [{"title": "x", "url": "javascript:alert(1)"}]})
+        )
+    with pytest.raises(ServiceValidationError):
+        ServiceDefinition.from_dict(
+            _svc(dashboard={"links": [{"title": "x", "url": "https://a", "bad": 1}]})
+        )
+
+
+# ---------------------------------------------------------------------------
+# Per-service deep-dive dashboards (build_service_dashboard / build_all)
+# ---------------------------------------------------------------------------
+def test_build_all_is_overview_plus_one_per_service():
+    svcs = [
+        d.DashService("traefik", "traefik", kind="core"),
+        d.DashService("immich", "immich_server", kind="service"),
+    ]
+    models = d.build_all(svcs)
+    uids = [m["uid"] for m in models]
+    assert uids == ["syrvis-overview", "syrvis-traefik", "syrvis-immich"]
+    for m in models:
+        json.loads(d.to_json(m))  # all serializable
+
+
+def test_service_dashboard_header_carries_description_and_links():
+    svc = d.DashService(
+        "immich",
+        "immich_server",
+        kind="service",
+        description="Self-hosted photos.",
+        homepage="https://immich.app",
+        about="The family library.",
+        links=[{"title": "docs", "url": "https://immich.app/docs"}],
+    )
+    m = d.build_service_dashboard(svc)
+    text = next(p for p in m["panels"] if p["type"] == "text")["options"]["content"]
+    assert "Self-hosted photos." in text
+    assert "The family library." in text
+    assert "immich.app/docs" in text and "https://immich.app" in text
+
+
+def test_service_dashboard_substitutes_container_token():
+    svc = d.DashService(
+        "immich",
+        "immich_server",
+        panels=[
+            {"title": "Jobs", "expr": 'immich_jobs{name="${container}"}', "kind": "timeseries"}
+        ],
+    )
+    m = d.build_service_dashboard(svc)
+    exprs = [t["expr"] for p in m["panels"] for t in p.get("targets", [])]
+    assert 'immich_jobs{name="immich_server"}' in exprs
+    # standard measurements are keyed to this container too
+    assert any('docker_container_running{name="immich_server"}' in e for e in exprs)
+
+
+def test_service_dashboard_uid_is_grafana_safe():
+    m = d.build_service_dashboard(d.DashService("Weird Name!!", "wn"))
+    assert m["uid"].startswith("syrvis-")
+    assert all(c.isalnum() or c in "-_" for c in m["uid"])

@@ -59,6 +59,39 @@ class DashService:
     tier: str = ""
     enabled: bool = True
     panels: List[Dict[str, Any]] = field(default_factory=list)  # custom dashboard: panels
+    # For the per-service deep-dive header (the "what is this + links" text panel).
+    description: str = ""  # one-liner (manifest description / built-in for core)
+    homepage: str = ""  # the service's homepage/repo
+    about: str = ""  # optional longer markdown blurb (dashboard.about)
+    links: List[Dict[str, str]] = field(default_factory=list)  # dashboard.links [{title,url}]
+
+
+# Built-in blurbs + homepages for the core tier (which has no manifest to read).
+_CORE_ABOUT = {
+    "traefik": (
+        "Reverse proxy + TLS terminator — the routing substrate every "
+        "service is reached through.",
+        "https://traefik.io",
+    ),
+    "portainer": (
+        "Container-management UI — the fallback console for the Docker " "host.",
+        "https://www.portainer.io",
+    ),
+    "cloudflared": (
+        "Cloudflare Tunnel daemon — the outbound-only connector that "
+        "publishes `tunnel`-exposed services without open ports.",
+        "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/",
+    ),
+    "dashboard": (
+        "The SyrvisCore web dashboard — a thin adapter over the same "
+        "deterministic core the CLI uses.",
+        "https://github.com/kevinteg/SyrvisCore",
+    ),
+    "cloudflare_ddns": (
+        "Keeps a DNS record pointed at the home public IP (the " "pre-tunnel remote-access path).",
+        "https://github.com/favonia/cloudflare-ddns",
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +114,7 @@ def collect_services(env_path: Optional[str] = None) -> List[DashService]:
         for name in stack_mod.ALL_SERVICES:
             if not stack.is_enabled(name):
                 continue
+            about, homepage = _CORE_ABOUT.get(name, ("", ""))
             services.append(
                 DashService(
                     name=name,
@@ -88,6 +122,8 @@ def collect_services(env_path: Optional[str] = None) -> List[DashService]:
                     kind="core",
                     critical=name in stack_mod.PRIMORDIAL,
                     enabled=True,
+                    description=about,
+                    homepage=homepage,
                 )
             )
     except Exception:  # noqa: BLE001 - SYRVIS_HOME unresolved, bad file, etc.
@@ -113,9 +149,9 @@ def collect_services(env_path: Optional[str] = None) -> List[DashService]:
                     sd = load_service_definition(manifest)
                 except Exception:  # noqa: BLE001 - a broken manifest just drops out
                     continue
-                panels = []
-                if sd.dashboard and isinstance(sd.dashboard.get("panels"), list):
-                    panels = sd.dashboard["panels"]
+                dash = sd.dashboard or {}
+                panels = dash.get("panels") if isinstance(dash.get("panels"), list) else []
+                links = dash.get("links") if isinstance(dash.get("links"), list) else []
                 services.append(
                     DashService(
                         name=sd.name,
@@ -125,6 +161,10 @@ def collect_services(env_path: Optional[str] = None) -> List[DashService]:
                         tier=sd.tier or "",
                         enabled=bool(sd.enabled),
                         panels=panels,
+                        description=sd.description or "",
+                        homepage=sd.homepage or "",
+                        about=str(dash.get("about") or ""),
+                        links=links,
                     )
                 )
     except Exception:  # noqa: BLE001
@@ -509,6 +549,11 @@ def build_dashboard(
             # leave the cursor below the last (possibly partial) band
             lay.y = band_y + (8 if x > 0 else 0)
 
+    return _envelope(uid, title, lay.panels)
+
+
+def _envelope(uid: str, title: str, panels: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Wrap a panel list in the standard Grafana dashboard object."""
     return {
         "uid": uid,
         "title": title,
@@ -521,11 +566,167 @@ def build_dashboard(
         "timezone": "browser",
         "templating": {"list": []},
         "annotations": {"list": []},
-        "panels": lay.panels,
+        "panels": panels,
         # Provenance marker so a human (and a drift check) can tell this file is
         # machine-generated and should be regenerated, not hand-edited.
         "__syrviscore": {"generated": True, "schema": DASHBOARD_SCHEMA_VERSION},
     }
+
+
+def _uid_for(name: str, prefix: str = "syrvis") -> str:
+    """A Grafana-safe uid (a-zA-Z0-9-_, <=40 chars) for a service dashboard."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in name.lower())
+    return "{}-{}".format(prefix, safe)[:40]
+
+
+def _text_panel(lay: _Layout, markdown: str, height: int) -> None:
+    lay.add(
+        {
+            "id": lay.next_id(),
+            "type": "text",
+            "title": "",
+            "gridPos": {"h": height, "w": _GRID_W, "x": 0, "y": lay.y},
+            "options": {"mode": "markdown", "content": markdown},
+        }
+    )
+    lay.y += height
+
+
+def _header_markdown(svc: DashService) -> str:
+    """The 'what is this + links' blurb for a service dashboard's top panel."""
+    lines = ["## {}".format(svc.name)]
+    tags = []
+    if svc.kind == "core":
+        tags.append("core")
+    if svc.critical:
+        tags.append("critical")
+    if svc.tier:
+        tags.append(svc.tier)
+    if tags:
+        lines.append("_{}_ · container `{}`".format(", ".join(tags), svc.container_name))
+    else:
+        lines.append("container `{}`".format(svc.container_name))
+    if svc.description:
+        lines.append("")
+        lines.append(svc.description)
+    if svc.about:
+        lines.append("")
+        lines.append(svc.about)
+    link_md = []
+    if svc.homepage:
+        link_md.append("[homepage]({})".format(svc.homepage))
+    for link in svc.links:
+        link_md.append("[{}]({})".format(link.get("title", "link"), link.get("url", "")))
+    if link_md:
+        lines.append("")
+        lines.append("**Links:** " + " · ".join(link_md))
+    return "\n".join(lines)
+
+
+def build_service_dashboard(
+    svc: DashService, collector: Optional[Collector] = None
+) -> Dict[str, Any]:
+    """A per-service deep-dive: a header (what it is + links), the standard
+    container measurements, then the service's own declared panels."""
+    col = collector or Collector()
+    lay = _Layout()
+    cn = svc.container_name
+
+    # Header text panel.
+    md = _header_markdown(svc)
+    _text_panel(lay, md, height=max(3, min(8, md.count("\n") + 2)))
+
+    # Standard container measurements (this container only).
+    _row(lay, "Health")
+    _stat(
+        lay,
+        col,
+        "Running",
+        "{}{}".format(col.running, _selector(col, cn)),
+        x=0,
+        w=6,
+        mappings=[_UPDOWN_MAP],
+        thresholds=_UPDOWN_THRESH,
+        color_mode="background",
+    )
+    _stat(
+        lay,
+        col,
+        "Unhealthy",
+        "sum({}{})".format(
+            col.health, _selector(col, cn, 'status="{}"'.format(col.unhealthy_status))
+        ),
+        x=6,
+        w=6,
+        thresholds=_ALARM_THRESH,
+        color_mode="background",
+    )
+    _stat(
+        lay,
+        col,
+        "Restarts (1h)",
+        "increase({}{}[1h])".format(col.restarts, _selector(col, cn)),
+        x=12,
+        w=6,
+        thresholds=_RESTART_THRESH,
+        color_mode="background",
+    )
+    _stat(
+        lay,
+        col,
+        "Uptime",
+        "time() - {}{}".format(col.started, _selector(col, cn)),
+        x=18,
+        w=6,
+        unit="s",
+        color_mode="value",
+    )
+    lay.y += 4
+    _timeseries(
+        lay,
+        col,
+        "Restarts over time",
+        "increase({}{}[1h])".format(col.restarts, _selector(col, cn)),
+        x=0,
+        w=24,
+        y=lay.y,
+    )
+    lay.y += 8
+
+    # Service-specific panels (domain metrics from the manifest dashboard: block).
+    if svc.panels:
+        _row(lay, "{} metrics".format(svc.name))
+        x = 0
+        band_y = lay.y
+        for panel in svc.panels:
+            expr = str(panel.get("expr", "")).replace("${container}", cn)
+            ptitle = str(panel.get("title", "panel"))
+            kind = panel.get("kind", "timeseries")
+            unit = panel.get("unit", "short")
+            w = 12
+            if kind == "stat":
+                _stat(lay, col, ptitle, expr, x=x, w=w, y=band_y, unit=unit)
+            elif kind == "table":
+                _table(lay, col, ptitle, expr, x=x, w=w, y=band_y)
+            else:
+                _timeseries(lay, col, ptitle, expr, x=x, w=w, y=band_y, unit=unit)
+            x += w
+            if x >= _GRID_W:
+                x = 0
+                band_y += 8
+        lay.y = band_y + (8 if x > 0 else 0)
+
+    return _envelope(_uid_for(svc.name), "SyrvisCore — {}".format(svc.name), lay.panels)
+
+
+def build_all(
+    services: List[DashService], collector: Optional[Collector] = None
+) -> List[Dict[str, Any]]:
+    """The overview dashboard plus one deep-dive per service (in that order)."""
+    col = collector or Collector()
+    out = [build_dashboard(services, col)]
+    out.extend(build_service_dashboard(svc, col) for svc in services)
+    return out
 
 
 def generate(
@@ -534,8 +735,15 @@ def generate(
     title: str = "SyrvisCore — service metrics",
     uid: str = "syrvis-overview",
 ) -> Dict[str, Any]:
-    """Collect the declared services and build the dashboard model."""
+    """Collect the declared services and build the overview dashboard model."""
     return build_dashboard(collect_services(env_path), collector, title=title, uid=uid)
+
+
+def generate_all(
+    env_path: Optional[str] = None, collector: Optional[Collector] = None
+) -> List[Dict[str, Any]]:
+    """Collect the declared services and build the overview + per-service models."""
+    return build_all(collect_services(env_path), collector)
 
 
 def to_json(model: Dict[str, Any]) -> str:

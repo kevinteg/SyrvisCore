@@ -108,13 +108,19 @@ MAX_TASKS = 16
 # strings only ever render into a dashboard JSON, never executed — so the checks
 # here are for well-formedness (bounded counts/lengths, no control chars), not
 # safety. '$' IS allowed (the ${container} substitution token).
-ALLOWED_DASHBOARD_KEYS = frozenset({"panels"})
+ALLOWED_DASHBOARD_KEYS = frozenset({"panels", "about", "links"})
 ALLOWED_PANEL_KEYS = frozenset({"title", "expr", "kind", "unit"})
 ALLOWED_PANEL_KINDS = frozenset({"stat", "timeseries", "table", "gauge"})
+ALLOWED_LINK_KEYS = frozenset({"title", "url"})
 MAX_DASHBOARD_PANELS = 12
 MAX_PANEL_TITLE = 120
 MAX_PANEL_EXPR = 512
+MAX_ABOUT = 1000
+MAX_LINKS = 8
+MAX_LINK_TITLE = 80
+MAX_LINK_URL = 300
 UNIT_RE = re.compile(r"^[A-Za-z0-9/%_.-]{0,32}$")
+_LINK_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 ALLOWED_TIERS = frozenset({"", "infra"})
 
@@ -439,7 +445,63 @@ def _validate_dashboard(data: Any) -> Dict[str, Any]:
         if unit:
             out["unit"] = unit
         out_panels.append(out)
-    return {"panels": out_panels}
+
+    result: Dict[str, Any] = {"panels": out_panels}
+
+    # about: a markdown blurb for the per-service dashboard's header text panel.
+    # Newlines/tabs are fine (it's markdown); other control chars are not.
+    about = data.get("about")
+    if about is not None:
+        if not isinstance(about, str) or len(about) > MAX_ABOUT:
+            raise ServiceValidationError(
+                "dashboard.about must be a string (<= {} chars)".format(MAX_ABOUT)
+            )
+        if any(ord(ch) < 0x20 and ch not in "\n\t" or ord(ch) == 0x7F for ch in about):
+            raise ServiceValidationError("dashboard.about must not contain control characters")
+        result["about"] = about
+
+    # links: helpful links for the dashboard header ([{title, url}]). url must be
+    # http(s) — these render as markdown links a human clicks.
+    links = data.get("links")
+    if links is not None:
+        if not isinstance(links, list) or len(links) > MAX_LINKS:
+            raise ServiceValidationError(
+                "dashboard.links must be a list of <= {} {{title, url}} entries".format(MAX_LINKS)
+            )
+        out_links: List[Dict[str, str]] = []
+        for i, link in enumerate(links):
+            if not isinstance(link, dict):
+                raise ServiceValidationError("dashboard.links[{}] must be a mapping".format(i))
+            unknown = set(link.keys()) - ALLOWED_LINK_KEYS
+            if unknown:
+                raise ServiceValidationError(
+                    "dashboard.links[{}]: unknown keys {} (allowed: title, url)".format(
+                        i, ", ".join(sorted(unknown))
+                    )
+                )
+            ltitle = link.get("title")
+            lurl = link.get("url")
+            if not isinstance(ltitle, str) or not ltitle.strip() or len(ltitle) > MAX_LINK_TITLE:
+                raise ServiceValidationError(
+                    "dashboard.links[{}].title must be a non-empty string (<= {} chars)".format(
+                        i, MAX_LINK_TITLE
+                    )
+                )
+            if (
+                not isinstance(lurl, str)
+                or len(lurl) > MAX_LINK_URL
+                or not _LINK_URL_RE.match(lurl)
+                or not _no_control_chars(lurl)
+            ):
+                raise ServiceValidationError(
+                    "dashboard.links[{}].url must be an http(s) URL (<= {} chars)".format(
+                        i, MAX_LINK_URL
+                    )
+                )
+            out_links.append({"title": ltitle, "url": lurl})
+        result["links"] = out_links
+
+    return result
 
 
 def _validate_volume(vol: str, tier: str = "") -> str:

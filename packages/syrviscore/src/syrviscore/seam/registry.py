@@ -101,6 +101,15 @@ COMMANDS: List[Command] = [
         read_only=True,
         flags=["--json"],
     ),
+    # --all emits the overview + one deep-dive dashboard per service (the estate
+    # provisions each into Grafana). Fixed flag order so the shim matches exactly.
+    Command(
+        "dashboard_generate_all",
+        "syrvis",
+        ["dashboard", "generate"],
+        read_only=True,
+        flags=["--all", "--json"],
+    ),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
     # images: per-image provenance + freshness (trust registry + cached network

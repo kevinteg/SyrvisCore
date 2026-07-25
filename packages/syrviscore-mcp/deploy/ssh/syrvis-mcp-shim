@@ -62,6 +62,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "dashboard" ] && [ "${3}" = "generate" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 5 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "dashboard" ] && [ "${3}" = "generate" ] && [ "${4}" = "--all" ] && [ "${5}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "service" ] && [ "${3}" = "catalog" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi

@@ -22,3 +22,21 @@ healthcheck:
   interval: 30s
   timeout: 5s
   retries: 5
+
+# Presentation-only: enriches this service's auto-generated deep-dive dashboard
+# (`syrvis dashboard generate --all`) with a header blurb + links, and domain
+# panels beyond the standard container measurements. The panel exprs need VM's
+# own /metrics scraped (add a `victoria-metrics` scrape job); they render "No
+# data" otherwise. `${container}` expands to this service's container_name.
+dashboard:
+  about: >-
+    The single-node time-series database every metric lands in. vmagent
+    remote-writes here; vmalert + Grafana query it at :8428.
+  links:
+    - { title: "Docs", url: "https://docs.victoriametrics.com/" }
+    - { title: "vmui", url: "https://docs.victoriametrics.com/#vmui" }
+  panels:
+    - { title: "Rows inserted/s", expr: "rate(vm_rows_inserted_total[5m])", kind: timeseries }
+    - { title: "Active time series", expr: "vm_cache_entries{type=\"storage/hour_metric_ids\"}", kind: stat }
+    - { title: "Disk used", expr: "vm_data_size_bytes", kind: stat, unit: bytes }
+    - { title: "Free disk", expr: "vm_free_disk_space_bytes", kind: stat, unit: bytes }
