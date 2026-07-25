@@ -254,6 +254,46 @@ COMMANDS: List[Command] = [
         expect_json=False,
         positional=Slot("name", KIND_NAME),
     ),
+    # VM workloads (config/vms.d/*.yaml → Synology VMM via synowebapi, which is
+    # root-only — so even the read verbs are sudo, like export/schedule_list). The
+    # operator picks the declaration NAME (safe charset, gated to vms.d/ by the
+    # CLI); the VMM guest_name (a display name, may contain spaces) stays internal.
+    # ADOPT is deliberately OFF the seam (a one-time root/GUI setup step, like
+    # `setup`/`restore`), and VM create/delete never touch the seam at all.
+    Command("vm_list", "syrvis", ["vm", "list"], sudo=True, read_only=True, flags=["--json"]),
+    Command(
+        "vm_status",
+        "syrvis",
+        ["vm", "status"],
+        sudo=True,
+        read_only=True,
+        flags=["--json"],
+        positional=Slot("name", KIND_NAME),
+    ),
+    Command(
+        "vm_start",
+        "syrvis",
+        ["vm", "start"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
+    Command(
+        "vm_stop",
+        "syrvis",
+        ["vm", "stop"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
+    Command(
+        "vm_restart",
+        "syrvis",
+        ["vm", "restart"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
     Command(
         "service_add",
         "syrvis",

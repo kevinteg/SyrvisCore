@@ -25,6 +25,11 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service stop -- *, \
     /volume1/syrviscore/bin/syrvis service task --task * -- *, \
     /volume1/syrviscore/bin/syrvis service update -- *, \
+    /volume1/syrviscore/bin/syrvis vm list --json, \
+    /volume1/syrviscore/bin/syrvis vm status --json -- *, \
+    /volume1/syrviscore/bin/syrvis vm start -- *, \
+    /volume1/syrviscore/bin/syrvis vm stop -- *, \
+    /volume1/syrviscore/bin/syrvis vm restart -- *, \
     /volume1/syrviscore/bin/syrvis service add -- *, \
     /volume1/syrviscore/bin/syrvis service set-image --image * -- *, \
     /volume1/syrviscore/bin/syrvis service run --image * --subdomain * --exposure * --port * -- *, \

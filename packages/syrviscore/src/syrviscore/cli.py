@@ -2039,6 +2039,114 @@ def dashboard_generate(as_json, output, datasource, title, uid):
     click.echo("\nRe-run with --json (stdout) or -o <file> to emit the Grafana JSON.")
 
 
+@cli.group()
+def vm():
+    """Manage VMs as SyrvisCore workloads (config/vms.d/*.yaml; Synology VMM).
+
+    A VM is just another declared workload. SyrvisCore owns its lifecycle
+    (start/stop/status/adopt) via DSM's synowebapi — it never creates or deletes
+    a VM (import it once in VMM, then `vm adopt`). VMM ops need root, so run these
+    over the operator seam or with sudo. See docs/vms-workload-design.md.
+    """
+    pass
+
+
+def _vm_home():
+    try:
+        return get_syrvis_home()
+    except SyrvisHomeError:
+        return None
+
+
+@vm.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def vm_list(as_json):
+    """List declared VMs (vms.d) with their live power state."""
+    from syrviscore import vms as vms_mod
+
+    rows = vms_mod.VmManager(home=_vm_home()).list()
+    if as_json:
+        click.echo(jsonlib.dumps({"vms": rows}, indent=2, default=str))
+        return
+    if not rows:
+        click.echo("No VMs declared (config/vms.d/).")
+        return
+    click.echo("Declared VMs:")
+    for r in rows:
+        tags = []
+        if r["critical"]:
+            tags.append("critical")
+        if not r["enabled"]:
+            tags.append("disabled")
+        suffix = "  [{}]".format(", ".join(tags)) if tags else ""
+        click.echo("  {:<20} {:<10} {}{}".format(r["name"], r["power"], r["guest_name"], suffix))
+
+
+@vm.command("status")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@handle_errors
+def vm_status(name, as_json):
+    """Show one declared VM's live power state."""
+    import dataclasses
+
+    from syrviscore import vms as vms_mod
+
+    st = vms_mod.VmManager(home=_vm_home()).status(name)
+    if as_json:
+        click.echo(jsonlib.dumps(dataclasses.asdict(st), indent=2, default=str))
+        return
+    click.echo("{} ({}): {}".format(st.name, st.guest_name, st.power))
+    if st.error:
+        click.echo("  {}".format(st.error))
+
+
+@vm.command("start")
+@click.argument("name")
+@handle_errors
+def vm_start(name):
+    """Power on a declared VM."""
+    from syrviscore import vms as vms_mod
+
+    click.echo(vms_mod.VmManager(home=_vm_home()).start(name))
+
+
+@vm.command("stop")
+@click.argument("name")
+@click.option("--hard", is_flag=True, help="Force power-off instead of a graceful ACPI shutdown")
+@handle_errors
+def vm_stop(name, hard):
+    """Stop a declared VM (graceful ACPI shutdown by default)."""
+    from syrviscore import vms as vms_mod
+
+    click.echo(vms_mod.VmManager(home=_vm_home()).stop(name, hard=hard))
+
+
+@vm.command("restart")
+@click.argument("name")
+@handle_errors
+def vm_restart(name):
+    """Restart a declared VM (shutdown then power on)."""
+    from syrviscore import vms as vms_mod
+
+    click.echo(vms_mod.VmManager(home=_vm_home()).restart(name))
+
+
+@vm.command("adopt")
+@click.argument("guest_name")
+@click.option(
+    "--name", "decl_name", default=None, help="Declaration name (default: a slug of the guest)"
+)
+@handle_errors
+def vm_adopt(guest_name, decl_name):
+    """Write a vms.d declaration from an EXISTING VMM guest (never creates a VM)."""
+    from syrviscore import vms as vms_mod
+
+    path = vms_mod.VmManager(home=_vm_home()).adopt(guest_name, name=decl_name)
+    click.echo("Wrote {} — review it, set `critical`/`autostart`, then `vm list`.".format(path))
+
+
 # =============================================================================
 # Core command group (kept for backwards compatibility)
 # =============================================================================
