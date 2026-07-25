@@ -10,10 +10,14 @@ on:
   workflow_dispatch: {}
   push:
     branches: [main]
+    # Rebuild when the dashboard changes OR the service version bumps (a new tag).
+    # Deliberately NOT the whole packages/syrviscore/** tree nor this file: the
+    # digest-pin commit edits compose.py, and attestations make every build's
+    # index digest differ, so a broad trigger would churn the pin in a loop.
+    # (Use workflow_dispatch for an ad-hoc rebuild after other syrviscore edits.)
     paths:
       - "packages/syrviscore-dashboard/**"
-      - "packages/syrviscore/**"
-      - ".github/workflows/dashboard-image.yml"
+      - "packages/syrviscore/src/syrviscore/__version__.py"
 
 permissions:
   contents: read
