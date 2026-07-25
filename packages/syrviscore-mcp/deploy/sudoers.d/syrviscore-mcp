@@ -7,6 +7,7 @@ Defaults:syrvis-operator  !requiretty, env_reset, secure_path="/usr/bin:/bin:/us
 
 syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis export --json, \
+    /volume1/syrviscore/bin/syrvis updates --json, \
     /volume1/syrviscore/bin/syrvis schedule list --json, \
     /volume1/syrviscore/bin/syrvis reconcile --dry-run --json, \
     /volume1/syrviscore/bin/syrvis reconcile --json -y, \

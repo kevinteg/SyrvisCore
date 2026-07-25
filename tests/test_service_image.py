@@ -158,7 +158,11 @@ class TestApplyOverrides:
 
 
 class TestSetImage:
-    def _installed(self, home, monkeypatch, image="ghcr.io/acme/app:1.0.0"):
+    def _installed(self, home, monkeypatch, image="ghcr.io/acme/app:1.0.0", pull_ok=True):
+        import subprocess
+
+        from syrviscore import service_manager
+
         sm = _manager(home)
         ok, msg = sm.add_image("app", image, port=8080, start=False)
         assert ok, msg
@@ -166,6 +170,12 @@ class TestSetImage:
         monkeypatch.setattr(sm, "_compose", lambda *a, **k: (True, ""))
         monkeypatch.setattr(sm, "_stop_service", lambda *a, **k: (True, ""))
         monkeypatch.setattr(sm, "_start_service", lambda *a, **k: (True, "started"))
+        rc = 0 if pull_ok else 1
+
+        def fake_run(argv, **kw):
+            return subprocess.CompletedProcess(argv, rc, stdout="", stderr="no such image")
+
+        monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
         return sm
 
     def test_repins_manifest_and_declaration(self, home, monkeypatch):
@@ -197,6 +207,21 @@ class TestSetImage:
         sm = _manager(home)
         ok, msg = sm.set_image("nope", "ghcr.io/acme/app:2.0.0")
         assert not ok and "not installed" in msg
+
+    def test_bad_pull_leaves_service_unchanged(self, home, monkeypatch):
+        """A valid-format but unpullable image must NOT tear down the running
+        service — pull happens first and aborts before any manifest swap."""
+        sm = self._installed(home, monkeypatch, pull_ok=False)
+        stopped = {"n": 0}
+        monkeypatch.setattr(
+            sm, "_stop_service", lambda *a, **k: (stopped.update(n=stopped["n"] + 1), (True, ""))[1]
+        )
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:9.9.9")
+        assert not ok and "could not pull" in msg and "left unchanged" in msg
+        assert stopped["n"] == 0  # the running container was never stopped
+        # manifest still on the OLD image
+        manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
+        assert manifest["image"] == "ghcr.io/acme/app:1.0.0"
 
     def test_git_service_refused(self, home, monkeypatch):
         sm = self._installed(home, monkeypatch)

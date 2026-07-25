@@ -458,3 +458,43 @@ class TestExport:
         assert doc["apiVersion"] == "syrvis-instance/v1"
         assert doc["env"]["X_TOKEN"] == "****"
         assert "supersecret" not in r.output
+
+
+class TestExportRedaction:
+    def test_declaration_inline_env_secret_redacted(self, tmp_path):
+        from syrviscore.instance_bundle import export_instance
+
+        d = tmp_path / "config" / "services.d"
+        d.mkdir(parents=True)
+        (d / "web.yaml").write_text(
+            yaml.safe_dump(
+                decl(name="web", environment=["LOG_LEVEL=info", "API_TOKEN=supersecret"])
+            )
+        )
+        bundle = export_instance(tmp_path)
+        env = bundle["declarations"]["web"]["environment"]
+        assert "LOG_LEVEL=info" in env  # non-secret kept
+        assert "API_TOKEN=****" in env  # secret value masked
+        assert "supersecret" not in json.dumps(bundle)
+
+    def test_dns_env_credential_var_redacted(self, tmp_path):
+        """A DNS-01 provider credential var (named in TRAEFIK_ACME_DNS_ENV) is
+        redacted even though its name lacks a TOKEN/SECRET/KEY marker."""
+        from syrviscore.instance_bundle import export_instance
+
+        (tmp_path / "config").mkdir(parents=True)
+        (tmp_path / "config" / ".env").write_text(
+            "DOMAIN=example.com\nTRAEFIK_ACME_DNS_ENV=DESEC_AUTH\nDESEC_AUTH=leakme\n"
+        )
+        bundle = export_instance(tmp_path)
+        assert bundle["env"]["DESEC_AUTH"] == "****"
+        assert "leakme" not in json.dumps(bundle)
+
+    def test_unparseable_declaration_raises(self, tmp_path):
+        from syrviscore.instance_bundle import InstanceBundleError, export_instance
+
+        d = tmp_path / "config" / "services.d"
+        d.mkdir(parents=True)
+        (d / "broken.yaml").write_text("{not: valid: yaml:")
+        with pytest.raises(InstanceBundleError, match="cannot export declaration 'broken'"):
+            export_instance(tmp_path)

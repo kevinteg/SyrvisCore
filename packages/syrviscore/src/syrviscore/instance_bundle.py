@@ -465,8 +465,14 @@ def export_instance(home: Path, reveal_secrets: bool = False) -> Dict[str, Any]:
     env: Dict[str, str] = {}
     env_path = _env_path(home)
     if env_path.exists():
-        for key, value in parse_env_file(env_path).items():
-            if not reveal_secrets and is_secret_key(key) and value:
+        raw_env = parse_env_file(env_path)
+        # Any var the operator forwards as a DNS-01 provider credential
+        # (TRAEFIK_ACME_DNS_ENV) is a secret even if its name lacks a marker.
+        extra_secret = {
+            n.strip() for n in raw_env.get("TRAEFIK_ACME_DNS_ENV", "").split(",") if n.strip()
+        }
+        for key, value in raw_env.items():
+            if not reveal_secrets and value and (is_secret_key(key) or key in extra_secret):
                 env[key] = _REDACTED
             else:
                 env[key] = value
@@ -486,10 +492,17 @@ def export_instance(home: Path, reveal_secrets: bool = False) -> Dict[str, Any]:
         for path in sorted(directory.glob("*.yaml")):
             try:
                 data = yaml.safe_load(path.read_text())
-                if isinstance(data, dict):
-                    declarations[path.stem] = data
-            except Exception:  # noqa: BLE001 - a broken declaration: skip it
-                continue
+            except Exception as e:  # noqa: BLE001
+                # Fail loud: a snapshot that silently omits a declaration would,
+                # on a later restore (declarations are a replace set), DELETE
+                # that service's intent — worse than an error.
+                raise InstanceBundleError(
+                    "cannot export declaration {!r}: {} (fix or remove it first)".format(
+                        path.stem, e
+                    )
+                )
+            if isinstance(data, dict):
+                declarations[path.stem] = _redact_declaration(data, reveal_secrets)
 
     bundle: Dict[str, Any] = {"apiVersion": INSTANCE_API_VERSION}
     if env:
@@ -501,6 +514,32 @@ def export_instance(home: Path, reveal_secrets: bool = False) -> Dict[str, Any]:
 
 
 _REDACTED = "****"
+
+
+def _redact_declaration(data: Dict[str, Any], reveal_secrets: bool) -> Dict[str, Any]:
+    """Redact secret VALUES in a declaration's inline ``environment`` list.
+
+    A declaration may carry ``environment: ["KEY=VALUE"]`` where KEY is a secret
+    (the codebase writes such manifests 0600). export's default output is meant
+    to be safe to commit/diff and it transits the operator seam, so mask those
+    values exactly as the top-level env section is masked.
+    """
+    if reveal_secrets or "environment" not in data:
+        return data
+    env_list = data.get("environment")
+    if not isinstance(env_list, list):
+        return data
+    redacted = []
+    for entry in env_list:
+        if isinstance(entry, str) and "=" in entry:
+            key, _, value = entry.partition("=")
+            if value and is_secret_key(key):
+                redacted.append("{}={}".format(key, _REDACTED))
+                continue
+        redacted.append(entry)
+    out = dict(data)
+    out["environment"] = redacted
+    return out
 
 
 # --- shared ------------------------------------------------------------------

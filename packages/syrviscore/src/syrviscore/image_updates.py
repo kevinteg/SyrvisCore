@@ -19,7 +19,9 @@ in the dashboard container).
 """
 
 import json
+import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -107,9 +109,13 @@ def _parse_tag(tag: str) -> Optional[Tuple[bool, Tuple[int, ...], str]]:
 def find_newer_tags(current: str, candidates: List[str]) -> List[str]:
     """Tags in ``candidates`` that are a strictly-newer version of the SAME flavor.
 
-    Same flavor = same v-prefix convention AND same ``-suffix`` (so a plain
-    ``2.33.6`` never jumps to ``2.34.0-rc1`` or ``2.34.0-alpine``, and an
-    ``-alpine`` pin only advances within ``-alpine``). Sorted oldest→newest.
+    Same flavor = same v-prefix convention, same ``-suffix``, AND the same number
+    of numeric components. The component-count match is what stops a semver pin
+    from cross-matching an unrelated tag scheme: a ``2.5`` pin never "updates" to
+    an 8-digit CalVer ``20240101`` (1 component vs 2), and a rolling ``16`` pin
+    never jumps to ``16.2`` (1 vs 2) — different granularities float independently.
+    An ``-alpine`` pin only advances within ``-alpine``, a plain pin never jumps
+    to ``-rc1``. Sorted oldest→newest.
     """
     cur = _parse_tag(current)
     if cur is None:
@@ -123,14 +129,11 @@ def find_newer_tags(current: str, candidates: List[str]) -> List[str]:
         if p is None:
             continue
         v, nums, suffix = p
-        # Same flavor and strictly greater (pad shorter tuple with zeros).
-        if v != cur_v or suffix != cur_suffix:
+        # Same flavor (v-prefix, suffix, AND component count) and strictly greater.
+        if v != cur_v or suffix != cur_suffix or len(nums) != len(cur_nums):
             continue
-        width = max(len(nums), len(cur_nums))
-        a = nums + (0,) * (width - len(nums))
-        b = cur_nums + (0,) * (width - len(cur_nums))
-        if a > b:
-            newer.append((a, cand))
+        if nums > cur_nums:
+            newer.append((nums, cand))
     newer.sort()
     return [c for _, c in newer]
 
@@ -164,24 +167,25 @@ def _bearer_token(session, www_authenticate: str) -> Optional[str]:
     return data.get("token") or data.get("access_token")
 
 
-def list_tags(ref: ImageRef, session=None) -> List[str]:
+def list_tags(ref: ImageRef, session=None) -> Tuple[List[str], bool]:
     """All tags for ``ref.repository`` via the OCI Distribution tags/list API.
 
-    Handles the 401 bearer-token challenge (anonymous pull) and follows ``Link``
-    pagination up to a bounded number of pages. Raises ``_RegistryError`` on a
-    hard failure; callers turn that into a per-image ``error`` string.
+    Returns ``(tags, truncated)`` where ``truncated`` is True if the page budget
+    was exhausted before the registry ran out of pages. Handles the 401
+    bearer-token challenge (anonymous pull) and follows ``Link`` pagination.
+    Raises ``_RegistryError`` on a hard failure; callers turn that into a
+    per-image ``error`` string.
     """
     import requests
 
     session = session or requests.Session()
-    base = "https://{}/v2/{}/tags/list".format(ref.api_host, ref.repository)
-    url: Optional[str] = base
+    url: Optional[str] = "https://{}/v2/{}/tags/list".format(ref.api_host, ref.repository)
     params: Optional[dict] = {"n": _PAGE_SIZE}
     token: Optional[str] = None
     tags: List[str] = []
-    truncated = False
+    pages_fetched = 0
 
-    for page in range(_MAX_PAGES):
+    while url is not None and pages_fetched < _MAX_PAGES:
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = "Bearer {}".format(token)
@@ -191,11 +195,12 @@ def list_tags(ref: ImageRef, session=None) -> List[str]:
             raise _RegistryError("request failed: {}".format(e))
 
         if resp.status_code == 401 and token is None:
+            # The auth challenge is NOT a page: retry the same URL with a token
+            # without consuming the page budget.
             token = _bearer_token(session, resp.headers.get("WWW-Authenticate", ""))
             if not token:
                 raise _RegistryError("registry requires auth we can't satisfy")
-            continue  # retry this same page with the token
-
+            continue
         if resp.status_code == 404:
             raise _RegistryError("repository not found on {}".format(ref.registry))
         if resp.status_code != 200:
@@ -203,20 +208,20 @@ def list_tags(ref: ImageRef, session=None) -> List[str]:
 
         body = resp.json()
         tags.extend(body.get("tags") or [])
+        pages_fetched += 1
 
-        # RFC5988 Link: <...>; rel="next" — the OCI pagination signal.
-        link = resp.headers.get("Link", "")
-        nxt = _next_link(link)
+        # RFC5988 Link: <...>; rel="next" — the OCI pagination signal. The target
+        # may be relative (Docker Hub/GHCR) or absolute (some registries).
+        nxt = _next_link(resp.headers.get("Link", ""))
         if not nxt:
-            break
-        url, params = "https://{}{}".format(ref.api_host, nxt), None
-        if page == _MAX_PAGES - 1:
-            truncated = True
+            url = None
+        elif nxt.startswith(("http://", "https://")):
+            url, params = nxt, None
+        else:
+            url, params = "https://{}{}".format(ref.api_host, nxt), None
 
-    if truncated:
-        # Signalled via a sentinel the caller strips; keeps the return type simple.
-        tags.append("__truncated__")
-    return tags
+    truncated = url is not None  # loop stopped on the page budget, not on end-of-pages
+    return tags, truncated
 
 
 def _next_link(link_header: str) -> Optional[str]:
@@ -257,14 +262,12 @@ def check_image(image: str, session=None) -> Dict[str, Any]:
         result["error"] = "pinned by digest — no tag to compare"
         return result
     try:
-        tags = list_tags(ref, session=session)
+        tags, truncated = list_tags(ref, session=session)
     except _RegistryError as e:
         result["error"] = str(e)
         return result
 
-    truncated = "__truncated__" in tags
     if truncated:
-        tags = [t for t in tags if t != "__truncated__"]
         result["truncated"] = True
     newer = find_newer_tags(ref.tag, tags)
     result["newer"] = newer[-5:]  # a few newest, oldest→newest
@@ -385,9 +388,21 @@ def check_updates(
         "cached": False,
     }
     if cache_file:
+        # Atomic write (temp + rename): the CLI and the dashboard may both
+        # refresh the shared cache, and a torn write would corrupt it.
         try:
             cache_file.parent.mkdir(parents=True, exist_ok=True)
-            cache_file.write_text(json.dumps(report, indent=2))
+            fd, tmp = tempfile.mkstemp(dir=str(cache_file.parent), prefix=".image-updates.")
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps(report, indent=2))
+                os.replace(tmp, str(cache_file))
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
         except OSError:
             pass
     return report

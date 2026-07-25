@@ -6,6 +6,7 @@ Also handles Layer 2 service dynamic configurations.
 """
 
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
@@ -143,12 +144,20 @@ def generate_traefik_static_config() -> str:
         or os.getenv("TRAEFIK_ACME_DNS_ENV")
         or os.getenv("TRAEFIK_ACME_CHALLENGE", "").lower() == "dns"
     ):
-        provider = os.getenv("TRAEFIK_ACME_DNS_PROVIDER", "cloudflare").strip() or "cloudflare"
+        # A lego provider name is a lowercase identifier; reject anything else so
+        # an operator-set value can't inject YAML (a newline or ':' would break
+        # the whole static config far from the misconfigured var).
+        provider = os.getenv("TRAEFIK_ACME_DNS_PROVIDER", "cloudflare").strip().lower()
+        if not re.fullmatch(r"[a-z0-9-]+", provider or ""):
+            provider = "cloudflare"
+        # Resolvers must look like host:port; drop anything else. An empty/blank
+        # override falls back to the default list rather than emitting a null.
+        _DEFAULT_RESOLVERS = ["1.1.1.1:53", "1.0.0.1:53"]
         resolvers = [
             r.strip()
-            for r in os.getenv("TRAEFIK_ACME_DNS_RESOLVERS", "1.1.1.1:53,1.0.0.1:53").split(",")
-            if r.strip()
-        ]
+            for r in os.getenv("TRAEFIK_ACME_DNS_RESOLVERS", "").split(",")
+            if re.fullmatch(r"[0-9A-Fa-f:.\[\]]+:\d+", r.strip())
+        ] or _DEFAULT_RESOLVERS
         resolver_lines = "\n".join('          - "{}"'.format(r) for r in resolvers)
         acme_challenge = (
             "      dnsChallenge:\n"
@@ -161,8 +170,11 @@ def generate_traefik_static_config() -> str:
     # ACME CA server: default is Let's Encrypt production (Traefik's own default
     # when caServer is omitted). Set TRAEFIK_ACME_CA_SERVER to the LE STAGING
     # endpoint while testing (avoids the strict prod rate limits), or to another
-    # ACME CA (ZeroSSL, an internal step-ca, …).
+    # ACME CA (ZeroSSL, an internal step-ca, …). Must be a plain https URL —
+    # reject anything else so a stray value can't inject YAML.
     ca_server = os.getenv("TRAEFIK_ACME_CA_SERVER", "").strip()
+    if ca_server and not re.fullmatch(r"https?://[^\s'\"]+", ca_server):
+        ca_server = ""
     ca_line = "\n      caServer: {}".format(ca_server) if ca_server else ""
 
     config = f"""# Traefik Static Configuration

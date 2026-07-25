@@ -1137,6 +1137,29 @@ class ServiceManager:
             return False, f"invalid image {new_image!r}: {e}"
 
         old_image = current.image
+
+        # Pull the NEW image FIRST — before touching the manifest or the running
+        # container. A valid-format but non-existent/unpullable tag (a typo, a
+        # registry blip) must NOT tear down a healthy service: from_dict only
+        # checks the ref's FORMAT, not that it exists. If the pull fails we abort
+        # with the old image still installed and running.
+        try:
+            pull = subprocess.run(
+                ["docker", "pull", new_image],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"pulling {new_image} timed out — service left on {old_image}"
+        except OSError as e:
+            return False, f"could not run docker pull: {e}"
+        if pull.returncode != 0:
+            detail = (pull.stderr or pull.stdout or "").strip().splitlines()[-1:] or [""]
+            return False, (
+                f"could not pull {new_image} ({detail[0]}) — service left unchanged on {old_image}"
+            )
+
         self._write_manifest(updated, service_dir)
         self._generate_compose_file(updated)
         try:
@@ -1150,7 +1173,6 @@ class ServiceManager:
             pass
 
         compose_path = p["compose"]
-        self._compose(name, compose_path, "pull", timeout=300)
         self._stop_service(name, compose_path)
         ok, msg = self._start_service(name, compose_path)
         if not ok:

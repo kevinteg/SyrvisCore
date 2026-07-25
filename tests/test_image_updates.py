@@ -79,10 +79,15 @@ class TestVersionCompare:
     def test_uncomparable_current_returns_empty(self):
         assert iu.find_newer_tags("latest", ["1.0.0", "2.0.0"]) == []
 
-    def test_shorter_tuple_padding(self):
-        # 3.6 vs 3.6.1 — pad and compare
-        assert iu.find_newer_tags("3.6", ["3.6.1", "3.6"]) == ["3.6.1"]
-        assert iu.find_newer_tags("3.6.1", ["3.6"]) == []
+    def test_component_count_is_part_of_flavor(self):
+        # a 2-component pin never cross-matches a 1-component (CalVer) or
+        # 3-component tag — different granularities float independently.
+        assert iu.find_newer_tags("2.5", ["2.6", "20240101", "20991231"]) == ["2.6"]
+        assert iu.find_newer_tags("16", ["16.2", "17"]) == ["17"]  # rolling '16' → '17', not '16.2'
+        assert iu.find_newer_tags("3.6", ["3.6.1"]) == []  # 2-comp pin ≠ 3-comp patch
+
+    def test_same_count_compares(self):
+        assert iu.find_newer_tags("3.6.5", ["3.6.6", "3.10.0"]) == ["3.6.6", "3.10.0"]
 
 
 class FakeResp:
@@ -150,27 +155,80 @@ class TestListTagsAndCheck:
             return FakeResp(404)
 
         session.get = get
-        tags = iu.list_tags(ref, session=session)
+        tags, truncated = iu.list_tags(ref, session=session)
         assert tags == ["1.0.0", "1.1.0", "1.2.0"]
+        assert truncated is False
 
-    def test_pagination_follows_link(self):
+    def test_401_retry_does_not_consume_page_budget(self, monkeypatch):
+        """The auth challenge must not count as a page — an N-page repo behind a
+        401 must still fetch all N pages within the _MAX_PAGES budget."""
+        monkeypatch.setattr(iu, "_MAX_PAGES", 2)
         ref = iu.parse_image_ref("ghcr.io/o/n:1.0.0")
+        state = {"data_pages": 0}
 
         def get(url, params=None, headers=None, timeout=None):
-            if "last=" in url or (params and False):
-                return FakeResp(200, {"tags": ["3.0.0"]})
-            if "tags/list" in url and "last=" not in url:
+            if "ghcr.io/token" in url:
+                return FakeResp(200, {"token": "T"})
+            if headers.get("Authorization") != "Bearer T":
+                return FakeResp(
+                    401, headers={"WWW-Authenticate": 'Bearer realm="https://ghcr.io/token"'}
+                )
+            state["data_pages"] += 1
+            if state["data_pages"] == 1:
                 return FakeResp(
                     200,
-                    {"tags": ["1.0.0", "2.0.0"]},
-                    headers={"Link": '</v2/o/n/tags/list?last=2.0.0&n=100>; rel="next"'},
+                    {"tags": ["1.0.0"]},
+                    headers={"Link": '</v2/o/n/tags/list?last=1.0.0>; rel="next"'},
                 )
-            return FakeResp(404)
+            return FakeResp(200, {"tags": ["2.0.0"]})  # no next → done, not truncated
 
         session = FakeSession([])
         session.get = get
-        tags = iu.list_tags(ref, session=session)
+        tags, truncated = iu.list_tags(ref, session=session)
+        assert tags == ["1.0.0", "2.0.0"]  # both pages fetched despite the 401
+        assert truncated is False
+
+    def test_pagination_relative_and_absolute_links(self):
+        ref = iu.parse_image_ref("ghcr.io/o/n:1.0.0")
+
+        def get(url, params=None, headers=None, timeout=None):
+            if url.endswith("/v2/o/n/tags/list"):  # first page, relative next
+                return FakeResp(
+                    200,
+                    {"tags": ["1.0.0"]},
+                    headers={"Link": '</v2/o/n/tags/list?last=1.0.0>; rel="next"'},
+                )
+            if url == "https://ghcr.io/v2/o/n/tags/list?last=1.0.0":  # relative resolved
+                return FakeResp(
+                    200,
+                    {"tags": ["2.0.0"]},
+                    headers={"Link": '<https://other.example/v2/o/n/tags/list?last=2>; rel="next"'},
+                )
+            if url == "https://other.example/v2/o/n/tags/list?last=2":  # absolute honored as-is
+                return FakeResp(200, {"tags": ["3.0.0"]})
+            raise AssertionError("unexpected url {}".format(url))
+
+        session = FakeSession([])
+        session.get = get
+        tags, truncated = iu.list_tags(ref, session=session)
         assert tags == ["1.0.0", "2.0.0", "3.0.0"]
+        assert truncated is False
+
+    def test_truncation_flagged_out_of_band(self, monkeypatch):
+        monkeypatch.setattr(iu, "_MAX_PAGES", 1)
+        ref = iu.parse_image_ref("ghcr.io/o/n:1.0.0")
+
+        def get(url, params=None, headers=None, timeout=None):
+            return FakeResp(
+                200,
+                {"tags": ["1.0.0"]},
+                headers={"Link": '</v2/o/n/tags/list?last=1.0.0>; rel="next"'},
+            )
+
+        session = FakeSession([])
+        session.get = get
+        tags, truncated = iu.list_tags(ref, session=session)
+        assert tags == ["1.0.0"] and truncated is True  # more pages existed but budget hit
 
     def test_check_image_reports_update(self):
         session = FakeSession(

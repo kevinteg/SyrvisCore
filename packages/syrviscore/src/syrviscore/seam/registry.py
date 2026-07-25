@@ -98,9 +98,18 @@ COMMANDS: List[Command] = [
     # secret value can never transit the MCP/seam).
     Command("export", "syrvis", ["export"], sudo=True, read_only=True, flags=["--json"]),
     # image_updates queries external registries (openWorldHint on the MCP side)
-    # but only READS + caches; it never pulls or changes anything.
+    # but only READS + caches; it never pulls or changes anything. sudo (like
+    # reconcile_plan) so the operator can WRITE the shared cache under the
+    # root-owned data/ dir — otherwise every seam/MCP call re-queries every
+    # registry, defeating the cache.
     Command(
-        "image_updates", "syrvis", ["updates"], read_only=True, flags=["--json"], timeout_s=120
+        "image_updates",
+        "syrvis",
+        ["updates"],
+        sudo=True,
+        read_only=True,
+        flags=["--json"],
+        timeout_s=120,
     ),
     # schedule list parses the managed crontab block + jobs.d — read-only. It runs
     # under sudo so the 0600-ish jobs.d declarations are readable over the seam,
