@@ -32,9 +32,10 @@
       "groupName": "python deps"
     },
     {
-      "description": "Docker image bumps: reviewed PRs; a core-image bump ships to instances via a release (config.yaml asset), so keep them deliberate.",
+      "description": "Docker image bumps: reviewed PRs; a core-image bump ships to instances via a release, so keep them deliberate. pinDigests keeps the @sha256 digests in DEFAULT_DOCKER_IMAGES + the catalog templates CURRENT on each tag bump (and flags a silent tag re-push).",
       "matchDatasources": ["docker"],
-      "automerge": false
+      "automerge": false,
+      "pinDigests": true
     }
   ]
 }
