@@ -1055,6 +1055,67 @@ def updates(as_json, refresh):
             click.echo("  {:<22} {}  up to date".format(name, img.get("current")))
 
 
+@cli.command("images")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@click.option(
+    "--refresh",
+    is_flag=True,
+    help="Do the network pass (manifest base, newer tags, last-pushed); else cached",
+)
+@handle_errors
+def images(as_json, refresh):
+    """Report image provenance + freshness for every pinned image.
+
+    Per image: publisher class + expected base (from the committed
+    image_trust.yaml), whether it is digest-pinned, and — with --refresh — a
+    newer tag, the manifest base, and the last-pushed date. Reputability is a
+    curated git assertion the check validates against (drift is reported);
+    the heavy/network fields are cached ~6h. Complements `syrvis updates`.
+    """
+    from syrviscore import image_provenance
+
+    try:
+        home = get_syrvis_home()
+    except SyrvisHomeError:
+        home = None
+    report = image_provenance.build_report(home=home, refresh=refresh)
+
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2, default=str))
+        return
+
+    imgs = report.get("images", [])
+    if not imgs:
+        click.echo("No images to check (nothing installed yet).")
+        return
+    click.echo(
+        "{} image(s): {} trusted, {} need attention{}".format(
+            report.get("count", len(imgs)),
+            report.get("trusted", 0),
+            report.get("attention", 0),
+            "" if report.get("heavy_fresh") else "   (freshness cached — --refresh to update)",
+        )
+    )
+    click.echo()
+    for img in imgs:
+        mark = "OK" if img.get("trust") == "ok" else "!!"
+        name = img.get("name") or img.get("repository", "?")
+        pub = img.get("publisher_class", "?")
+        base = (
+            img.get("base_from_manifest")
+            or img.get("base_from_label")
+            or img.get("expected_base")
+            or "?"
+        )
+        pin = "digest" if img.get("digest_pinned") else "TAG"
+        upd = "  ^{}".format(img.get("latest")) if img.get("update_available") else ""
+        click.echo("  {} {:<22} {:<13} base:{:<16} {}{}".format(mark, name, pub, base, pin, upd))
+        if img.get("trust") != "ok":
+            for note in img.get("notes", []):
+                click.echo("        - {}".format(note))
+    click.echo()
+
+
 @cli.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors
@@ -1065,9 +1126,25 @@ def status(as_json):
         statuses = manager.get_container_status()
         active = get_active_version()
 
+        # Cheap, no-network image-trust summary (best-effort).
+        try:
+            from syrviscore import image_provenance
+
+            _home = get_syrvis_home()
+        except Exception:  # noqa: BLE001
+            _home = None
+        try:
+            trust_summary = image_provenance.status_summary(_home)
+        except Exception:  # noqa: BLE001
+            trust_summary = {"count": 0, "trusted": 0, "attention": 0}
+
         if as_json:
             click.echo(
-                jsonlib.dumps({"version": active, "services": statuses}, indent=2, default=str)
+                jsonlib.dumps(
+                    {"version": active, "services": statuses, "images": trust_summary},
+                    indent=2,
+                    default=str,
+                )
             )
             return
     except Exception as e:
@@ -1097,6 +1174,16 @@ def status(as_json):
         glyph = status_glyph(info["status"])
         cells = (f"{glyph} {service_name}", info["status"], info["uptime"])
         click.echo(format_row(list(zip(cells, widths))))
+
+    if trust_summary.get("count"):
+        click.echo()
+        attention = trust_summary.get("attention", 0)
+        note = "" if not attention else "  ('syrvis images' for detail)"
+        click.echo(
+            "Images: {} trusted · {} need attention{}".format(
+                trust_summary.get("trusted", 0), attention, note
+            )
+        )
 
     click.echo()
 

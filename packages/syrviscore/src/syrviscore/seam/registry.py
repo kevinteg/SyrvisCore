@@ -103,6 +103,10 @@ COMMANDS: List[Command] = [
     ),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
+    # images: per-image provenance + freshness (trust registry + cached network
+    # reads). Read-only, no sudo — reads the compose config + public manifests +
+    # the committed image_trust.yaml; degrades gracefully like updates/service_list.
+    Command("images", "syrvis", ["images"], read_only=True, flags=["--json"]),
     # export snapshots the live instance as a syrvis-instance bundle. Read-only,
     # but sudo so it can read the 0600 config over the seam (like reconcile_plan);
     # over the seam it is ALWAYS redacted (no --reveal-secrets shape exists, so a

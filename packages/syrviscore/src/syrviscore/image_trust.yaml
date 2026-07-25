@@ -1,0 +1,131 @@
+# Image trust registry — the curated provenance assertion `syrvis images` validates
+# against (image_provenance.py). Keyed by <registry>/<repository> (canonical, as
+# parse_image_ref produces: bare Docker Hub names become docker.io/library/<name>).
+# publisher_class ∈ official | verified | sponsored-oss | trusted-org | community | unknown
+#   trusted for the status glyph: official, verified, sponsored-oss, trusted-org.
+#   community/unknown → ⚠ (vet before trusting). GHCR carries NO reputability signal,
+#   so ghcr.io/* is trusted ONLY by explicit assertion here.
+# expected_base: the base you expect (drift from it is reported).
+# eol_product: the endoflife.date product id (nullable).
+# Reflects the 2026-07-24 fleet audit. Extend/override at $SYRVIS_HOME/trust/image_trust.yaml.
+
+# ── Core tier ────────────────────────────────────────────────────────────────
+docker.io/library/traefik:
+  publisher_class: official
+  expected_base: alpine
+  eol_product: traefik
+  source: https://github.com/traefik/traefik
+docker.io/portainer/portainer-ce:
+  publisher_class: verified
+  expected_base: alpine
+  eol_product: null
+  source: https://github.com/portainer/portainer
+docker.io/cloudflare/cloudflared:
+  publisher_class: verified
+  expected_base: distroless
+  eol_product: null
+  source: https://github.com/cloudflare/cloudflared
+ghcr.io/kevinteg/syrviscore-dashboard:
+  publisher_class: trusted-org      # first-party (SyrvisCore CI build)
+  expected_base: python:3.12-slim
+  eol_product: python
+  source: https://github.com/kevinteg/SyrvisCore
+docker.io/favonia/cloudflare-ddns:
+  publisher_class: community        # single-maintainer (but high-signal + cosign-signed, scratch)
+  expected_base: scratch
+  eol_product: null
+  source: https://github.com/favonia/cloudflare-ddns
+
+# ── Monitoring / metrics stack ───────────────────────────────────────────────
+docker.io/victoriametrics/victoria-metrics:
+  publisher_class: verified
+  expected_base: alpine             # -scratch tag available; prefer it
+  eol_product: null
+  source: https://github.com/VictoriaMetrics/VictoriaMetrics
+docker.io/victoriametrics/vmagent:
+  publisher_class: verified
+  expected_base: alpine
+  eol_product: null
+  source: https://github.com/VictoriaMetrics/VictoriaMetrics
+docker.io/victoriametrics/vmalert:
+  publisher_class: verified
+  expected_base: alpine
+  eol_product: null
+  source: https://github.com/VictoriaMetrics/VictoriaMetrics
+docker.io/prom/alertmanager:
+  publisher_class: sponsored-oss    # Prometheus / CNCF
+  expected_base: busybox
+  eol_product: null
+  source: https://github.com/prometheus/alertmanager
+docker.io/prom/node-exporter:
+  publisher_class: sponsored-oss
+  expected_base: busybox
+  eol_product: null
+  source: https://github.com/prometheus/node_exporter
+docker.io/prom/snmp-exporter:
+  publisher_class: sponsored-oss
+  expected_base: busybox
+  eol_product: null
+  source: https://github.com/prometheus/snmp_exporter
+docker.io/tecnativa/docker-socket-proxy:
+  publisher_class: trusted-org      # Tecnativa S.L. (curated: purpose-built socket hardening)
+  expected_base: alpine
+  eol_product: null
+  source: https://github.com/Tecnativa/docker-socket-proxy
+ghcr.io/kevinteg/docker-state-exporter:
+  publisher_class: trusted-org      # first-party owned build (replaced anonymous fviolence)
+  expected_base: distroless/static
+  eol_product: null
+  source: https://github.com/kevinteg/SyrvisCore
+docker.io/grafana/grafana:
+  publisher_class: verified
+  expected_base: alpine
+  eol_product: grafana
+  source: https://github.com/grafana/grafana
+
+# ── Layer 2 apps ─────────────────────────────────────────────────────────────
+docker.io/louislam/uptime-kuma:
+  publisher_class: community        # single-maintainer; 1.x is legacy — migrate to 2.x
+  expected_base: debian-slim
+  eol_product: null
+  source: https://github.com/louislam/uptime-kuma
+docker.io/gollum/gollum:
+  publisher_class: community        # NB: the project-blessed image is gollumwiki/gollum; dormant since 2022
+  expected_base: alpine
+  eol_product: null
+  source: https://github.com/gollum/gollum
+docker.io/xenrox/ntfy-alertmanager:
+  publisher_class: community        # single-maintainer (git.xenrox.net); tiny blast radius
+  expected_base: alpine
+  eol_product: null
+  source: https://git.xenrox.net/~xenrox/ntfy-alertmanager
+ghcr.io/home-assistant/home-assistant:
+  publisher_class: trusted-org      # Open Home Foundation / Nabu Casa
+  expected_base: alpine
+  eol_product: home-assistant
+  source: https://github.com/home-assistant/core
+docker.io/valkey/valkey:
+  publisher_class: trusted-org      # Valkey / Linux Foundation (not a docker-official image)
+  expected_base: debian-slim
+  eol_product: valkey
+  source: https://github.com/valkey-io/valkey
+ghcr.io/immich-app/immich-server:
+  publisher_class: trusted-org      # immich-app / FUTO
+  expected_base: debian-slim
+  eol_product: immich
+  source: https://github.com/immich-app/immich
+ghcr.io/immich-app/immich-machine-learning:
+  publisher_class: trusted-org
+  expected_base: debian-slim
+  eol_product: immich
+  source: https://github.com/immich-app/immich
+ghcr.io/immich-app/postgres:
+  publisher_class: trusted-org      # immich-app Postgres rebuild (+ vector extensions)
+  expected_base: debian
+  eol_product: postgresql
+  source: https://github.com/immich-app/base-images
+ghcr.io/kevinteg/cyberquill:
+  publisher_class: trusted-org      # first-party
+  expected_base: node:24-alpine
+  eol_product: nodejs
+  source: https://github.com/kevinteg/CyberQuill

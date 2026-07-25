@@ -67,6 +67,7 @@ syrviscore = [
     "build/*.yaml",
     "catalog_templates/*.yaml",
     "profile_data/*/*.yml",
+    "image_trust.yaml",
 ]
 
 [tool.black]
