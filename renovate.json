@@ -1,0 +1,40 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard"
+  ],
+  "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Core-tier image pins in DEFAULT_DOCKER_IMAGES (the committed source of truth). Matches the full_image field; a PR bumps the pin, the lockstep tag/full_image are edited together in review.",
+      "fileMatch": ["^packages/syrviscore/src/syrviscore/compose\\.py$"],
+      "matchStrings": [
+        "\"full_image\":\\s*\"(?<depName>[^\\s:\"@]+):(?<currentValue>[^\\s\"@]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Bundled Layer 2 catalog template image pins (catalog_templates/*.yaml).",
+      "fileMatch": ["^packages/syrviscore/src/syrviscore/catalog_templates/[^/]+\\.ya?ml$"],
+      "matchStrings": [
+        "image:\\s*[\"']?(?<depName>[^\\s:\"'@]+):(?<currentValue>[^\\s\"'@]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?[\"']?"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The Python runtime pins target DSM Python 3.8; do not let Renovate push them past what the NAS runs. Group the pip deps into one PR.",
+      "matchManagers": ["pep621", "pip_requirements", "setup-cfg"],
+      "groupName": "python deps"
+    },
+    {
+      "description": "Docker image bumps: reviewed PRs; a core-image bump ships to instances via a release (config.yaml asset), so keep them deliberate.",
+      "matchDatasources": ["docker"],
+      "automerge": false
+    }
+  ]
+}
