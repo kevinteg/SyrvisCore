@@ -191,10 +191,39 @@ if [ -d "$MANAGER_VENV" ]; then
     mv "$MANAGER_VENV" "${MANAGER_VENV}.old"
 fi
 mv "$STAGING_VENV" "$MANAGER_VENV"
+
+# CRITICAL: a venv bakes its BUILD path into every console-script shebang
+# (syrvisctl, pip), the activate scripts, and pyvenv.cfg. We built at
+# $STAGING_VENV (venv.new), so after the swap those all still point at the
+# now-gone staging path and `syrvisctl` dies with "bad interpreter: .../venv.new
+# /bin/python3: No such file". Rewrite the staging path -> the final path — the
+# service installer's _fixup_relocated_venv does exactly this for version venvs.
+# SYNOPKG_PKGDEST is a symlink, so the baked path is the readlink-RESOLVED form;
+# rewrite both the symlink form and the resolved form.
+PKGDEST_REAL=$(readlink -f "$SYNOPKG_PKGDEST" 2>/dev/null || printf '%s' "$SYNOPKG_PKGDEST")
+# Scope to the console scripts (bin/*) + pyvenv.cfg only — mirror the service
+# installer's _fixup_relocated_venv (bin/ only). Skip symlinks (bin/python ->
+# base interpreter) and binaries so we never clobber them; .pyc co_filename
+# strings are cosmetic (tracebacks only) and are deliberately left alone.
+for _f in "${MANAGER_VENV}/bin/"* "${MANAGER_VENV}/pyvenv.cfg"; do
+    [ -f "$_f" ] && [ ! -L "$_f" ] || continue
+    grep -Iq . "$_f" 2>/dev/null || continue   # skip binary/empty files
+    for _pair in "${STAGING_VENV}|${MANAGER_VENV}" "${PKGDEST_REAL}/venv.new|${PKGDEST_REAL}/venv"; do
+        _old=${_pair%|*}; _new=${_pair#*|}
+        sed -i "s|${_old}|${_new}|g" "$_f"
+    done
+done
 rm -rf "${MANAGER_VENV}.old"
 
+# Verify the SWAPPED-IN venv actually runs. Do NOT swallow the failure with
+# `|| echo unknown` (the old bug: it logged "unknown" and shipped a broken
+# syrvisctl that only surfaced on the next invocation).
+if ! "${MANAGER_VENV}/bin/syrvisctl" --version >> "$LOG_FILE" 2>&1; then
+    "${MANAGER_VENV}/bin/syrvisctl" --version >&2 || true
+    fail "syrvisctl failed to run after the venv swap — shebang/relocation problem (see $LOG_FILE)"
+fi
 SYRVISCTL_VERSION=$("${MANAGER_VENV}/bin/syrvisctl" --version 2>/dev/null || echo "unknown")
-log_info "  Verified: syrvisctl command available (${SYRVISCTL_VERSION})"
+log_info "  Verified: syrvisctl runs after swap (${SYRVISCTL_VERSION})"
 
 # === Update PATH configuration ===
 log_info "[3/3] Updating command access configuration..."
