@@ -90,6 +90,17 @@ COMMANDS: List[Command] = [
         positional=Slot("service", KIND_NAME, optional=True),
     ),
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
+    # dashboard generate projects the declared service set into a Grafana
+    # dashboard JSON — read-only, no sudo (it reads the 0644 stack.yaml + public
+    # manifests; a 0600 manifest just drops out, like service_list). The estate
+    # pulls this over the seam to provision Grafana.
+    Command(
+        "dashboard_generate",
+        "syrvis",
+        ["dashboard", "generate"],
+        read_only=True,
+        flags=["--json"],
+    ),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
     # export snapshots the live instance as a syrvis-instance bundle. Read-only,
