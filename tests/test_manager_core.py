@@ -571,10 +571,21 @@ class TestBackupRestore:
 
         to_delete = backup.cleanup_old_backups(home, keep_versions=2, dry_run=True)
         assert sorted(p.name for p in to_delete) == ["0.1.0.tar.gz", "0.2.0.tar.gz"]
+        # dry-run touches nothing — sidecars still present
+        assert backup.sidecar_path(home / "backups" / "0.1.0.tar.gz").exists()
 
         backup.cleanup_old_backups(home, keep_versions=2)
         remaining = sorted(b["filename"] for b in backup.list_backups(home))
         assert remaining == ["0.3.0.tar.gz", "0.4.0.tar.gz"]
+        # the deleted archives' .sha256 sidecars are gone too (no orphans)...
+        assert not backup.sidecar_path(home / "backups" / "0.1.0.tar.gz").exists()
+        assert not backup.sidecar_path(home / "backups" / "0.2.0.tar.gz").exists()
+        # ... while the kept archives keep theirs
+        assert backup.sidecar_path(home / "backups" / "0.4.0.tar.gz").exists()
+        assert sorted(p.name for p in (home / "backups").glob("*.sha256")) == [
+            "0.3.0.tar.gz.sha256",
+            "0.4.0.tar.gz.sha256",
+        ]
 
 
 class TestManagerCompatibilityGate:

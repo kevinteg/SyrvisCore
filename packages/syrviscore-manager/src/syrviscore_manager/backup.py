@@ -529,7 +529,11 @@ def restore_from_backup(
 
 
 def cleanup_old_backups(home: Path, keep_versions: int = 3, dry_run: bool = False) -> List[Path]:
-    """Remove old backups, keeping all backups for the most recent N versions."""
+    """Remove old backups, keeping all backups for the most recent N versions.
+
+    Each archive's ``.sha256`` sidecar (written by create_backup) is removed
+    alongside it, so cleanup never leaves an orphaned sidecar behind.
+    """
     backups = list_backups(home)
     if not backups:
         return []
@@ -549,6 +553,7 @@ def cleanup_old_backups(home: Path, keep_versions: int = 3, dry_run: bool = Fals
     if not dry_run:
         for path in to_delete:
             path.unlink()
+            sidecar_path(path).unlink(missing_ok=True)
 
     return to_delete
 
