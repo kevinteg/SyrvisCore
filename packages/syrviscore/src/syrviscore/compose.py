@@ -55,7 +55,7 @@ DEFAULT_DOCKER_IMAGES = {
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.4.7",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.7",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.7@sha256:02a0b9e6ab21218224f53e515ed94ef0e8c1f2c5d739d1b39cec0a64a664560c",
         "description": "SyrvisCore web dashboard",
     },
 }
