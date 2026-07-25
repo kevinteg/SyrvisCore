@@ -39,6 +39,14 @@ class DashboardSettings(BaseSettings):
     ssh_target: str = "nas"  # host alias used when rendering `ssh <target> '...'` hints
     nas_ip: str = ""  # the NAS host IP; preferred over the placeholder alias in hints
 
+    # Optional per-service metrics deep-link. A fully-resolved URL with a
+    # ``{service}`` placeholder, e.g. ``https://grafana.example.com/d/syrvis-{service}``.
+    # Empty (default) = the metrics stack isn't wired, so the UI shows no metrics
+    # link. Config-driven and names nothing platform-side (design/15 boundary,
+    # the design/23 §6 generic-links precedent) — the estate sets it once the
+    # SyrvisCore dashboards are provisioned into its Grafana.
+    metrics_url_template: str = ""
+
     # --- auth ---
     dashboard_auth_mode: AuthMode = "none"
     dashboard_session_secret: str = ""  # signs the local session cookie (generated if empty)

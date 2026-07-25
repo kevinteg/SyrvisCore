@@ -64,6 +64,18 @@ export interface Info {
   install_path?: string | null;
   active_version?: string | null;
   setup_complete?: boolean;
+  // Capabilities the SPA reads to shape the UI.
+  enable_l2_mutations?: boolean;
+  // Fully-resolved per-service metrics URL with a `{service}` placeholder, or ""
+  // when the metrics stack isn't wired. Empty => no per-service metrics link.
+  metrics_url_template?: string;
+}
+
+/** Build a per-service metrics deep-link from the info template, or null. */
+export function metricsUrl(info: Info | undefined, service: string): string | null {
+  const tpl = info?.metrics_url_template;
+  if (!tpl) return null;
+  return tpl.replace("{service}", encodeURIComponent(service));
 }
 
 export class ApiError extends Error {

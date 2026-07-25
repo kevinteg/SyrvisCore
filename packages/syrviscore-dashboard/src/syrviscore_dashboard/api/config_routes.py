@@ -1,6 +1,6 @@
 """Config / versions / info endpoints (read-only, redacted)."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ..__version__ import __version__
 
@@ -35,8 +35,8 @@ def get_versions() -> dict:
 
 
 @router.get("/info")
-def get_info() -> dict:
-    """Install summary for the dashboard header."""
+def get_info(request: Request) -> dict:
+    """Install summary + UI capabilities for the dashboard header."""
     from syrviscore import paths
 
     info = {"dashboard_version": __version__}
@@ -52,4 +52,11 @@ def get_info() -> dict:
         info["setup_complete"] = paths.verify_setup_complete()
     except Exception:  # noqa: BLE001
         info["setup_complete"] = False
+
+    # Capabilities the SPA reads to shape the UI: whether L2 mutation actions
+    # are available at all (a read-only/no-L2-tools image hides them), and the
+    # optional per-service metrics deep-link template.
+    settings = request.app.state.settings
+    info["enable_l2_mutations"] = bool(settings.enable_l2_mutations)
+    info["metrics_url_template"] = settings.metrics_url_template or ""
     return info

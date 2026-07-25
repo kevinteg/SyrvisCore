@@ -1,18 +1,20 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Play, Plus, RefreshCw, RotateCw, Square, Trash2 } from "lucide-react";
+import { BarChart3, ExternalLink, Play, Plus, RefreshCw, RotateCw, Square, Trash2 } from "lucide-react";
 import {
   addService,
   coreAction,
   getDeclarations,
+  getInfo,
   getServices,
+  metricsUrl,
   removeService,
   serviceAction,
   type DeclarationItem,
   type ServiceItem,
 } from "../lib/api";
 import { StatusPill } from "./StatusPill";
-import { Button, Card, ErrorNote, Spinner } from "./ui";
+import { ActionMenu, Button, Card, ErrorNote, Spinner, type MenuItem } from "./ui";
 
 function dot(status?: string) {
   if (status === "running") return "bg-emerald-400";
@@ -123,9 +125,21 @@ export function ServicesPanel() {
     queryFn: getServices,
     refetchInterval: 8000,
   });
+  const { data: info } = useQuery({ queryKey: ["info"], queryFn: getInfo, refetchInterval: 60000 });
+  const l2Enabled = info?.enable_l2_mutations ?? false;
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [gitUrl, setGitUrl] = useState("");
+
+  // Open (Traefik URL) + Metrics (Grafana deep-link) — shown whenever available,
+  // independent of mutation permissions since they only navigate.
+  const linkItems = (name: string, url?: string): MenuItem[] => {
+    const items: MenuItem[] = [];
+    if (url) items.push({ kind: "link", label: "Open", icon: <ExternalLink size={13} />, href: url });
+    const m = metricsUrl(info, name);
+    if (m) items.push({ kind: "link", label: "Metrics", icon: <BarChart3 size={13} />, href: m });
+    return items;
+  };
 
   async function act(key: string, fn: () => Promise<{ ok: boolean; message: string }>) {
     setBusy(key);
@@ -176,22 +190,15 @@ export function ServicesPanel() {
         {data?.core.error && <div className="px-4 py-3"><ErrorNote error={data.core.error} /></div>}
         {core.map((s: ServiceItem) => {
           const name = s.service ?? s.name ?? "?";
-          return row(
-            name,
-            s.image,
-            s.status,
-            <>
-              <Button disabled={busy !== null} onClick={() => act(name + ":start", () => coreAction(name, "start"))}>
-                <Play size={13} /> Start
-              </Button>
-              <Button disabled={busy !== null} onClick={() => act(name + ":restart", () => coreAction(name, "restart"))}>
-                <RotateCw size={13} /> Restart
-              </Button>
-              <Button variant="ghost" disabled={busy !== null} onClick={() => act(name + ":stop", () => coreAction(name, "stop"))}>
-                <Square size={13} /> Stop
-              </Button>
-            </>,
-          );
+          // Core lifecycle (Docker SDK) is always available — it is NOT gated by
+          // ENABLE_L2_MUTATIONS (that only covers compose/git-shelling L2 verbs).
+          const items: MenuItem[] = [
+            ...linkItems(name, s.url),
+            { kind: "action", label: "Start", icon: <Play size={13} />, disabled: busy !== null, onClick: () => act(name + ":start", () => coreAction(name, "start")) },
+            { kind: "action", label: "Restart", icon: <RotateCw size={13} />, disabled: busy !== null, onClick: () => act(name + ":restart", () => coreAction(name, "restart")) },
+            { kind: "action", label: "Stop", icon: <Square size={13} />, disabled: busy !== null, onClick: () => act(name + ":stop", () => coreAction(name, "stop")) },
+          ];
+          return row(name, s.image, s.status, <ActionMenu items={items} disabled={busy !== null} />);
         })}
         {core.length === 0 && !data?.core.error && (
           <div className="px-4 py-3 text-sm text-slate-500">No core containers found.</div>
@@ -204,43 +211,47 @@ export function ServicesPanel() {
         </div>
         {layer2.map((s: ServiceItem) => {
           const name = s.name ?? "?";
-          return row(
-            name,
-            s.image ?? s.version,
-            s.status,
-            <>
-              <Button disabled={busy !== null} onClick={() => act(name + ":start", () => serviceAction(name, "start"))}>
-                <Play size={13} /> Start
-              </Button>
-              <Button disabled={busy !== null} onClick={() => act(name + ":restart", () => serviceAction(name, "restart"))}>
-                <RotateCw size={13} /> Restart
-              </Button>
-              <Button disabled={busy !== null} onClick={() => act(name + ":update", () => serviceAction(name, "update"))}>
-                <RefreshCw size={13} /> Update
-              </Button>
-              <Button variant="danger" disabled={busy !== null} onClick={() => act(name + ":remove", () => removeService(name, false))}>
-                <Trash2 size={13} /> Remove
-              </Button>
-            </>,
-          );
+          // L2 mutations (start/stop/restart/update/remove) shell compose+git and
+          // are gated by ENABLE_L2_MUTATIONS. When disabled they are ABSENT from
+          // the menu (never a button that 403s), with a note explaining why.
+          const items: MenuItem[] = [...linkItems(name, s.url)];
+          if (l2Enabled) {
+            items.push(
+              { kind: "action", label: "Start", icon: <Play size={13} />, disabled: busy !== null, onClick: () => act(name + ":start", () => serviceAction(name, "start")) },
+              { kind: "action", label: "Restart", icon: <RotateCw size={13} />, disabled: busy !== null, onClick: () => act(name + ":restart", () => serviceAction(name, "restart")) },
+              { kind: "action", label: "Stop", icon: <Square size={13} />, disabled: busy !== null, onClick: () => act(name + ":stop", () => serviceAction(name, "stop")) },
+              { kind: "action", label: "Update", icon: <RefreshCw size={13} />, disabled: busy !== null, onClick: () => act(name + ":update", () => serviceAction(name, "update")) },
+              { kind: "action", label: "Remove", icon: <Trash2 size={13} />, danger: true, disabled: busy !== null, onClick: () => act(name + ":remove", () => removeService(name, false)) },
+            );
+          } else {
+            items.push({ kind: "note", label: "Management disabled (read-only)" });
+          }
+          return row(name, s.image ?? s.version, s.status, <ActionMenu items={items} disabled={busy !== null} />);
         })}
         {layer2.length === 0 && (
           <div className="px-4 py-3 text-sm text-slate-500">No Layer 2 services installed.</div>
         )}
-        <div className="flex flex-col gap-2 border-t border-base-700 px-4 py-3 sm:flex-row">
-          <input
-            value={gitUrl}
-            onChange={(e) => setGitUrl(e.target.value)}
-            placeholder="https://github.com/you/syrvis-service.git"
-            className="flex-1 rounded-lg border border-base-600 bg-base-900 px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-accent"
-          />
-          <Button
-            disabled={busy !== null || !gitUrl}
-            onClick={() => act("add", () => addService(gitUrl, true)).then(() => setGitUrl(""))}
-          >
-            <Plus size={13} /> Add service
-          </Button>
-        </div>
+        {l2Enabled ? (
+          <div className="flex flex-col gap-2 border-t border-base-700 px-4 py-3 sm:flex-row">
+            <input
+              value={gitUrl}
+              onChange={(e) => setGitUrl(e.target.value)}
+              placeholder="https://github.com/you/syrvis-service.git"
+              className="flex-1 rounded-lg border border-base-600 bg-base-900 px-3 py-1.5 text-sm text-slate-200 outline-none focus:border-accent"
+            />
+            <Button
+              disabled={busy !== null || !gitUrl}
+              onClick={() => act("add", () => addService(gitUrl, true)).then(() => setGitUrl(""))}
+            >
+              <Plus size={13} /> Add service
+            </Button>
+          </div>
+        ) : (
+          <div className="border-t border-base-700 px-4 py-3 text-xs text-slate-500">
+            Layer 2 management is disabled (<span className="font-mono">ENABLE_L2_MUTATIONS=false</span>). Use{" "}
+            <span className="font-mono">syrvis service …</span> over SSH to add or change services.
+          </div>
+        )}
       </Card>
 
       <DeclarationsCard />
