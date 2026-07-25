@@ -6,7 +6,7 @@
 # ghcr.io/<org>/docker-state-exporter; the estate re-pins the resulting digest into
 # catalog_templates/docker-health-exporter.yaml + services.d.
 
-FROM golang:1.22-alpine AS build
+FROM golang:1.24-alpine AS build
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 COPY main.go .
