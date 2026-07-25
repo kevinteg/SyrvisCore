@@ -1513,7 +1513,15 @@ def _render_reconcile_plan(plan):
     for action in plan["actions"]:
         marker = "!" if action["destructive"] else "-"
         crit = " (critical)" if action.get("critical") else ""
-        click.echo("    {} {} {}{}".format(marker, action["kind"], action["name"], crit))
+        # Show the image the service becomes; on a replace, the from->to transition.
+        img = action.get("image")
+        if action["kind"] == "replace" and action.get("from_image") and action["from_image"] != img:
+            detail = "  {} -> {}".format(action["from_image"], img)
+        elif img:
+            detail = "  {}".format(img)
+        else:
+            detail = ""
+        click.echo("    {} {} {}{}{}".format(marker, action["kind"], action["name"], crit, detail))
 
 
 @cli.group()

@@ -178,6 +178,7 @@ def build_reconcile_plan(
                     {
                         "kind": "stop",
                         "name": name,
+                        "image": declared.image,
                         "critical": declared.critical,
                         "destructive": False,
                     }
@@ -191,6 +192,7 @@ def build_reconcile_plan(
                 {
                     "kind": "add",
                     "name": name,
+                    "image": declared.image,
                     "critical": declared.critical,
                     "destructive": False,
                 }
@@ -200,6 +202,10 @@ def build_reconcile_plan(
                 {
                     "kind": "replace",
                     "name": name,
+                    # from_image = what's installed now, image = what it becomes —
+                    # so the plan shows the version transition (e.g. a digest bump).
+                    "from_image": current.image if current is not None else None,
+                    "image": declared.image,
                     "critical": declared.critical,
                     "destructive": False,  # data dir is preserved across replace
                 }
@@ -209,6 +215,7 @@ def build_reconcile_plan(
                 {
                     "kind": "start",
                     "name": name,
+                    "image": declared.image,
                     "critical": declared.critical,
                     "destructive": False,
                 }
@@ -223,6 +230,7 @@ def build_reconcile_plan(
                 {
                     "kind": "prune_{}".format(prune),
                     "name": name,
+                    "image": installed[name].image if name in installed else None,
                     "critical": False,
                     # stop is reversible; remove drops config (data kept); purge drops data
                     "destructive": prune != "stop",
