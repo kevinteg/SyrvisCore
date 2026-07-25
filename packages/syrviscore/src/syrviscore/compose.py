@@ -52,11 +52,10 @@ DEFAULT_DOCKER_IMAGES = {
     # <service-version> on release, and the pin here tracks it. Because the pin
     # therefore changes every release, `apply-instance --converge` recreates the
     # dashboard container each upgrade — so it never serves a stale snapshot.
-    # Digest is added by the release step once CI has published the tag.
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.4.6",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.6",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.6@sha256:f70455c9f1bf7bbd8fc9e01eb1400f2640112b38370879db9e78884000a22a12",
         "description": "SyrvisCore web dashboard",
     },
 }
