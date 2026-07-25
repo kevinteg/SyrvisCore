@@ -23,6 +23,7 @@ RUN go mod init docker-state-exporter \
  && go get github.com/docker/docker@v20.10.27+incompatible \
  && go get github.com/prometheus/client_golang@v1.19.1 \
  && go get github.com/go-kit/kit@v0.13.0 \
+ && go mod edit -replace github.com/docker/distribution=github.com/docker/distribution@v2.8.1+incompatible \
  && go mod tidy \
  && go build -trimpath -ldflags="-w -s" -o /out/docker-state-exporter .
 
