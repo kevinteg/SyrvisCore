@@ -456,6 +456,50 @@ class TestBackupRestore:
         meta = backup.read_backup_metadata(backup_path)
         assert "data/victoria-metrics/vmdata/index.bin" not in meta["file_digests"]
 
+    def test_pre_upgrade_backup_excludes_live_l2_data(self, home, tmp_path, fake_venv_backend):
+        """The pre-upgrade backup is a *code* rollback point: config, L2
+        declarations, and core secrets are captured, but NOT live L2 runtime data
+        (a venv swap never touches data/, and file-copying a running store is huge
+        + inconsistent). Full DR capture is 'backup create'."""
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)  # config/.env + data/traefik/acme.json (core secret)
+
+        (home / "services" / "immich").mkdir(parents=True)
+        (home / "services" / "immich" / "syrvis-service.yaml").write_text("name: immich\n")
+        (home / "compose").mkdir(parents=True)
+        (home / "compose" / "immich.yaml").write_text("services: {immich: {}}\n")
+        (home / "data" / "immich" / "db").mkdir(parents=True)
+        (home / "data" / "immich" / "db" / "huge.sql").write_text("x" * 1000)
+
+        backup_path = backup.create_pre_upgrade_backup(home, "0.1.0", "0.2.0")
+        assert backup_path is not None
+        with tarfile.open(str(backup_path), "r:gz") as tar:
+            names = set(tar.getnames())
+
+        # Declarations + config + core secret are captured...
+        assert "services/immich/syrvis-service.yaml" in names
+        assert "compose/immich.yaml" in names
+        assert "config/.env" in names
+        assert "data/traefik/acme.json" in names
+        # ... but the live L2 runtime data is not.
+        assert not any(n.startswith("data/immich/") for n in names)
+
+        meta = backup.read_backup_metadata(backup_path)
+        assert meta["scope"] == "code-rollback"
+
+    def test_manual_backup_still_includes_l2_data(self, home, tmp_path, fake_venv_backend):
+        """A full 'backup create' (default include_l2_data=True) still captures
+        runtime data — the pre-upgrade exclusion must not leak into DR backups."""
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+        (home / "data" / "immich" / "db").mkdir(parents=True)
+        (home / "data" / "immich" / "db" / "huge.sql").write_text("rows")
+
+        backup_path = backup.create_backup(home, version="0.1.0")
+        with tarfile.open(str(backup_path), "r:gz") as tar:
+            names = set(tar.getnames())
+        assert "data/immich/db/huge.sql" in names
+
     def test_restore_rejects_path_traversal(self, home, tmp_path):
         evil_tar = tmp_path / "0.1.0.tar.gz"
         with tarfile.open(str(evil_tar), "w:gz") as tar:

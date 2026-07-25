@@ -153,12 +153,23 @@ def sidecar_path(backup_path: Path) -> Path:
     return backup_path.with_name(backup_path.name + ".sha256")
 
 
-def _gather_backup_items(home: Path, version: str) -> List[Tuple[str, Path]]:
+def _gather_backup_items(
+    home: Path, version: str, include_l2_data: bool = True
+) -> List[Tuple[str, Path]]:
     """Every (arcname, source_path) the archive will carry, in a stable order.
 
     Gathering up front (instead of interleaving with tar writes) lets
     create_backup compute per-file digests BEFORE the metadata member is
     written, so the archive carries its own integrity manifest.
+
+    ``include_l2_data`` controls whether user services' live runtime data
+    (``data/<service>/`` for non-core services — TSDBs, SQL stores, …) is
+    captured. A *code* rollback point (pre-upgrade) sets this False: an upgrade
+    swaps the service venv and never touches ``data/``, so the runtime data is
+    not needed to roll back, and file-copying a *running* datastore is both huge
+    and inconsistent. Full disaster-recovery backups keep the default (True).
+    Either way the L2 *declarations* (``services/`` + ``compose/``) and core
+    secrets are always captured.
     """
     items: List[Tuple[str, Path]] = []
 
@@ -185,7 +196,8 @@ def _gather_backup_items(home: Path, version: str) -> List[Tuple[str, Path]]:
                 if item.is_file():
                     items.append(("{}/{}".format(subdir, item.relative_to(root)), item))
 
-    # Layer-2 service state: definitions, generated compose, per-service data.
+    # Layer-2 service state: declarations (definitions + generated compose) are
+    # always captured; per-service runtime data only when include_l2_data.
     core_data_dirs = {"traefik", "portainer", "cloudflared"}
     for top in ("services", "compose"):
         root = home / top
@@ -193,15 +205,16 @@ def _gather_backup_items(home: Path, version: str) -> List[Tuple[str, Path]]:
             for item in sorted(root.rglob("*")):
                 if item.is_file():
                     items.append(("{}/{}".format(top, item.relative_to(root)), item))
-    data_root = home / "data"
-    if data_root.exists():
-        for entry in sorted(data_root.iterdir()):
-            if entry.is_dir() and entry.name not in core_data_dirs:
-                for item in sorted(entry.rglob("*")):
-                    if item.is_file():
-                        items.append(
-                            ("data/{}/{}".format(entry.name, item.relative_to(entry)), item)
-                        )
+    if include_l2_data:
+        data_root = home / "data"
+        if data_root.exists():
+            for entry in sorted(data_root.iterdir()):
+                if entry.is_dir() and entry.name not in core_data_dirs:
+                    for item in sorted(entry.rglob("*")):
+                        if item.is_file():
+                            items.append(
+                                ("data/{}/{}".format(entry.name, item.relative_to(entry)), item)
+                            )
 
     wheel_path = get_wheel_path(home, version)
     if wheel_path and wheel_path.exists():
@@ -217,6 +230,7 @@ def create_backup(
     reason: str = "manual",
     suffix: Optional[int] = None,
     extra_metadata: Optional[Dict[str, Any]] = None,
+    include_l2_data: bool = True,
     log: LogCallback = _noop_log,
 ) -> Path:
     """
@@ -269,7 +283,7 @@ def create_backup(
     # transient (it was merged away) and skip it rather than aborting the whole
     # upgrade — a rollback point that omits a since-deleted DB part is still a
     # valid rollback point.
-    items = _gather_backup_items(home, version)
+    items = _gather_backup_items(home, version, include_l2_data=include_l2_data)
     file_digests: Dict[str, str] = {}
     stable_items: List[Tuple[str, Path]] = []
     vanished: List[str] = []
@@ -325,7 +339,14 @@ def create_backup(
 def create_pre_upgrade_backup(
     home: Path, current_version: str, target_version: str, log: LogCallback = _noop_log
 ) -> Optional[Path]:
-    """Create a backup before upgrading, unless one already exists for this version."""
+    """Create a *code-rollback* point before upgrading, unless one already exists.
+
+    This is intentionally declarative-only (config, declarations, secrets, wheel;
+    no live L2 runtime data): an upgrade swaps the service venv and never touches
+    ``data/``, so that's all a rollback needs — and it keeps the backup small,
+    fast, and consistent against running datastores. Use ``backup create`` for a
+    full disaster-recovery snapshot that includes runtime data.
+    """
     backup_path = get_backup_path(home, current_version)
     if backup_path.exists():
         return None
@@ -335,7 +356,8 @@ def create_pre_upgrade_backup(
         output_path=backup_path,
         version=current_version,
         reason="pre-upgrade",
-        extra_metadata={"upgraded_to": target_version},
+        extra_metadata={"upgraded_to": target_version, "scope": "code-rollback"},
+        include_l2_data=False,
         log=log,
     )
 

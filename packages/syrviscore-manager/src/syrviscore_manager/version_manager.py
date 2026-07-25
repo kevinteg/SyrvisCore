@@ -395,7 +395,7 @@ def download_and_install(
     version: Optional[str] = None,
     force: bool = False,
     verify: bool = True,
-    allow_backup_failure: bool = False,
+    skip_backup: bool = False,
     log: LogCallback = _noop_log,
     confirm_reinstall: Optional[ConfirmCallback] = None,
     progress: Optional[downloader.ProgressCallback] = None,
@@ -478,7 +478,11 @@ def download_and_install(
             log("      WARNING: no checksums published; installing unverified (--no-verify)")
 
         current_version = manifest.get_active_version(home) if paths.is_installation(home) else None
-        if current_version and current_version != version:
+        if not current_version or current_version == version:
+            log("[4/5] No existing version to back up")
+        elif skip_backup:
+            log("[4/5] Skipping pre-upgrade backup (--no-backup; no rollback point)")
+        else:
             log("[4/5] Backing up current state ({})...".format(current_version))
             try:
                 backup_path = backup.create_pre_upgrade_backup(
@@ -489,19 +493,16 @@ def download_and_install(
                 else:
                     log("      Backup already exists for {}".format(current_version))
             except Exception as e:
-                # "Every upgrade has a restore point" is the DR invariant: a failed
-                # pre-upgrade backup aborts by default (the operator can override with
-                # --no-backup once they accept losing the rollback point).
-                if not allow_backup_failure:
-                    raise InstallError(
-                        "Pre-upgrade backup of {} failed: {}. Aborting to preserve a "
-                        "rollback point (re-run with --no-backup to upgrade anyway).".format(
-                            current_version, e
-                        )
+                # The rollback point is now declarative-only (small + consistent),
+                # so a failure here is a genuine problem — disk full, permissions —
+                # not live-data churn. Preserve the DR invariant by aborting; the
+                # operator can re-run with --no-backup to skip it deliberately.
+                raise InstallError(
+                    "Pre-upgrade backup of {} failed: {}. Aborting to preserve a "
+                    "rollback point (re-run with --no-backup to skip the backup).".format(
+                        current_version, e
                     )
-                log("      WARNING: could not create backup (--no-backup): {}".format(e))
-        else:
-            log("[4/5] No existing version to back up")
+                )
 
         log("[5/5] Installing...")
         install_version(home, version, wheel_path, config_path, force=force, log=log)

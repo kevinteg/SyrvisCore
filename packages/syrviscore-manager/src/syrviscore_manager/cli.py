@@ -184,7 +184,7 @@ def _progress_bar(downloaded: int, total: int) -> None:
 @click.option(
     "--no-backup",
     is_flag=True,
-    help="Proceed even if the pre-upgrade backup fails (loses the rollback point)",
+    help="Skip the pre-upgrade backup entirely (no rollback point is created)",
 )
 @handle_errors
 def install(version, wheel_file, config_file, force, clean, path, yes, no_verify, no_backup):
@@ -248,7 +248,7 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
             version=version,
             force=force,
             verify=not no_verify,
-            allow_backup_failure=no_backup,
+            skip_backup=no_backup,
             log=click.echo,
             confirm_reinstall=confirm,
             progress=_progress_bar,
