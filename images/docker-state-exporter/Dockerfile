@@ -15,8 +15,12 @@ COPY main.go .
 # package in v25+), and go-kit v0.13 keeps kit/log. -mod=mod lets the build compute
 # go.sum in-container — there is no committed go.sum for a single-file vendored program.
 ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-mod=mod
+# docker v20.10 is the era-appropriate match for the ~2020 source: it keeps the
+# type names it uses (types.ContainerListOptions / types.ContainerJSON, moved into
+# the container package in v25+) AND requires the older docker/distribution v2.7.1,
+# avoiding v2.8.3's broken reference_deprecated.go (undefined reference.SplitHostname).
 RUN go mod init docker-state-exporter \
- && go get github.com/docker/docker@v24.0.9 \
+ && go get github.com/docker/docker@v20.10.27+incompatible \
  && go get github.com/prometheus/client_golang@v1.19.1 \
  && go get github.com/go-kit/kit@v0.13.0 \
  && go mod tidy \
