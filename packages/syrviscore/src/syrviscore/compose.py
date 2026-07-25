@@ -45,7 +45,7 @@ DEFAULT_DOCKER_IMAGES = {
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.1.6",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.6",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.7",
         "description": "SyrvisCore web dashboard",
     },
     "cloudflare_ddns": {
