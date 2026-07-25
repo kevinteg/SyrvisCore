@@ -37,8 +37,8 @@ DEFAULT_DOCKER_IMAGES = {
     },
     "portainer": {
         "image": "portainer/portainer-ce",
-        "tag": "2.33.6-alpine",
-        "full_image": "portainer/portainer-ce:2.33.6-alpine@sha256:a04e0ac3e99172e451055419e2ed46c67f24bff72209ab09235079d7642e87d8",
+        "tag": "2.33.8-alpine",
+        "full_image": "portainer/portainer-ce:2.33.8-alpine@sha256:8409efc23937ec9f02f19d26831f3a700d18fbf9a5f8d628b88e8b942ae4c7e8",
         "description": "",
     },
     "cloudflared": {
