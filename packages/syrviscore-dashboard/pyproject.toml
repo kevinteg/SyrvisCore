@@ -39,7 +39,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "respx>=0.21",
     "black>=23.0.0",
-    "ruff>=0.1.0",
+    "ruff>=0.1.0,<0.16",  # <0.16: 0.16 expanded default rules (UP/I/B/SIM); adopt deliberately, not via a linter bump
 ]
 
 [project.scripts]
