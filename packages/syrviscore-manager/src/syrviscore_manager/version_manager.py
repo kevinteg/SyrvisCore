@@ -481,7 +481,9 @@ def download_and_install(
         if current_version and current_version != version:
             log("[4/5] Backing up current state ({})...".format(current_version))
             try:
-                backup_path = backup.create_pre_upgrade_backup(home, current_version, version)
+                backup_path = backup.create_pre_upgrade_backup(
+                    home, current_version, version, log=log
+                )
                 if backup_path:
                     log("      Backup: {}".format(backup_path))
                 else:

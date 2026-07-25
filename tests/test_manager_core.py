@@ -416,6 +416,46 @@ class TestBackupRestore:
         assert (target / "compose" / "wiki.yaml").exists()
         assert (target / "data" / "wiki" / "state.db").read_text() == "rows"
 
+    def test_backup_tolerates_files_deleted_mid_backup(
+        self, home, tmp_path, fake_venv_backend, monkeypatch
+    ):
+        """A live L2 datastore (e.g. VictoriaMetrics) merges away and DELETES part
+        files while the backup runs. A file that vanishes between enumeration and
+        read must be skipped, not abort the whole pre-upgrade backup (regression:
+        an upgrade died with 'No such file: .../index.bin')."""
+        install(home, tmp_path, "0.1.0")
+        _populate_config(home)
+
+        vmdata = home / "data" / "victoria-metrics" / "vmdata"
+        vmdata.mkdir(parents=True)
+        (vmdata / "keep.bin").write_bytes(b"stable part")
+        volatile = vmdata / "index.bin"
+        volatile.write_bytes(b"about to be merged away")
+
+        real_sha = backup._sha256_file
+
+        def racy_sha(path):
+            # Simulate VM deleting the part just before we hash it.
+            if str(path) == str(volatile):
+                volatile.unlink()
+                raise FileNotFoundError(2, "No such file or directory", str(volatile))
+            return real_sha(path)
+
+        monkeypatch.setattr(backup, "_sha256_file", racy_sha)
+
+        # Must complete despite the vanished file, not raise.
+        backup_path = backup.create_backup(home, version="0.1.0")
+        assert backup_path.exists()
+
+        with tarfile.open(str(backup_path), "r:gz") as tar:
+            names = set(tar.getnames())
+        # The stable part is captured; the vanished one is silently dropped.
+        assert "data/victoria-metrics/vmdata/keep.bin" in names
+        assert "data/victoria-metrics/vmdata/index.bin" not in names
+        # ... and its digest is not left dangling in the integrity manifest.
+        meta = backup.read_backup_metadata(backup_path)
+        assert "data/victoria-metrics/vmdata/index.bin" not in meta["file_digests"]
+
     def test_restore_rejects_path_traversal(self, home, tmp_path):
         evil_tar = tmp_path / "0.1.0.tar.gz"
         with tarfile.open(str(evil_tar), "w:gz") as tar:

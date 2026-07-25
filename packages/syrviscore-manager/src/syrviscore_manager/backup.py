@@ -217,6 +217,7 @@ def create_backup(
     reason: str = "manual",
     suffix: Optional[int] = None,
     extra_metadata: Optional[Dict[str, Any]] = None,
+    log: LogCallback = _noop_log,
 ) -> Path:
     """
     Create a backup archive of the current state.
@@ -260,8 +261,26 @@ def create_backup(
 
     # Gather everything first so per-file digests can ride inside the metadata
     # member (the archive's own integrity manifest, verified on restore).
+    #
+    # Live L2 data dirs (e.g. VictoriaMetrics' TSDB) churn while we work: a
+    # running store merges and DELETES part files, so a path present at gather
+    # time can be gone by the time we hash or archive it. Enumerate-then-read is
+    # inherently racy against live data. Treat a file that vanishes mid-backup as
+    # transient (it was merged away) and skip it rather than aborting the whole
+    # upgrade — a rollback point that omits a since-deleted DB part is still a
+    # valid rollback point.
     items = _gather_backup_items(home, version)
-    metadata["file_digests"] = {arcname: _sha256_file(src) for arcname, src in items}
+    file_digests: Dict[str, str] = {}
+    stable_items: List[Tuple[str, Path]] = []
+    vanished: List[str] = []
+    for arcname, src in items:
+        try:
+            file_digests[arcname] = _sha256_file(src)
+        except FileNotFoundError:
+            vanished.append(arcname)
+            continue
+        stable_items.append((arcname, src))
+    metadata["file_digests"] = file_digests
 
     # 0600 from the moment of creation — never world-readable, even briefly
     fd = os.open(str(output_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -274,14 +293,26 @@ def create_backup(
                 meta_info.mtime = int(datetime.now().timestamp())
                 tar.addfile(meta_info, fileobj=io.BytesIO(metadata_json))
 
-                for arcname, src_path in items:
-                    tar.add(str(src_path), arcname=arcname)
+                for arcname, src_path in stable_items:
+                    try:
+                        tar.add(str(src_path), arcname=arcname)
+                    except FileNotFoundError:
+                        # Vanished between hashing and archiving — same transient
+                        # churn. Its digest stays in metadata harmlessly: restore
+                        # only checks digests for members actually present.
+                        vanished.append(arcname)
     except BaseException:
         try:
             output_path.unlink()
         except OSError:
             pass
         raise
+
+    if vanished:
+        log(
+            "      Note: {} volatile file(s) were deleted mid-backup and skipped "
+            "(live database churn — expected for running services)".format(len(vanished))
+        )
 
     # Sidecar digest of the archive itself, so an off-box copy can be validated
     # before a restore ever opens it (`shasum -a 256 -c <backup>.sha256`).
@@ -292,7 +323,7 @@ def create_backup(
 
 
 def create_pre_upgrade_backup(
-    home: Path, current_version: str, target_version: str
+    home: Path, current_version: str, target_version: str, log: LogCallback = _noop_log
 ) -> Optional[Path]:
     """Create a backup before upgrading, unless one already exists for this version."""
     backup_path = get_backup_path(home, current_version)
@@ -305,6 +336,7 @@ def create_pre_upgrade_backup(
         version=current_version,
         reason="pre-upgrade",
         extra_metadata={"upgraded_to": target_version},
+        log=log,
     )
 
 
