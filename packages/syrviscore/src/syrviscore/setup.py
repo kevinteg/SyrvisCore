@@ -536,11 +536,6 @@ OIDC_CLIENT_ID={config.get('oidc_client_id', '')}
 OIDC_CLIENT_SECRET={config.get('oidc_client_secret', '')}
 OIDC_REDIRECT_URL={config.get('oidc_redirect_url', '')}
 
-# Cloudflare DDNS (optional — favonia/cloudflare-ddns updates records on IP change)
-CLOUDFLARE_API_TOKEN={config.get('cloudflare_api_token', '')}
-CLOUDFLARE_DDNS_RECORDS={config.get('cloudflare_ddns_records', '')}
-CLOUDFLARE_DDNS_PROXIED={str(config.get('cloudflare_ddns_proxied', True)).lower()}
-
 # Traefik
 TRAEFIK_LOG_LEVEL=INFO
 TRAEFIK_API_DASHBOARD=true
@@ -586,8 +581,6 @@ def write_stack_file(config: dict, install_dir: Path, username: str) -> Path:
     stack = stack_mod.default_stack()
     if config.get("cloudflare_token"):
         stack.services["cloudflared"].enabled = True
-    if config.get("cloudflare_api_token"):
-        stack.services["cloudflare_ddns"].enabled = True
     if config.get("dashboard_enabled"):
         stack.services["dashboard"].enabled = True
 

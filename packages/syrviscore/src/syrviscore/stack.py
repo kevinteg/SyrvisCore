@@ -7,7 +7,7 @@ up whatever is declared.
 
 - **Primordial** (``traefik``, ``portainer``) — always on: the routing substrate
   and a fallback management UI. They cannot be disabled.
-- **Optional** (``cloudflared``, ``dashboard``, ``cloudflare_ddns``) — opt-in.
+- **Optional** (``cloudflared``, ``dashboard``) — opt-in.
 
 Secrets and network settings stay in ``.env``; this file holds only enablement
 plus a few generation-time knobs (e.g. the dashboard subdomain).
@@ -15,7 +15,6 @@ plus a few generation-time knobs (e.g. the dashboard subdomain).
 Kept import-light and Python 3.8-clean (it runs on the DSM 3.8 CLI).
 """
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -28,14 +27,13 @@ from .errors import SyrvisError
 STACK_SCHEMA_VERSION = 1
 
 PRIMORDIAL = ("traefik", "portainer")
-OPTIONAL = ("cloudflared", "dashboard", "cloudflare_ddns")
+OPTIONAL = ("cloudflared", "dashboard")
 ALL_SERVICES = PRIMORDIAL + OPTIONAL
 
 # Optional services whose ``.env`` token, when present, means "already configured".
 # Used by the migration fallback + `stack list` hints.
 TOKEN_FOR = {
     "cloudflared": "CLOUDFLARE_TUNNEL_TOKEN",
-    "cloudflare_ddns": "CLOUDFLARE_API_TOKEN",
 }
 
 # The container name each stack service maps to (for matching running containers).
@@ -44,7 +42,6 @@ CONTAINER_NAME = {
     "portainer": "portainer",
     "cloudflared": "cloudflared",
     "dashboard": "syrviscore-dashboard",
-    "cloudflare_ddns": "cloudflare-ddns",
 }
 
 
@@ -102,7 +99,6 @@ def default_stack() -> Stack:
     services = {n: _svc(n, True) for n in PRIMORDIAL}
     services["cloudflared"] = _svc("cloudflared", False)
     services["dashboard"] = _svc("dashboard", False, subdomain="dash")
-    services["cloudflare_ddns"] = _svc("cloudflare_ddns", False)
     return Stack(services=services)
 
 
@@ -110,13 +106,11 @@ def infer_stack_from_env() -> Stack:
     """Migration fallback when no ``stack.yaml`` exists yet.
 
     Preserves pre-stack behavior: cloudflared was emitted whenever configured, so
-    enable it here (its runtime token still gates whether it works); DDNS was
-    token-gated; the dashboard is new, so it stays opt-in (off).
+    enable it here (its runtime token still gates whether it works); the dashboard
+    is new, so it stays opt-in (off).
     """
     stack = default_stack()
     stack.services["cloudflared"].enabled = True
-    if os.getenv(TOKEN_FOR["cloudflare_ddns"]):
-        stack.services["cloudflare_ddns"].enabled = True
     return stack
 
 

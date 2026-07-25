@@ -13,7 +13,7 @@ is_port() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 is_giturl()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }
 is_subdomain() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'; }
 is_exposure()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }
-is_stacksvc()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(traefik|portainer|cloudflared|dashboard|cloudflare_ddns)$'; }
+is_stacksvc()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(traefik|portainer|cloudflared|dashboard)$'; }
 is_prune()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }
 is_bool()      { printf '%s' "$1" | LC_ALL=C grep -Eq '^(true|false)$'; }
 is_image()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }

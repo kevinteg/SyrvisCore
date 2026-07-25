@@ -21,7 +21,6 @@ def home(tmp_path, monkeypatch):
         "  portainer: {enabled: true}\n"
         "  cloudflared: {enabled: true}\n"
         "  dashboard: {enabled: false}\n"
-        "  cloudflare_ddns: {enabled: false}\n"
     )
     monkeypatch.setenv("SYRVIS_HOME", str(h))
     monkeypatch.setenv("DOMAIN", "example.com")

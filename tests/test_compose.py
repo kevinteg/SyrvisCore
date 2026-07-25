@@ -464,7 +464,7 @@ class TestComposeStructure:
             assert service["restart"] == "unless-stopped"
 
 
-class TestDashboardAndDdns:
+class TestDashboard:
     """Optional core services are gated on the declarative stack (opt-in)."""
 
     def _gen(self):
@@ -532,20 +532,6 @@ class TestDashboardAndDdns:
     def test_cloudflared_exposes_metrics(self, network_env_vars):
         svc = self._gen()._generate_cloudflared_service()
         assert "TUNNEL_METRICS=0.0.0.0:20241" in svc["environment"]
-
-    def test_ddns_needs_stack_and_token(self, network_env_vars, monkeypatch):
-        from syrviscore import stack as stack_mod
-
-        st = stack_mod.default_stack()
-        st.services["cloudflare_ddns"].enabled = True
-        # enabled but no token -> not emitted
-        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
-        assert "cloudflare-ddns" not in self._gen().generate_compose(stack=st)["services"]
-        # enabled + token -> emitted
-        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "cf-token")
-        compose = self._gen().generate_compose(stack=st)
-        assert "cloudflare-ddns" in compose["services"]
-        assert compose["services"]["cloudflare-ddns"]["image"].startswith("favonia/")
 
 
 class TestImagePinLockstep:

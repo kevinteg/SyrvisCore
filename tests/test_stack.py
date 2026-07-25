@@ -18,7 +18,6 @@ def test_default_stack_is_opt_in():
     assert s.is_enabled("traefik") and s.is_enabled("portainer")  # primordial
     assert not s.is_enabled("dashboard")
     assert not s.is_enabled("cloudflared")
-    assert not s.is_enabled("cloudflare_ddns")
     assert s.setting("dashboard", "subdomain") == "dash"
 
 
@@ -52,12 +51,6 @@ def test_infer_when_no_file_preserves_cloudflared(home, monkeypatch):
     s = stack.load_stack()  # no stack.yaml -> infer
     assert s.is_enabled("cloudflared")  # pre-stack behavior preserved
     assert not s.is_enabled("dashboard")  # new -> opt-in
-    assert not s.is_enabled("cloudflare_ddns")
-
-
-def test_infer_enables_ddns_from_token(home, monkeypatch):
-    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "x")
-    assert stack.load_stack().is_enabled("cloudflare_ddns")
 
 
 def test_yaml_roundtrip(home):

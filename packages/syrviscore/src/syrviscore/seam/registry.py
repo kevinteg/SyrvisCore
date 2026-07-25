@@ -41,7 +41,7 @@ KIND_STACK_SERVICE = "stack_service"
 # syrviscore.stack (ALL_SERVICES / PRIMORDIAL) so the generator stays
 # stdlib-only when run straight from the source tree; a drift test asserts
 # the two stay identical.
-STACK_SERVICES = ("traefik", "portainer", "cloudflared", "dashboard", "cloudflare_ddns")
+STACK_SERVICES = ("traefik", "portainer", "cloudflared", "dashboard")
 STACK_PRIMORDIAL = ("traefik", "portainer")
 
 

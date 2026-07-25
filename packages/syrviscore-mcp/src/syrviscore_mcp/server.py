@@ -198,7 +198,7 @@ def stack_apply() -> dict:
 def stack_enable(name: str) -> dict:
     """Declare a core-tier service enabled in config/stack.yaml (privileged;
     intent only — follow with stack_apply, then start). Known services:
-    cloudflared, dashboard, cloudflare_ddns (traefik/portainer are always on)."""
+    cloudflared, dashboard (traefik/portainer are always on)."""
     return _call(tools.stack_enable, name=name)
 
 

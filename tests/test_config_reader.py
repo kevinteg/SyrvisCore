@@ -60,13 +60,11 @@ def test_enabled_components_detection(tmp_path):
     env = _write_env(
         tmp_path,
         "CLOUDFLARE_TUNNEL_TOKEN=tok\n"
-        "CLOUDFLARE_API_TOKEN=\n"
         "SYNOLOGY_DSM_ENABLED=true\n"
         "SYNOLOGY_PHOTOS_ENABLED=false\n",
     )
     cfg = read_config(env_path=env)
     assert cfg.enabled_components["cloudflared"] is True
-    assert cfg.enabled_components["cloudflare_ddns"] is False
     assert cfg.enabled_components["synology_dsm"] is True
     assert cfg.enabled_components["synology_photos"] is False
 

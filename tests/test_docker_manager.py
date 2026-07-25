@@ -386,7 +386,6 @@ class TestCreateTraefikFiles:
             "  portainer: {enabled: true}\n"
             "  cloudflared: {enabled: true}\n"
             "  dashboard: {enabled: false}\n"
-            "  cloudflare_ddns: {enabled: false}\n"
         )
 
         containers = {

@@ -87,10 +87,6 @@ _CORE_ABOUT = {
         "deterministic core the CLI uses.",
         "https://github.com/kevinteg/SyrvisCore",
     ),
-    "cloudflare_ddns": (
-        "Keeps a DNS record pointed at the home public IP (the " "pre-tunnel remote-access path).",
-        "https://github.com/favonia/cloudflare-ddns",
-    ),
 }
 
 

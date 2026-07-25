@@ -27,7 +27,6 @@ SECRET_MARKERS = ("TOKEN", "SECRET", "PASSWORD", "KEY")
 # Optional components enabled by the presence of a token-style key (non-empty).
 _TOKEN_COMPONENTS = {
     "cloudflared": "CLOUDFLARE_TUNNEL_TOKEN",
-    "cloudflare_ddns": "CLOUDFLARE_API_TOKEN",
 }
 
 # Optional components enabled by a boolean-style key being truthy.

@@ -4,7 +4,7 @@ import { LinksBar } from "./LinksBar";
 import { UpdatesCard } from "./UpdatesCard";
 import { ErrorNote, Spinner } from "./ui";
 
-const ORDER = ["core", "traefik", "portainer", "cloudflared", "cloudflare_ddns", "config"];
+const ORDER = ["core", "traefik", "portainer", "cloudflared", "config"];
 
 export function OverviewPanel({
   snapshot,

@@ -30,11 +30,6 @@ ghcr.io/kevinteg/syrviscore-dashboard:
   expected_base: python:3.12-slim
   eol_product: python
   source: https://github.com/kevinteg/SyrvisCore
-docker.io/favonia/cloudflare-ddns:
-  publisher_class: community        # single-maintainer (but high-signal + cosign-signed, scratch)
-  expected_base: scratch
-  eol_product: null
-  source: https://github.com/favonia/cloudflare-ddns
 
 # ── Monitoring / metrics stack ───────────────────────────────────────────────
 docker.io/victoriametrics/victoria-metrics:

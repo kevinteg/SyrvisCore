@@ -53,12 +53,6 @@ DEFAULT_DOCKER_IMAGES = {
         "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.7@sha256:e778c1115f06edb55358439ccc36cbc58a67fbf632b59aeee24e61903de148ba",
         "description": "SyrvisCore web dashboard",
     },
-    "cloudflare_ddns": {
-        "image": "favonia/cloudflare-ddns",
-        "tag": "1.15.1",
-        "full_image": "favonia/cloudflare-ddns:1.15.1@sha256:a4e2089b3531eec8c9328c7a9a586f80e8d67dcd94856e0b596b7896e1de3f62",
-        "description": "Cloudflare Dynamic DNS updater",
-    },
 }
 
 
@@ -378,31 +372,6 @@ class ComposeGenerator:
             # router prefix `syrvis-dashboard`) — no traefik labels.
         }
 
-    def _generate_ddns_service(self) -> Optional[Dict[str, Any]]:
-        """Generate the Cloudflare DDNS service (favonia/cloudflare-ddns).
-
-        Optional like cloudflared: only emitted when a ``CLOUDFLARE_API_TOKEN`` is
-        configured (else the dashboard's DDNS probe reports ``not_configured``).
-        """
-        if "cloudflare_ddns" not in self.build_config["docker_images"]:
-            return None
-        if not os.getenv("CLOUDFLARE_API_TOKEN"):
-            return None
-
-        image = self.build_config["docker_images"]["cloudflare_ddns"]["full_image"]
-        return {
-            "image": image,
-            "container_name": "cloudflare-ddns",
-            "restart": "unless-stopped",
-            "security_opt": ["no-new-privileges:true"],
-            "networks": ["proxy"],
-            "environment": [
-                "CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}",
-                "DOMAINS=${CLOUDFLARE_DDNS_RECORDS}",
-                "PROXIED=${CLOUDFLARE_DDNS_PROXIED:-true}",
-            ],
-        }
-
     def _generate_networks(self, network_config: Dict[str, str]) -> Dict[str, Any]:
         """
         Generate network configurations.
@@ -483,11 +452,6 @@ class ComposeGenerator:
             dashboard = self._generate_dashboard_service()
             if dashboard:
                 compose["services"]["syrviscore-dashboard"] = dashboard
-
-        if self._stack.is_enabled("cloudflare_ddns"):
-            ddns = self._generate_ddns_service()
-            if ddns:
-                compose["services"]["cloudflare-ddns"] = ddns
 
         return compose
 

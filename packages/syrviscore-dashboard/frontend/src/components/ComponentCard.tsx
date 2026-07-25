@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Boxes, Cloud, Globe, Network, Server, Settings2, type LucideIcon } from "lucide-react";
+import { Boxes, Cloud, Network, Server, Settings2, type LucideIcon } from "lucide-react";
 import { ProbeResult } from "../lib/api";
 import { StatusPill } from "./StatusPill";
 
@@ -8,7 +8,6 @@ const META: Record<string, { title: string; Icon: LucideIcon }> = {
   traefik: { title: "Traefik", Icon: Network },
   portainer: { title: "Portainer", Icon: Boxes },
   cloudflared: { title: "Cloudflare Tunnel", Icon: Cloud },
-  cloudflare_ddns: { title: "Cloudflare DDNS", Icon: Globe },
   config: { title: "Configuration", Icon: Settings2 },
 };
 
@@ -66,22 +65,6 @@ function Extra({ component, extra }: { component: string; extra: Record<string, 
   }
   if (component === "cloudflared") {
     return <Row label="edge connections" value={String(e.readyConnections ?? "—")} />;
-  }
-  if (component === "cloudflare_ddns") {
-    const records = (e.records ?? []) as { name: string; record_ip?: string; in_sync?: boolean }[];
-    return (
-      <div className="space-y-1">
-        <Row label="public IP" value={(e.public_ip as string) ?? "—"} />
-        {records.map((r) => (
-          <div key={r.name} className="flex items-center justify-between text-xs">
-            <span className="truncate">{r.name}</span>
-            <span className={`font-mono ${r.in_sync ? "text-emerald-300" : "text-amber-300"}`}>
-              {r.record_ip ?? "—"}
-            </span>
-          </div>
-        ))}
-      </div>
-    );
   }
   if (component === "config") {
     const enabled = (e.enabled ?? []) as string[];

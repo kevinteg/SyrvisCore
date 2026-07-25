@@ -5,7 +5,6 @@ Each entry is ``(component_name, needs_http, fn)``. HTTP probes receive a shared
 """
 
 from .base import ProbeResult, Status, guard, severity
-from .cloudflare_ddns import probe_ddns
 from .cloudflared import probe_cloudflared
 from .config import probe_config
 from .core import probe_core
@@ -17,7 +16,6 @@ PROBES = [
     ("traefik", True, probe_traefik),
     ("portainer", True, probe_portainer),
     ("cloudflared", True, probe_cloudflared),
-    ("cloudflare_ddns", True, probe_ddns),
     ("config", False, probe_config),
 ]
 
@@ -34,6 +32,5 @@ __all__ = [
     "probe_traefik",
     "probe_portainer",
     "probe_cloudflared",
-    "probe_ddns",
     "probe_config",
 ]

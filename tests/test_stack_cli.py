@@ -71,9 +71,3 @@ def test_enable_unknown_rejected(home, runner):
     r = runner.invoke(cli, ["stack", "enable", "nope"])
     assert r.exit_code != 0
     assert "unknown" in r.output.lower()
-
-
-def test_ddns_hint_when_enabled_without_token(home, runner):
-    runner.invoke(cli, ["stack", "enable", "cloudflare_ddns"])
-    svcs = _services(runner.invoke(cli, ["stack", "list", "--json"]).output)
-    assert "CLOUDFLARE_API_TOKEN" in svcs["cloudflare_ddns"]["note"]
