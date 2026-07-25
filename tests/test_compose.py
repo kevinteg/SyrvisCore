@@ -576,4 +576,7 @@ class TestImagePinLockstep:
 
         entry = DEFAULT_DOCKER_IMAGES["dashboard"]
         assert entry["tag"] == dashboard_version
-        assert entry["full_image"].endswith(":" + dashboard_version)
+        # full_image is repo:tag or repo:tag@sha256:… (digest-pinned) — the tag
+        # segment (before any digest) must still equal the dashboard version.
+        ref = entry["full_image"].split("@", 1)[0]
+        assert ref.endswith(":" + dashboard_version)

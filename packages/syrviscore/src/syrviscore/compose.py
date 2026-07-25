@@ -22,36 +22,41 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-# Default Docker image versions - used when config.yaml doesn't exist
+# Default Docker image versions - used when config.yaml doesn't exist.
+# full_image is DIGEST-PINNED (repo:tag@sha256:…): the tag stays for readability,
+# the digest makes the pull immutable — a re-pushed tag can't silently change the
+# core image. Digests resolved 2026-07-25; bump the tag AND re-resolve the digest
+# together (Renovate pinDigests does both). `syrvis images` marks a tag-only core
+# pin as needs-attention; a digest pin from a trusted publisher reads as trusted.
 DEFAULT_DOCKER_IMAGES = {
     "traefik": {
         "image": "traefik",
         "tag": "v3.6.5",
-        "full_image": "traefik:v3.6.5",
+        "full_image": "traefik:v3.6.5@sha256:67622638cd88dbfcfba40159bc652ecf0aea0e032f8a3c7e3134ae7c037b9910",
         "description": "",
     },
     "portainer": {
         "image": "portainer/portainer-ce",
         "tag": "2.33.6-alpine",
-        "full_image": "portainer/portainer-ce:2.33.6-alpine",
+        "full_image": "portainer/portainer-ce:2.33.6-alpine@sha256:a04e0ac3e99172e451055419e2ed46c67f24bff72209ab09235079d7642e87d8",
         "description": "",
     },
     "cloudflared": {
         "image": "cloudflare/cloudflared",
         "tag": "2026.7.1",
-        "full_image": "cloudflare/cloudflared:2026.7.1",
+        "full_image": "cloudflare/cloudflared:2026.7.1@sha256:188bb03589a32affed3cf4d0590565ffe67b78866e6b5582574afab2b705bafe",
         "description": "",
     },
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.1.7",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.7",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.1.7@sha256:e778c1115f06edb55358439ccc36cbc58a67fbf632b59aeee24e61903de148ba",
         "description": "SyrvisCore web dashboard",
     },
     "cloudflare_ddns": {
         "image": "favonia/cloudflare-ddns",
         "tag": "1.15.1",
-        "full_image": "favonia/cloudflare-ddns:1.15.1",
+        "full_image": "favonia/cloudflare-ddns:1.15.1@sha256:a4e2089b3531eec8c9328c7a9a586f80e8d67dcd94856e0b596b7896e1de3f62",
         "description": "Cloudflare Dynamic DNS updater",
     },
 }
