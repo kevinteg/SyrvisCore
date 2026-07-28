@@ -199,9 +199,11 @@ no reprovision needed):
 
 `syrvis resume` order: core first (routing substrate + macvlan shim), then
 snapshot VMs (else declared enabled+autostart), then L2 via the ONE reconcile
-engine (`trigger: resume`), then the instance `post-resume` hook. A crashed
-resume leaves the instance active-but-partial; recover with `syrvis start` +
-`sudo syrvis reconcile`.
+engine (`trigger: resume`), then the instance `post-resume` hook. A resume
+killed mid-flight leaves the instance **halted** (runstate clears only at the
+end; `lifecycle.resume_instance`) — recovery is re-running `syrvis resume`. A
+resume that *completes* with failures (exit 2) leaves it active-but-partial;
+recover with `syrvis start` + `sudo syrvis reconcile`.
 
 ### UPS integration (home-tech)
 
