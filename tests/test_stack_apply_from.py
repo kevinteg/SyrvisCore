@@ -79,7 +79,7 @@ class TestStackApplyFrom:
             },
         )
         # stack change triggers a compose regen; stub it (no .env in this home)
-        monkeypatch.setattr(cli_mod, "_regenerate_compose", lambda: (True, "regenerated"))
+        monkeypatch.setattr(cli_mod, "_regenerate_compose", lambda trigger="cli": (True, "regenerated"))
         result = CliRunner().invoke(cli, ["stack", "apply", "--from", desired, "--json", "-y"])
         assert result.exit_code == 0, result.output
         body = json.loads(result.output)

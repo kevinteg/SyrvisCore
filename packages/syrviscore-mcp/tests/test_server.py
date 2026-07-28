@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "profile_list",
     "image_updates",
     "export",
+    "deployment_history",
     # privileged, non-destructive
     "start",
     "stop",
@@ -47,12 +48,16 @@ EXPECTED_TOOLS = {
     "service_declare",
     "service_adopt",
     "install",
+    "shutdown",
+    "resume",
+    "restart_graceful",
     # privileged + destructive
     "activate",
     "rollback",
     "uninstall",
     "cleanup",
     "service_remove",
+    "service_rollback",
     "reconcile_prune",
     "schedule_apply",
     "schedule_sync",
@@ -61,6 +66,7 @@ EXPECTED_TOOLS = {
 
 DESTRUCTIVE = {
     "service_set_image",
+    "service_rollback",
     "activate",
     "rollback",
     "uninstall",
@@ -88,6 +94,7 @@ READ_ONLY = {
     "profile_list",
     "image_updates",
     "export",
+    "deployment_history",
 }
 IDEMPOTENT = {
     "reconcile",
@@ -111,7 +118,7 @@ def _tools():
 def test_all_tools_registered():
     names = set(_tools().keys())
     assert names == EXPECTED_TOOLS
-    assert len(EXPECTED_TOOLS) == 45
+    assert len(EXPECTED_TOOLS) == 50
 
 
 def test_destructive_tools_have_destructive_hint():

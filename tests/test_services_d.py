@@ -168,13 +168,13 @@ class _FakeManager:
         self.calls = []
         self.fail = set(fail)
 
-    def install_declaration(self, service, start=True, preserve_data_on_rollback=False):
+    def install_declaration(self, service, start=True, preserve_data_on_rollback=False, **kwargs):
         self.calls.append(("install", service.name, preserve_data_on_rollback))
         if service.name in self.fail:
             return False, "boom"
         return True, "installed"
 
-    def remove(self, name, purge=False, keep_declaration=False):
+    def remove(self, name, purge=False, keep_declaration=False, **kwargs):
         self.calls.append(("remove", name, purge, keep_declaration))
         return True, "removed"
 
@@ -294,7 +294,7 @@ class TestReconcileCli:
         monkeypatch.setattr(
             ServiceManager,
             "install_declaration",
-            lambda self, service, start=True, preserve_data_on_rollback=False: (True, "installed"),
+            lambda self, service, start=True, preserve_data_on_rollback=False, **kw: (True, "installed"),
         )
         result = CliRunner().invoke(cli, ["reconcile", "--json"])
         assert result.exit_code == 1, result.output
@@ -328,7 +328,7 @@ class TestReconcileCli:
         monkeypatch.setattr(
             ServiceManager,
             "install_declaration",
-            lambda self, service, start=True: (False, "no docker at boot-test time"),
+            lambda self, service, start=True, **kw: (False, "no docker at boot-test time"),
         )
         result = CliRunner().invoke(cli, ["reconcile", "--boot", "--prune", "purge", "--json"])
         assert result.exit_code == 0, result.output  # best-effort: never fatal
@@ -425,7 +425,7 @@ class TestOrchestrationBoundary:
         sentinel = before + "# operator comment\n"
         path.write_text(sentinel)
 
-        monkeypatch.setattr(ServiceManager, "_stop_service", lambda self, n, p: (True, "ok"))
+        monkeypatch.setattr(ServiceManager, "_stop_service", lambda self, n, p, **kw: (True, "ok"))
         monkeypatch.setattr(ServiceManager, "_start_service", lambda self, n, p: (True, "ok"))
         assert sm.start("app")[0]  # enabled already True -> no rewrite
         assert path.read_text() == sentinel
@@ -496,7 +496,7 @@ class TestServiceDeclareCli:
         monkeypatch.setattr(
             ServiceManager,
             "install_declaration",
-            lambda self, service, start=True, preserve_data_on_rollback=False: (
+            lambda self, service, start=True, preserve_data_on_rollback=False, **kw: (
                 installed.append(service.name) or (True, "installed")
             ),
         )

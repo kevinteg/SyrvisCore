@@ -46,7 +46,7 @@ class TestRegexDrift:
 
     def test_reserved_names_match_source(self):
         text = (REPO / "packages/syrviscore/src/syrviscore/service_schema.py").read_text()
-        m = re.search(r"RESERVED_NAMES\s*=\s*frozenset\((\{[^}]+\})\)", text)
+        m = re.search(r"RESERVED_NAMES\s*=\s*frozenset\(\s*(\{[^}]+\})\s*\)", text)
         assert m
         source_set = eval(m.group(1))  # noqa: S307 - trusted local source
         assert _cli_regexes.RESERVED_NAMES == frozenset(source_set)

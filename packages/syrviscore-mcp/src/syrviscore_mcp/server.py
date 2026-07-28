@@ -107,6 +107,15 @@ def export() -> dict:
 
 
 @mcp.tool(annotations=RO)
+def deployment_history(workload: str = "") -> dict:
+    """Deployment revisions per workload (read-only): image transitions, env
+    NAMES (values redacted at source), volumes, exposure, trigger, outcome.
+    Empty workload lists every workload incl. the '@core' stack records. Pick
+    a revision here, then roll back with service_rollback."""
+    return _call(tools.deployment_history, workload=workload or None)
+
+
+@mcp.tool(annotations=RO)
 def logs(service: Optional[str] = None, tail: int = 100) -> dict:
     """Recent log lines for a core/managed service (bounded; never streaming)."""
     return _call(tools.logs, service=service, tail=tail)
@@ -179,6 +188,29 @@ def stop() -> dict:
 def restart() -> dict:
     """Restart the core services (privileged)."""
     return _call(tools.restart)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def shutdown(reason: str = "ups") -> dict:
+    """Gracefully halt the whole instance (privileged; the UPS-on-battery verb):
+    quiesce hooks, ordered stops (DBs get their grace), VM ACPI shutdown, then
+    a persisted halted state. reason='ups' auto-resumes on the next boot;
+    'maintenance' stays down until resume. Reversible — no token needed."""
+    return _call(tools.shutdown, reason=reason)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def resume() -> dict:
+    """Bring a halted instance back (privileged): core stack, VMs, then Layer 2
+    via the reconcile engine. No-op when the instance is active."""
+    return _call(tools.resume)
+
+
+@mcp.tool(annotations={"idempotentHint": True})
+def restart_graceful() -> dict:
+    """Graceful full-instance restart (privileged): ordered stop of every
+    managed workload (hooks + stop grace) then ordered bring-up."""
+    return _call(tools.restart_graceful)
 
 
 @mcp.tool(annotations={"idempotentHint": True})
@@ -298,6 +330,15 @@ def service_set_image(name: str, image: str, confirm: str = "") -> dict:
     pulls + RUNS new code). Fails closed on the registry allowlist. Two-call:
     first returns a plan+token; re-call with confirm=<token> to proceed."""
     return _call(tools.service_set_image, name=name, image=image, confirm=confirm)
+
+
+@mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})
+def service_rollback(name: str, revision: int, confirm: str = "") -> dict:
+    """Roll a service back to a prior deployment revision (privileged; the old
+    image runs again). Pick the revision from deployment_history. Two-call:
+    first returns a plan+token; re-call with confirm=<token> to proceed. Note:
+    GitOps-ephemeral — revert the deployment repo too to make it durable."""
+    return _call(tools.service_rollback, name=name, revision=revision, confirm=confirm)
 
 
 @mcp.tool(annotations={"openWorldHint": True, "destructiveHint": True})

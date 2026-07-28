@@ -223,6 +223,19 @@ def get_jobs_script_dir(syrvis_home: Optional[Path] = None) -> Path:
     return base / "jobs"
 
 
+def get_hooks_dir(syrvis_home: Optional[Path] = None) -> Path:
+    """Get path to the root-owned lifecycle hook directory.
+
+    ``<home>/hooks.d/<workload>/<event>`` (and ``hooks.d/instance/<event>``)
+    hold ONE executable per transition event. Same trust class as ``jobs/``:
+    a hook runs as root only if it AND every parent directory up to here are
+    root-owned and not group/world-writable — an unprivileged operator cannot
+    author one (derive-not-declare).
+    """
+    base = Path(syrvis_home) if syrvis_home is not None else get_syrvis_home()
+    return base / "hooks.d"
+
+
 # =============================================================================
 # Data Directory (persistent across versions)
 # =============================================================================
@@ -231,6 +244,17 @@ def get_jobs_script_dir(syrvis_home: Optional[Path] = None) -> Path:
 def get_data_dir() -> Path:
     """Get path to persistent data directory."""
     return get_syrvis_home() / "data"
+
+
+def get_state_dir(syrvis_home: Optional[Path] = None) -> Path:
+    """Get path to the instance state directory (runstate etc.)."""
+    base = Path(syrvis_home) if syrvis_home is not None else get_syrvis_home()
+    return base / "data" / "state"
+
+
+def get_runstate_path(syrvis_home: Optional[Path] = None) -> Path:
+    """Get path to the persisted instance runstate (absent == active)."""
+    return get_state_dir(syrvis_home) / "runstate.json"
 
 
 def get_traefik_data_dir() -> Path:

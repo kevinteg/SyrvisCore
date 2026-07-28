@@ -30,8 +30,11 @@ NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$", re.ASCII)
 # service_schema.SUBDOMAIN_RE — a single DNS label used as a Traefik subdomain.
 SUBDOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", re.ASCII)
 
-# service_schema.RESERVED_NAMES — core-stack names a Layer 2 service may not use.
-RESERVED_NAMES = frozenset({"traefik", "portainer", "cloudflared", "proxy", "syrvis-macvlan"})
+# service_schema.RESERVED_NAMES — core-stack names + platform-owned data/
+# subtrees a Layer 2 service may not use.
+RESERVED_NAMES = frozenset(
+    {"traefik", "portainer", "cloudflared", "proxy", "syrvis-macvlan", "deployments", "state"}
+)
 
 # syrviscore.exposure.EXPOSURES — how a routed service is reached from outside.
 EXPOSURES = frozenset({"internal", "tunnel"})

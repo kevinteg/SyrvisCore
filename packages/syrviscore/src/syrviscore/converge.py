@@ -351,7 +351,9 @@ def apply_plan(
 
     if reconcile_actions:
         results.extend(
-            services_d.apply_reconcile_plan(manager, declarations, {"actions": reconcile_actions})
+            services_d.apply_reconcile_plan(
+                manager, declarations, {"actions": reconcile_actions}, trigger="converge"
+            )
         )
 
     return results

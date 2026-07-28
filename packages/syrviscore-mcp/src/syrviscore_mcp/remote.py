@@ -46,6 +46,8 @@ _KIND_VALIDATORS = {
     "prune_policy": lambda v, cfg: validate.validate_prune_policy(v),
     "boolean": lambda v, cfg: validate.validate_bool_flag(v),
     "stack_service": lambda v, cfg: validate.validate_stack_service(v),
+    "revision": lambda v, cfg: str(validate.validate_revision(v)),
+    "halt_reason": lambda v, cfg: validate.validate_halt_reason(v),
 }
 
 

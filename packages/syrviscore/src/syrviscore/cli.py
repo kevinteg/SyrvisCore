@@ -545,6 +545,47 @@ def service_set_image(name, image):
         raise SyrvisError(message)
 
 
+@service.command("rollback")
+@click.argument("name")
+@click.option(
+    "--to",
+    "to_revision",
+    type=int,
+    default=None,
+    help="Deployment revision to restore (see 'syrvis history NAME'); "
+    "defaults to the previous successful revision",
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@handle_errors
+def service_rollback(name, to_revision, yes):
+    """Roll back a service to a prior deployment revision.
+
+    Restores the target revision's manifest (image, env, volumes, routing)
+    through the full trust boundary and redeploys — data and secrets are left
+    in place. Records a NEW revision, Helm-style. Note: the next IaC apply or
+    reconcile that still declares the newer image will redeploy it; revert the
+    deployment repo too to make a rollback durable.
+
+        sudo syrvis service rollback --to 3 -- cyberquill
+    """
+    privilege.ensure_elevated("Rolling back a service requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    if not yes:
+        target = "revision {}".format(to_revision) if to_revision else "the previous revision"
+        click.echo(f"This will redeploy '{name}' at {target}.")
+        if not click.confirm("Continue?", default=False):
+            click.echo("Aborted")
+            return
+
+    manager = ServiceManager()
+    success, message = manager.rollback(name, to_revision)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 @service.command("task")
 @click.argument("name")
 @click.option(
@@ -1055,6 +1096,95 @@ def updates(as_json, refresh):
             click.echo("  {:<22} {}  up to date".format(name, img.get("current")))
 
 
+@cli.command("history")
+@click.argument("workload", required=False)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@click.option("--limit", type=int, default=None, help="Newest N revisions per workload")
+@click.option(
+    "--revision",
+    "revision",
+    type=int,
+    default=None,
+    help="Show one revision in full (requires WORKLOAD)",
+)
+@handle_errors
+def history(workload, as_json, limit, revision):
+    """Show deployment history: revisions with image, env names, volumes, outcome.
+
+    Every deploy/remove/rollback of a managed workload appends a revision under
+    data/deployments/. Inline env VALUES are always redacted here — records
+    show which variables a deployment exposed, never their contents. Roll a
+    service back to a listed revision with 'syrvis service rollback'.
+    """
+    from syrviscore import deployments
+
+    try:
+        home = get_syrvis_home()
+        if revision is not None:
+            if not workload:
+                raise SyrvisError("--revision requires a WORKLOAD argument")
+            record = deployments._redact_for_output(
+                deployments.load_revision(home, workload, revision)
+            )
+            report = {"workloads": {workload: [record]}, "invalid": []}
+        else:
+            report = deployments.load_history(home, workload=workload, limit=limit)
+
+        if as_json:
+            click.echo(jsonlib.dumps(report, indent=2, default=str))
+            return
+    except Exception as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    workloads = report.get("workloads", {})
+    if not workloads:
+        target = f" for '{workload}'" if workload else ""
+        click.echo(f"No deployment history{target} yet.")
+        click.echo("Records appear as services are deployed, updated, or removed.")
+        return
+
+    for name, records in workloads.items():
+        click.echo()
+        click.echo(f"{name}:")
+        widths = (5, 18, 10, 11, 8, 0)
+        click.echo(
+            format_row(list(zip(("REV", "WHEN", "ACTION", "TRIGGER", "OUTCOME", "IMAGE"), widths)))
+        )
+        click.echo("-" * 78)
+        for rec in records:
+            if rec.get("tier") == "core":
+                changed = []
+                pins, prev = rec.get("pins") or {}, rec.get("previous_pins") or {}
+                for svc, pin in sorted(pins.items()):
+                    if prev.get(svc) != pin:
+                        changed.append(svc)
+                image = "pins: {}".format(", ".join(changed) or "(unchanged set)")
+            else:
+                image = rec.get("image") or "-"
+                if rec.get("previous_image") and rec.get("previous_image") != rec.get("image"):
+                    image = "{} ← {}".format(image, rec["previous_image"])
+                if rec.get("rollback_of"):
+                    image += " (rollback of {})".format(rec["rollback_of"])
+            cells = (
+                str(rec.get("revision", "?")),
+                (rec.get("timestamp") or "")[:16].replace("T", " "),
+                rec.get("action", "?"),
+                rec.get("trigger", "?"),
+                rec.get("outcome", "?"),
+                image,
+            )
+            click.echo(format_row(list(zip(cells, widths))))
+
+    invalid = report.get("invalid") or []
+    if invalid:
+        click.echo()
+        for row in invalid:
+            click.echo("  (unreadable record {}: {})".format(row["file"], row["error"]))
+    click.echo()
+
+
 @cli.command("images")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @click.option(
@@ -1138,10 +1268,23 @@ def status(as_json):
         except Exception:  # noqa: BLE001
             trust_summary = {"count": 0, "trusted": 0, "attention": 0}
 
+        # Intentionally-halted vs everything-crashed must be distinguishable.
+        try:
+            from syrviscore import lifecycle
+
+            runstate = lifecycle.read_runstate() or {"state": "active"}
+        except Exception:  # noqa: BLE001
+            runstate = {"state": "active"}
+
         if as_json:
             click.echo(
                 jsonlib.dumps(
-                    {"version": active, "services": statuses, "images": trust_summary},
+                    {
+                        "version": active,
+                        "runstate": runstate,
+                        "services": statuses,
+                        "images": trust_summary,
+                    },
                     indent=2,
                     default=str,
                 )
@@ -1151,6 +1294,15 @@ def status(as_json):
         if as_json:
             json_error(e, indent=2)
         raise
+
+    if runstate.get("state") == "halted":
+        click.echo()
+        click.echo(
+            "INSTANCE HALTED (reason: {}, since {}) — services are intentionally "
+            "stopped. Run 'syrvis resume'.".format(
+                runstate.get("reason", "?"), runstate.get("at", "?")
+            )
+        )
 
     if not statuses:
         click.echo("No services found")
@@ -1236,15 +1388,158 @@ def stop():
 
 
 @cli.command()
+@click.option(
+    "--graceful",
+    is_flag=True,
+    help="Graceful full-instance restart: ordered stop of every managed "
+    "workload (hooks + stop grace), then ordered bring-up. Without it: "
+    "core-only force-recreate (existing behavior).",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report (with --graceful)")
 @handle_errors
-def restart():
+def restart(graceful, as_json):
     """Restart all services (alias for 'core restart')."""
     privilege.ensure_elevated("Restarting services requires elevated privileges.")
+    if graceful:
+        from syrviscore import lifecycle
+
+        try:
+            home = get_syrvis_home()
+            down = lifecycle.shutdown_instance(home, reason="maintenance", by="restart")
+            up = lifecycle.resume_instance(home, by="restart")
+        except Exception as e:
+            if as_json:
+                json_error(e, indent=2)
+            raise
+        report = {
+            "action": "restart",
+            "shutdown": down,
+            "resume": up,
+            "ok": down.get("ok", False) and up.get("ok", False),
+        }
+        if as_json:
+            click.echo(jsonlib.dumps(report, indent=2, default=str))
+        else:
+            click.echo(
+                "Gracefully restarted the instance ({})".format(
+                    "ok" if report["ok"] else "degraded — see 'syrvis status'"
+                )
+            )
+        if not report["ok"]:
+            raise SystemExit(2)
+        return
     click.echo("Restarting services...")
     manager = DockerManager()
     manager.restart_core_services()
     click.echo("Services restarted")
     click.echo("Run 'syrvis status' to verify")
+
+
+@cli.command()
+@click.option(
+    "--reason",
+    type=click.Choice(["ups", "maintenance"]),
+    default="maintenance",
+    help="Why the instance is halting. 'ups' resumes automatically on the next "
+    "boot (power returned); 'maintenance' stays down until 'syrvis resume'.",
+)
+@click.option(
+    "--timeout",
+    "timeout_s",
+    type=int,
+    default=None,
+    help="Wall-clock budget in seconds (default 180); stragglers are force-stopped",
+)
+@click.option(
+    "--vm-deadline",
+    type=int,
+    default=None,
+    help="Max seconds to wait for VMs to power off gracefully (default 90)",
+)
+@click.option(
+    "--hold/--resume-on-boot",
+    "hold",
+    default=None,
+    help="Override the boot policy the reason implies",
+)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report")
+@handle_errors
+def shutdown(reason, timeout_s, vm_deadline, hold, as_json):
+    """Gracefully stop every managed workload and halt the instance.
+
+    The UPS-on-battery verb: fires the instance pre-shutdown hook, issues VM
+    ACPI shutdown (guests drain in parallel), stops Layer 2 services in
+    priority order (pre-stop hooks quiesce databases, then a per-service stop
+    grace), waits for VMs (force-off stragglers), and stops the core stack
+    with Traefik last. Declared intent is untouched; 'syrvis resume' (or the
+    next boot, for --reason ups) brings everything back.
+    """
+    from syrviscore import lifecycle
+
+    privilege.ensure_elevated("Shutting down the instance requires elevated privileges.")
+    kwargs = {}
+    if timeout_s is not None:
+        kwargs["budget_s"] = timeout_s
+    if vm_deadline is not None:
+        kwargs["vm_deadline_s"] = vm_deadline
+    if hold is not None:
+        kwargs["resume_on_boot"] = not hold
+    try:
+        report = lifecycle.shutdown_instance(get_syrvis_home(), reason=reason, **kwargs)
+    except Exception as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2, default=str))
+    else:
+        for phase in report["phases"]:
+            mark = "[+]" if phase["ok"] else "[-]"
+            click.echo("  {} {} ({} item(s))".format(mark, phase["phase"], len(phase["items"])))
+        click.echo()
+        click.echo(
+            "Instance halted (reason: {}; {}). Resume with 'syrvis resume'.".format(
+                report["reason"],
+                "auto-resumes on next boot" if report["resume_on_boot"] else "stays down on boot",
+            )
+        )
+    if report.get("exit"):
+        raise SystemExit(report["exit"])
+
+
+@cli.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report")
+@handle_errors
+def resume(as_json):
+    """Bring a halted instance back: core stack, VMs, then Layer 2 services.
+
+    Clears the halted state and starts everything that was running before the
+    shutdown (declared intent was never touched, so the one reconcile engine
+    restores it). A no-op when the instance is active.
+    """
+    from syrviscore import lifecycle
+
+    privilege.ensure_elevated("Resuming the instance requires elevated privileges.")
+    try:
+        report = lifecycle.resume_instance(get_syrvis_home())
+    except Exception as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
+
+    if as_json:
+        click.echo(jsonlib.dumps(report, indent=2, default=str))
+    elif not report.get("changed"):
+        click.echo("Instance is active — nothing to resume.")
+    else:
+        for phase in report["phases"]:
+            mark = "[+]" if phase["ok"] else "[-]"
+            click.echo("  {} {} ({} item(s))".format(mark, phase["phase"], len(phase["items"])))
+        click.echo()
+        click.echo("Instance resumed ({}).".format("ok" if report.get("ok") else "degraded"))
+    if report.get("exit"):
+        raise SystemExit(report["exit"])
 
 
 @cli.command()
@@ -1413,11 +1708,42 @@ def reconcile(dry_run, as_json, prune, strict, boot, yes):
     must never pass silently) or a CRITICAL service's failure; any failure
     with --strict. --boot is always best-effort and exits 0.
     """
-    from syrviscore import services_d
+    from syrviscore import lifecycle, services_d
     from syrviscore.service_manager import ServiceManager
 
     if boot:
         prune = None  # boot never destroys anything
+        # The instance-halted matrix: a UPS halt auto-resumes when power (and
+        # therefore this boot) returns; a maintenance halt survives reboots
+        # until an explicit `syrvis resume`.
+        state = lifecycle.read_runstate()
+        if state is not None:
+            if not state.get("resume_on_boot"):
+                if as_json:
+                    click.echo(
+                        jsonlib.dumps(
+                            {"halted": True, "resumed": False, "reason": state.get("reason")},
+                            indent=2,
+                        )
+                    )
+                else:
+                    click.echo(
+                        "Instance is halted ({}) — run 'syrvis resume' to bring it up.".format(
+                            state.get("reason", "maintenance")
+                        )
+                    )
+                return
+            privilege.ensure_elevated("Resuming the instance requires elevated privileges.")
+            report = lifecycle.resume_instance(get_syrvis_home(), boot=True, by="boot")
+            if as_json:
+                click.echo(jsonlib.dumps(report, indent=2, default=str))
+            else:
+                click.echo(
+                    "Resumed after {} halt ({}).".format(
+                        state.get("reason", "?"), "ok" if report.get("ok") else "degraded"
+                    )
+                )
+            return
     if not dry_run:
         privilege.ensure_elevated("Reconciling services requires elevated privileges.")
 
@@ -1460,7 +1786,12 @@ def reconcile(dry_run, as_json, prune, strict, boot, yes):
             abort=True,
         )
 
-    results = services_d.apply_reconcile_plan(manager, declarations, plan)
+    try:
+        results = services_d.apply_reconcile_plan(manager, declarations, plan)
+    except lifecycle.InstanceHaltedError as e:
+        if as_json:
+            json_error(e, indent=2)
+        raise
     ok, reason = services_d.verdict(plan, results, strict=strict)
 
     if as_json:
@@ -1611,10 +1942,12 @@ def generate(config, output):
 # =============================================================================
 
 
-def _regenerate_compose():
+def _regenerate_compose(trigger="cli"):
     """Regenerate docker-compose.yaml + Traefik configs from the declared stack.
 
     Returns (ok, message). Best-effort: needs .env (network config) present.
+    Records an instance-level '@core' deployment revision when the pin set or
+    enabled set actually changed (a no-op regen writes nothing).
     """
     try:
         from syrviscore import paths as p
@@ -1662,6 +1995,26 @@ def _regenerate_compose():
 
             image_updates.invalidate_cache()
         except Exception:  # noqa: BLE001
+            pass
+
+        # Deployment history for the core tier: one '@core' revision per real
+        # change of the pin/enabled set (best-effort, like the cache drop).
+        try:
+            from syrviscore import deployments
+
+            pins = {n: svc.get("image") for n, svc in compose["services"].items()}
+            enabled = sorted(compose["services"])
+            latest = deployments.latest_revision(p.get_syrvis_home(), deployments.CORE_WORKLOAD)
+            previous_pins = (latest or {}).get("pins")
+            if latest is None or previous_pins != pins or latest.get("core_enabled") != enabled:
+                deployments.record_core_apply(
+                    p.get_syrvis_home(),
+                    pins=pins,
+                    core_enabled=enabled,
+                    trigger=trigger,
+                    previous_pins=previous_pins,
+                )
+        except Exception:  # noqa: BLE001 - recording must never fail the apply
             pass
         return True, msg
     except Exception as e:  # noqa: BLE001
@@ -1869,7 +2222,7 @@ def stack_apply(desired_file, dry_run, as_json, yes):
     stack_changed = any(r["kind"].startswith("stack_") and r["ok"] for r in results)
     regen_msg = None
     if stack_changed:
-        ok, regen_msg = _regenerate_compose()
+        ok, regen_msg = _regenerate_compose(trigger="converge")
         if not ok:
             regen_msg = "(compose not regenerated: {})".format(regen_msg)
 

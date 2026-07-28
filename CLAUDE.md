@@ -179,14 +179,20 @@ See `docs/v2-design.md` for the v2 architecture and phase plan.
 
 ```bash
 syrvis setup                  # Interactive setup with self-elevation
-syrvis status                 # Show service status
+syrvis status                 # Show service status (+ halted banner/runstate)
 syrvis start                  # Start all services
 syrvis stop                   # Stop all services
-syrvis restart                # Restart all services
+syrvis restart [--graceful]   # Restart core (or the whole instance, gracefully)
 syrvis logs [service] [-f]    # View logs
 syrvis doctor [--fix]         # Diagnose and fix issues
 syrvis config show            # Show current configuration
 syrvis compose generate       # Generate docker-compose.yaml
+
+# Deployment system (see docs/deployments.md)
+syrvis history [workload]     # Deployment revisions (image/env-names/volumes; redacted)
+syrvis service rollback NAME [--to REV]  # Redeploy a prior revision (records rollback_of)
+syrvis shutdown --reason ups|maintenance # Graceful instance halt (hooks, stop grace, VMs)
+syrvis resume                 # Bring a halted instance back (core -> VMs -> L2)
 
 # Core stack (declarative core-tier: config/stack.yaml)
 syrvis stack list             # Show declared core services + running state

@@ -153,6 +153,17 @@ def export(ctx: ToolContext) -> Dict:
     return _run(ctx, "export")
 
 
+def deployment_history(ctx: ToolContext, workload: Optional[str] = None) -> Dict:
+    # Read-only deployment revisions (image transitions, env NAMES, volumes,
+    # outcome) per workload. Records are redacted at the source; env values
+    # never transit the MCP.
+    args: Dict = {}
+    if workload:
+        validate.validate_name(workload)
+        args["name"] = workload
+    return _run(ctx, "deployment_history", args)
+
+
 def profile_enable(ctx: ToolContext, name: str) -> Dict:
     # Intent-only (declarations + seeded configs, never overwriting) — like
     # service_declare. Fail-closed against the platform's profile set.
@@ -222,6 +233,24 @@ def stop(ctx: ToolContext) -> Dict:
 
 def restart(ctx: ToolContext) -> Dict:
     return _run(ctx, "restart")
+
+
+def shutdown(ctx: ToolContext, reason: str = "ups") -> Dict:
+    # Graceful instance halt (the UPS-on-battery verb): hooks quiesce DBs,
+    # ordered stops, VM ACPI shutdown, halted runstate. Reversible via resume,
+    # so — like stop/start/restart — it is deliberately token-free: an
+    # unattended NUT hook must be able to fire it.
+    validate.validate_halt_reason(reason)
+    return _run(ctx, "shutdown", {"reason": reason})
+
+
+def resume(ctx: ToolContext) -> Dict:
+    return _run(ctx, "resume")
+
+
+def restart_graceful(ctx: ToolContext) -> Dict:
+    # Ordered graceful stop of every managed workload, then ordered bring-up.
+    return _run(ctx, "restart_graceful")
 
 
 def verify_fix(ctx: ToolContext, smoke: bool = False) -> Dict:
@@ -389,6 +418,31 @@ def service_set_image(ctx: ToolContext, name: str, image: str, confirm: str = ""
     if pending:
         return pending
     return _with_service_state(ctx, _run(ctx, "service_set_image", {"name": name, "image": image}))
+
+
+def service_rollback(ctx: ToolContext, name: str, revision: int, confirm: str = "") -> Dict:
+    # Re-deploys a PRIOR deployment revision (old image runs again) — same
+    # trust class as service_set_image, so it takes the confirmation token.
+    # The seam form always names its target revision explicitly.
+    validate.validate_name(name)
+    validate.validate_revision(revision)
+    sandbox.assert_service_managed(ctx.runner, name)
+    current = service_list(ctx)
+    entry = next((s for s in current.get("services", []) if s.get("name") == name), None)
+    plan = {"action": "service_rollback", "name": name, "revision": revision, "current": entry}
+    pending = _confirm_or_plan(
+        ctx,
+        "service_rollback",
+        {"name": name, "revision": revision},
+        confirm,
+        [name, str(revision), entry],
+        plan,
+    )
+    if pending:
+        return pending
+    return _with_service_state(
+        ctx, _run(ctx, "service_rollback", {"name": name, "revision": revision})
+    )
 
 
 def install(ctx: ToolContext, version: Optional[str] = None) -> Dict:

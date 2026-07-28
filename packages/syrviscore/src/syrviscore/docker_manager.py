@@ -304,11 +304,13 @@ class DockerManager:
             return str(msg)
         return None
 
-    def start_core_services(self) -> List[str]:
+    def start_core_services(self, allow_halted: bool = False) -> List[str]:
         """
         Start core services using docker-compose.
 
         Creates required Traefik files and macvlan shim before starting services.
+        Refused while the instance is halted (graceful shutdown) unless the
+        resume path passes ``allow_halted``.
 
         Returns:
             A list of non-fatal warning strings (e.g. the macvlan shim could not be
@@ -319,6 +321,9 @@ class DockerManager:
             FileNotFoundError: If docker-compose.yaml missing
             DockerError: If docker-compose fails
         """
+        from . import lifecycle
+
+        lifecycle.guard_not_halted("start", allow_halted=allow_halted)
         warnings: List[str] = []
 
         # Create required Traefik files (note whether the STATIC config changed)
@@ -350,6 +355,21 @@ class DockerManager:
             DockerError: If docker-compose fails
         """
         self._run_compose_command(["stop"])
+
+    def stop_core_container(self, name: str, timeout: int = 30) -> None:
+        """Gracefully stop ONE core container by name via the SDK.
+
+        The ordered-shutdown building block: unlike ``compose stop`` it lets
+        the caller control order (Traefik last) and per-container grace, and it
+        keeps the container for a fast resume.
+
+        Raises:
+            DockerError: if the container is missing or the stop fails.
+        """
+        try:
+            self.client.containers.get(name).stop(timeout=timeout)
+        except DockerException as e:
+            raise DockerError(f"Failed to stop {name}: {e}")
 
     def pull_core_images(self) -> None:
         """
@@ -498,7 +518,7 @@ class DockerManager:
         clean_results["started"] = True
         return clean_results
 
-    def restart_core_services(self) -> None:
+    def restart_core_services(self, allow_halted: bool = False) -> None:
         """
         Restart core services by force-recreating them from compose.
 
@@ -514,6 +534,10 @@ class DockerManager:
             FileNotFoundError: If docker-compose.yaml missing
             DockerError: If docker-compose fails
         """
+        from . import lifecycle
+
+        lifecycle.guard_not_halted("restart", allow_halted=allow_halted)
+
         # Ensure Traefik configs exist and are up-to-date before recreating
         self._create_traefik_files()
 

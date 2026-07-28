@@ -39,6 +39,7 @@ VM_ALLOWED_KEYS = frozenset(
         "resources",  # drift-reported, not auto-applied
         "passthrough",  # advisory; attach is a manual powered-off op
         "health",
+        "stop_timeout",  # seconds to wait for a graceful ACPI shutdown (5..600)
     }
 )
 VM_TYPES = frozenset({"vm"})
@@ -87,6 +88,9 @@ class VmDefinition:
     enabled: bool = True
     critical: bool = False
     autostart: bool = True
+    # How long the instance-shutdown path waits for the guest OS to power off
+    # after the graceful ACPI shutdown before force-off (guests vary widely).
+    stop_timeout: int = 90
     source: Dict[str, Any] = field(default_factory=dict)
     resources: Dict[str, Any] = field(default_factory=dict)
     passthrough: Dict[str, Any] = field(default_factory=dict)
@@ -141,6 +145,14 @@ class VmDefinition:
             if m in data and not isinstance(data[m], dict):
                 raise VmError("{} must be a mapping".format(m))
 
+        stop_timeout = data.get("stop_timeout", 90)
+        if (
+            not isinstance(stop_timeout, int)
+            or isinstance(stop_timeout, bool)
+            or not 5 <= stop_timeout <= 600
+        ):
+            raise VmError("stop_timeout must be an integer 5..600 (seconds)")
+
         return cls(
             name=name,
             guest_name=guest_name,
@@ -149,6 +161,7 @@ class VmDefinition:
             enabled=bool(data.get("enabled", True)),
             critical=bool(data.get("critical", False)),
             autostart=bool(data.get("autostart", True)),
+            stop_timeout=stop_timeout,
             source=dict(data.get("source", {})),
             resources=dict(data.get("resources", {})),
             passthrough=dict(data.get("passthrough", {})),
@@ -165,6 +178,8 @@ class VmDefinition:
             "critical": self.critical,
             "autostart": self.autostart,
         }
+        if self.stop_timeout != 90:
+            out["stop_timeout"] = self.stop_timeout
         for m in ("source", "resources", "passthrough", "health"):
             val = getattr(self, m)
             if val:
@@ -362,13 +377,25 @@ class VmManager:
 
     def start(self, name: str) -> str:
         vm = self._require(name)
+        self._fire_host_hook("pre-start", vm.name)
         self._adapter.power(vm.guest_name, "poweron")
+        self._fire_host_hook("post-start", vm.name)
         return "powering on {} ({})".format(vm.name, vm.guest_name)
 
     def stop(self, name: str, hard: bool = False) -> str:
         vm = self._require(name)
+        self._fire_host_hook("pre-stop", vm.name)
         self._adapter.power(vm.guest_name, "poweroff" if hard else "shutdown")
         return "{} {} ({})".format("force-off" if hard else "shutting down", vm.name, vm.guest_name)
+
+    def _fire_host_hook(self, event: str, name: str) -> None:
+        """Best-effort host hook for a VM transition (never blocks power ops)."""
+        try:
+            from . import lifecycle
+
+            lifecycle.run_host_hook(self._home, event, "vm", name)
+        except Exception:  # noqa: BLE001 - hooks must never block VM power ops
+            pass
 
     def restart(self, name: str) -> str:
         self.stop(name)

@@ -257,6 +257,22 @@ def validate_keep(keep: int) -> int:
     return keep
 
 
+def validate_revision(revision: int) -> int:
+    """G5 — deployment revision number for service_rollback --to."""
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        raise ValidationError("revision must be an integer")
+    if not 1 <= revision <= 999999:
+        raise ValidationError("revision must be between 1 and 999999")
+    return revision
+
+
+def validate_halt_reason(reason: str) -> str:
+    """Fail-closed gate for the shutdown --reason slot (mirrors the shim)."""
+    if reason not in ("ups", "maintenance"):
+        raise ValidationError("reason must be 'ups' or 'maintenance'")
+    return reason
+
+
 def validate_stack_service(name: str, disable: bool = False) -> str:
     """Fail-closed gate for stack_enable/stack_disable slots: only the
     platform's core-tier service set, and never disabling a primordial one.

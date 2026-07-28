@@ -36,6 +36,8 @@ KIND_PORT = "port"
 KIND_PRUNE_POLICY = "prune_policy"
 KIND_BOOLEAN = "boolean"
 KIND_STACK_SERVICE = "stack_service"
+KIND_REVISION = "revision"
+KIND_HALT_REASON = "halt_reason"
 
 # The core-tier service set for KIND_STACK_SERVICE slots. Duplicated from
 # syrviscore.stack (ALL_SERVICES / PRIMORDIAL) so the generator stays
@@ -111,6 +113,16 @@ COMMANDS: List[Command] = [
         flags=["--all", "--json"],
     ),
     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
+    # history reads the deployment-revision records (data/deployments/) — always
+    # redacted (env NAMES only), 0640/0644 files, so no sudo like service_list.
+    Command(
+        "deployment_history",
+        "syrvis",
+        ["history"],
+        read_only=True,
+        flags=["--json"],
+        positional=Slot("name", KIND_NAME, optional=True),
+    ),
     Command("profile_list", "syrvis", ["profile", "list"], read_only=True, flags=["--json"]),
     # images: per-image provenance + freshness (trust registry + cached network
     # reads). Read-only, no sudo — reads the compose config + public manifests +
@@ -176,6 +188,29 @@ COMMANDS: List[Command] = [
     Command("start", "syrvis", ["start"], sudo=True, expect_json=False),
     Command("stop", "syrvis", ["stop"], sudo=True, expect_json=False),
     Command("restart", "syrvis", ["restart"], sudo=True, expect_json=False),
+    # shutdown/resume: the graceful instance halt + bring-up (the UPS path).
+    # NON-destructive like stop/start/restart — deliberately token-free so an
+    # unattended NUT low-battery hook can fire shutdown with no human in the
+    # loop; halting is reversible (resume) and loses no data. The reason slot
+    # is enumerated (ups|maintenance), triple-validated (CLI Choice, MCP
+    # validator, shim predicate).
+    Command(
+        "shutdown",
+        "syrvis",
+        ["shutdown"],
+        sudo=True,
+        flags=["--reason", FlagValue(Slot("reason", KIND_HALT_REASON)), "--json"],
+        timeout_s=240,
+    ),
+    Command("resume", "syrvis", ["resume"], sudo=True, flags=["--json"], timeout_s=300),
+    Command(
+        "restart_graceful",
+        "syrvis",
+        ["restart"],
+        sudo=True,
+        flags=["--graceful", "--json"],
+        timeout_s=600,
+    ),
     Command("stack_apply", "syrvis", ["stack", "apply"], sudo=True, expect_json=False),
     # stack enable/disable write core-tier intent to config/stack.yaml only;
     # nothing runs until stack_apply + start (like service_declare). Rich
@@ -403,6 +438,21 @@ COMMANDS: List[Command] = [
         sudo=True,
         destructive=True,
         flags=["--json", "-y", "--prune", FlagValue(Slot("prune", KIND_PRUNE_POLICY))],
+        timeout_s=600,
+    ),
+    # service rollback re-deploys a PRIOR deployment revision (old image runs
+    # again) — destructive class like set-image/activate. Over the seam the
+    # target revision is ALWAYS explicit (--to N); the default-to-previous
+    # convenience is CLI-interactive only, so automation must name its target.
+    Command(
+        "service_rollback",
+        "syrvis",
+        ["service", "rollback"],
+        sudo=True,
+        destructive=True,
+        expect_json=False,
+        flags=["--to", FlagValue(Slot("revision", KIND_REVISION)), "-y"],
+        positional=Slot("name", KIND_NAME),
         timeout_s=600,
     ),
     Command(

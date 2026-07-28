@@ -48,10 +48,10 @@ drift test asserts it).
 
 | Class | Examples | Notes |
 |---|---|---|
-| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs` | All support `--json`; `updates` queries registries (report-only) |
+| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs`, `history` | All support `--json`; `updates` queries registries (report-only); `history` is always env-redacted |
 | Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export` | sudo only to read 0600 config; `export` is always redacted over the seam |
-| Converge (sudo) | `start/stop/restart`, `stack apply`, `reconcile`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle |
-| Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake |
+| Converge (sudo) | `start/stop/restart`, `shutdown`, `resume`, `restart --graceful`, `stack apply`, `reconcile`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle. `shutdown`/`resume` are deliberately token-free (reversible; an unattended NUT low-battery hook must be able to fire `shutdown --reason ups`) |
+| Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `service rollback --to N`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake; `service rollback` requires an EXPLICIT `--to` over the seam |
 | Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context |
 
 ### Deliberately NOT on the seam

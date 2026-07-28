@@ -54,8 +54,8 @@ DEFAULT_DOCKER_IMAGES = {
     # dashboard container each upgrade — so it never serves a stale snapshot.
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.4.7",
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.4.7@sha256:02a0b9e6ab21218224f53e515ed94ef0e8c1f2c5d739d1b39cec0a64a664560c",
+        "tag": "0.5.0",
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.0",
         "description": "SyrvisCore web dashboard",
     },
 }

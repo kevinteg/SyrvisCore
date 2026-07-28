@@ -175,7 +175,7 @@ class TestApplyPlan:
         monkeypatch.setattr(
             ServiceManager,
             "install_declaration",
-            lambda self, service, start=True, preserve_data_on_rollback=False: (
+            lambda self, service, start=True, preserve_data_on_rollback=False, **kw: (
                 installed.append((service.name, service.image)) or (True, "installed")
             ),
         )
@@ -200,7 +200,7 @@ class TestApplyPlan:
         monkeypatch.setattr(
             ServiceManager,
             "remove",
-            lambda self, name, purge=False, keep_declaration=False: (
+            lambda self, name, purge=False, keep_declaration=False, **kw: (
                 removed.append((name, purge)) or (True, "removed")
             ),
         )
@@ -215,7 +215,7 @@ class TestApplyPlan:
     def test_one_failure_does_not_mask_later_actions(self, home, monkeypatch):
         _running(monkeypatch, "unknown")
 
-        def flaky_install(self, service, start=True, preserve_data_on_rollback=False):
+        def flaky_install(self, service, start=True, preserve_data_on_rollback=False, **kw):
             if service.name == "flaky":
                 raise RuntimeError("docker went away")
             return True, "installed"

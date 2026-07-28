@@ -257,25 +257,47 @@ def apply_reconcile_plan(
     manager,
     declarations: Dict[str, ServiceDefinition],
     plan: Dict[str, Any],
+    trigger: str = "reconcile",
+    allow_halted: bool = False,
 ) -> List[Dict[str, Any]]:
     """Execute a reconcile plan with per-service failure isolation.
 
     Every action reports its own outcome; a failure never stops later actions.
+    ``trigger`` is threaded into the deployment-history records the manager
+    verbs write ("reconcile", "converge", ...). While the instance is HALTED
+    (graceful shutdown), applying is refused — a cron/MCP reconcile must not
+    restart just-stopped workloads; ``syrvis resume`` passes ``allow_halted``.
+    Planning (:func:`build_reconcile_plan`) stays pure and always allowed.
     """
+    from . import lifecycle
+
+    lifecycle.guard_not_halted("reconcile", allow_halted=allow_halted)
+
     results: List[Dict[str, Any]] = []
 
     for action in plan.get("actions", []):
         kind, name = action["kind"], action["name"]
         try:
             if kind == "add":
-                ok, msg = manager.install_declaration(declarations[name], start=True)
+                ok, msg = manager.install_declaration(
+                    declarations[name], start=True, trigger=trigger
+                )
             elif kind == "replace":
-                ok, msg = manager.remove(name, purge=False, keep_declaration=True)
+                # keep_declaration=True also keeps the history silent: the
+                # reinstall below records the ONE logical deploy (with the
+                # image transition), never a remove+add pair. fire_hooks=False
+                # for the same reason — a replace fires one pre/post-deploy
+                # pair (from the reinstall), never a spurious stop quiesce.
+                ok, msg = manager.remove(name, purge=False, keep_declaration=True, fire_hooks=False)
                 if ok:
                     # The data dir predates this replace: a failed re-install
                     # must roll back the new artifacts WITHOUT destroying it.
                     ok, msg = manager.install_declaration(
-                        declarations[name], start=True, preserve_data_on_rollback=True
+                        declarations[name],
+                        start=True,
+                        preserve_data_on_rollback=True,
+                        trigger=trigger,
+                        previous_image=action.get("from_image"),
                     )
             elif kind == "start":
                 ok, msg = manager.start(name)
@@ -284,9 +306,9 @@ def apply_reconcile_plan(
             elif kind == "prune_stop":
                 ok, msg = manager.stop(name)
             elif kind == "prune_remove":
-                ok, msg = manager.remove(name, purge=False)
+                ok, msg = manager.remove(name, purge=False, trigger=trigger)
             elif kind == "prune_purge":
-                ok, msg = manager.remove(name, purge=True)
+                ok, msg = manager.remove(name, purge=True, trigger=trigger)
             else:
                 ok, msg = False, "unknown action kind {!r}".format(kind)
         except Exception as exc:  # noqa: BLE001 - isolation: record, continue

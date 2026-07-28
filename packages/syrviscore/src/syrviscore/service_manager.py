@@ -17,8 +17,10 @@ import yaml
 if TYPE_CHECKING:
     from .bundle import DeployBundle
 
+from . import deployments
 from . import exposure as exposure_mod
 from . import jobs_d
+from . import lifecycle
 from . import paths
 from .compose_cmd import resolve_compose_cmd
 from .service_schema import (
@@ -428,6 +430,11 @@ class ServiceManager:
         service: ServiceDefinition,
         start: bool = True,
         preserve_data_on_rollback: bool = False,
+        *,
+        trigger: str = "cli",
+        previous_image: Optional[str] = None,
+        record: bool = True,
+        fire_hooks: bool = True,
     ) -> Tuple[bool, str]:
         """Materialize a validated in-memory definition (the reconcile add/replace path).
 
@@ -452,7 +459,14 @@ class ServiceManager:
         service_path.mkdir(parents=True, exist_ok=True)
         self._write_manifest(service, service_path)
         return self._install_from_definition(
-            service, service_path, start, preserve_data_on_rollback=preserve_data_on_rollback
+            service,
+            service_path,
+            start,
+            preserve_data_on_rollback=preserve_data_on_rollback,
+            trigger=trigger,
+            previous_image=previous_image,
+            record=record,
+            fire_hooks=fire_hooks,
         )
 
     def _write_manifest(self, service: ServiceDefinition, service_path: Path) -> None:
@@ -486,6 +500,11 @@ class ServiceManager:
         service_path: Path,
         start: bool,
         preserve_data_on_rollback: bool = False,
+        *,
+        trigger: str = "cli",
+        previous_image: Optional[str] = None,
+        record: bool = True,
+        fire_hooks: bool = True,
     ) -> Tuple[bool, str]:
         """Materialize + (optionally) start a loaded/synthesized service.
 
@@ -511,6 +530,25 @@ class ServiceManager:
                     service.source_url or "repo/image"
                 )
             )
+        # pre-deploy host hook: the one abortable deploy gate (e.g. a backup
+        # taken before every rollout). The declaration/manifest were already
+        # written — a persistent hook failure surfaces as an isolated,
+        # retryable reconcile failure for this service. keep_data=True: the
+        # data dir is only created further down (:569), so anything at
+        # data/<name>/ right now predates this call (e.g. a remove without
+        # --purge kept it) and an abort must never destroy it.
+        if fire_hooks:
+            hooks_ok, runs = self._fire_hooks(
+                service,
+                "pre-deploy",
+                context={"image": service.image, "previous_image": previous_image or ""},
+            )
+            if not hooks_ok:
+                self._rollback_add(service.name, keep_data=True)
+                return False, "deploy aborted by pre-deploy hook: " + self._hook_failure_summary(
+                    runs
+                )
+
         # Reject a hostname already claimed by another installed service before
         # writing any Traefik config (last-writer-wins is a silent footgun).
         # Uniqueness is per full hostname (subdomain + domain); two services may
@@ -522,7 +560,9 @@ class ServiceManager:
                 exclude=service.name,
             )
             if owner:
-                self._rollback_add(service.name)
+                # keep_data=True for the same reason as the hook abort above:
+                # the data dir was not created yet by this invocation.
+                self._rollback_add(service.name, keep_data=True)
                 effective_host = "{}.{}".format(
                     service.traefik.subdomain,
                     service.traefik.domain or "<instance-domain>",
@@ -562,6 +602,20 @@ class ServiceManager:
                 message = f"Service '{service.name}' added (not started){route_note}"
         except Exception as e:
             self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
+            # A failed reconcile REPLACE left changed state (the old service was
+            # already torn down) — history must show the failed rollout, like
+            # set_image/deploy_bundle do. A fully-rolled-back FRESH add changed
+            # nothing and records nothing.
+            if record and preserve_data_on_rollback:
+                deployments.record_service_deploy(
+                    self.syrvis_home,
+                    service,
+                    action="deploy",
+                    trigger=trigger,
+                    outcome="failed",
+                    previous_image=previous_image,
+                    detail=f"Service '{service.name}' not added ({e})",
+                )
             return False, f"Service '{service.name}' not added ({e})"
 
         # Dual-write: every successful install leaves a services.d declaration,
@@ -574,6 +628,26 @@ class ServiceManager:
             services_d.write_declaration_from_install(self.syrvis_home, service)
         except Exception as e:  # noqa: BLE001 - never fail the install for this
             message += " (warning: could not write services.d declaration: {})".format(e)
+        # The one materialization choke point records the deployment (add/run/
+        # catalog/reconcile add+replace). deploy_bundle passes record=False and
+        # records once at its own end, after configs/secrets land.
+        if record:
+            deployments.record_service_deploy(
+                self.syrvis_home,
+                service,
+                action="deploy",
+                trigger=trigger,
+                outcome="success",
+                previous_image=previous_image,
+                detail=message,
+            )
+        if fire_hooks:
+            self._fire_hooks(
+                service,
+                "post-deploy",
+                force=True,
+                context={"image": service.image, "previous_image": previous_image or ""},
+            )
         return True, message
 
     @staticmethod
@@ -765,6 +839,12 @@ class ServiceManager:
         if service.healthcheck:
             svc["healthcheck"] = dict(service.healthcheck)
 
+        # Graceful-stop grace (SIGTERM -> SIGKILL window). Emitting it into the
+        # compose spec makes the grace durable on EVERY stop path — including
+        # the docker daemon's own stop at OS poweroff — not just syrvis verbs.
+        if service.shutdown and service.shutdown.get("stop_timeout"):
+            svc["stop_grace_period"] = "{}s".format(service.shutdown["stop_timeout"])
+
         # Resource guardrails: compose-spec service-level limits.
         if service.resources:
             if "cpus" in service.resources:
@@ -805,13 +885,106 @@ class ServiceManager:
         ok, msg = self._compose(name, compose_path, "up", "-d", timeout=120)
         return (True, "Started") if ok else (False, msg)
 
-    def _stop_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
-        """Stop a service using docker compose."""
-        ok, msg = self._compose(name, compose_path, "down", timeout=60)
+    def _stop_service(
+        self,
+        name: str,
+        compose_path: Path,
+        remove: bool = True,
+        stop_timeout: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """Stop a service using docker compose.
+
+        ``remove=True`` (the default, all existing paths) runs ``down`` —
+        containers are removed. ``remove=False`` (the graceful-shutdown path)
+        runs ``stop -t <grace>`` — containers stay for a fast ``resume``.
+        """
+        if remove:
+            ok, msg = self._compose(name, compose_path, "down", timeout=60)
+        else:
+            grace = int(stop_timeout or 30)
+            ok, msg = self._compose(
+                name, compose_path, "stop", "-t", str(grace), timeout=grace + 30
+            )
         return (True, "Stopped") if ok else (False, msg)
 
+    # -------------------------------------------------------------------------
+    # Lifecycle transition hooks
+    # -------------------------------------------------------------------------
+
+    _HOOK_TIMEOUT_S = lifecycle.HOOK_DEFAULT_TIMEOUT_S
+
+    def _run_container_hook(
+        self, service: ServiceDefinition, event: str, timeout: int
+    ) -> "lifecycle.HookRun":
+        """Run the manifest's declared container hook for ``event`` (if any).
+
+        No new trust surface: the argv comes only from the schema-audited
+        ``tasks:`` map and runs in the service's own container.
+        """
+        run = lifecycle.HookRun(
+            kind="container", event=event, scope="service", workload=service.name
+        )
+        task = (service.hooks or {}).get(event)
+        if not task:
+            return run
+        run.ran = True
+        ok, output = self._docker_exec_task(service, service.tasks[task], timeout)
+        run.ok = ok
+        run.rc = 0 if ok else 1
+        run.output_tail = output[-lifecycle.HOOK_OUTPUT_CAP :]
+        return run
+
+    def _fire_hooks(
+        self,
+        service_or_name,
+        event: str,
+        force: bool = False,
+        timeout: Optional[int] = None,
+        reason: str = "",
+        context: Optional[Dict[str, str]] = None,
+    ) -> Tuple[bool, List["lifecycle.HookRun"]]:
+        """Fire the container hook (when valid) then the host hook for an event.
+
+        Returns (ok, runs); ``ok`` is advisory — only ABORTING_EVENTS callers
+        act on it, and never under ``force`` (the UPS path never blocks).
+        """
+        if os.environ.get("SYRVIS_IN_HOOK"):
+            return True, []
+        t = int(timeout or self._HOOK_TIMEOUT_S)
+        runs: List[lifecycle.HookRun] = []
+        if event in lifecycle.CONTAINER_HOOK_EVENTS and isinstance(
+            service_or_name, ServiceDefinition
+        ):
+            runs.append(self._run_container_hook(service_or_name, event, t))
+        name = (
+            service_or_name.name
+            if isinstance(service_or_name, ServiceDefinition)
+            else str(service_or_name)
+        )
+        runs.append(
+            lifecycle.run_host_hook(
+                self.syrvis_home, event, "service", name, reason=reason, context=context, timeout=t
+            )
+        )
+        ok = all(r.ok for r in runs) or force
+        return ok, runs
+
+    @staticmethod
+    def _hook_failure_summary(runs: List["lifecycle.HookRun"]) -> str:
+        failed = [r for r in runs if not r.ok]
+        return "; ".join(
+            "{} {} hook failed: {}".format(r.kind, r.event, (r.output_tail or "").strip()[-200:])
+            for r in failed
+        )
+
     def remove(
-        self, name: str, purge: bool = False, keep_declaration: bool = False
+        self,
+        name: str,
+        purge: bool = False,
+        keep_declaration: bool = False,
+        *,
+        trigger: str = "cli",
+        fire_hooks: bool = True,
     ) -> Tuple[bool, str]:
         """Remove an installed service.
 
@@ -822,6 +995,7 @@ class ServiceManager:
                 reconcile REPLACE path removes only the materialization it is
                 about to rebuild). Imperative removes delete the declaration
                 too — otherwise the next reconcile would resurrect the service.
+            trigger: recorded in the deployment history ("cli"/"reconcile"/...).
 
         Returns:
             Tuple of (success, message)
@@ -836,9 +1010,24 @@ class ServiceManager:
         if not service_dir.exists() and not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
-        # Stop the service
+        # Capture the removed image for the history record (best-effort).
+        removed_image: Optional[str] = None
+        removed_svc: Optional[ServiceDefinition] = None
+        try:
+            removed_svc = load_service_definition(service_dir)
+            removed_image = removed_svc.image
+        except Exception:  # noqa: BLE001 - broken manifest; record without it
+            pass
+
+        # Stop the service (pre-stop quiesce fires but never blocks a removal;
+        # the reconcile-REPLACE teardown passes fire_hooks=False so a replace
+        # fires only deploy events, never a spurious double-quiesce).
         if compose_path.exists():
+            if fire_hooks:
+                self._fire_hooks(removed_svc or name, "pre-stop", force=True)
             self._stop_service(name, compose_path)
+            if fire_hooks:
+                self._fire_hooks(removed_svc or name, "post-stop", force=True)
             compose_path.unlink()
 
         # Remove Traefik config + reload so the route is dropped
@@ -851,8 +1040,15 @@ class ServiceManager:
 
         if not keep_declaration:
             services_d.remove_declaration(self.syrvis_home, name)
+            # keep_declaration=True is the reconcile-REPLACE teardown: the
+            # following install records the single logical deploy. Only a real
+            # removal is history.
+            deployments.record_service_remove(
+                self.syrvis_home, name, trigger=trigger, previous_image=removed_image
+            )
 
-        # Remove data if purging
+        # Remove data if purging (the deployment history under data/deployments/
+        # survives a purge — it is the removal's audit trail).
         if purge:
             if data_dir.exists():
                 shutil.rmtree(data_dir)
@@ -956,8 +1152,17 @@ class ServiceManager:
         except Exception:
             return "unknown"
 
-    def start(self, name: str) -> Tuple[bool, str]:
+    def start(
+        self,
+        name: str,
+        fire_hooks: bool = True,
+        force: bool = False,
+        hook_timeout: Optional[int] = None,
+    ) -> Tuple[bool, str]:
         """Start a service.
+
+        Fires the ``pre-start`` host hook (aborting unless ``force``) and, on
+        success, the ``post-start`` hooks (container + host, log-only).
 
         Args:
             name: Service name
@@ -980,20 +1185,47 @@ class ServiceManager:
         # would otherwise make a non-root container crash-loop forever, with no
         # reconcile action able to fix it — `start` never regenerated compose).
         # Idempotent: identical compose content, mkdir/chmod exist_ok.
+        svc: Optional[ServiceDefinition] = None
         try:
-            self._generate_compose_file(load_service_definition(manifest_path))
+            svc = load_service_definition(manifest_path)
+            self._generate_compose_file(svc)
         except Exception:  # noqa: BLE001 - fall back to the existing compose file
             pass
+
+        if fire_hooks:
+            hooks_ok, runs = self._fire_hooks(
+                svc or name, "pre-start", force=force, timeout=hook_timeout
+            )
+            if not hooks_ok:
+                return False, "start aborted by pre-start hook: " + self._hook_failure_summary(runs)
 
         ok, msg = self._start_service(name, compose_path)
         if ok:
             # Imperative start is a file author: a declared-off service becomes
             # declared-on, so the next reconcile agrees with reality.
             services_d.set_declared_enabled(self.syrvis_home, name, True)
+            if fire_hooks:
+                self._fire_hooks(svc or name, "post-start", force=True, timeout=hook_timeout)
         return ok, msg
 
-    def stop(self, name: str) -> Tuple[bool, str]:
+    def stop(
+        self,
+        name: str,
+        remove: bool = True,
+        set_intent: bool = True,
+        fire_hooks: bool = True,
+        force: bool = False,
+        hook_timeout: Optional[int] = None,
+        stop_timeout: Optional[int] = None,
+    ) -> Tuple[bool, str]:
         """Stop a service.
+
+        The default is the imperative verb: ``compose down`` + flip the
+        declared ``enabled`` flag (an intent change). The graceful-shutdown
+        path passes ``remove=False, set_intent=False`` — an operational stop
+        (containers kept, intent untouched, so resume/reconcile restores it).
+        ``pre-stop`` hooks (container quiesce first, then host) fire before
+        the stop and NEVER abort it; ``post-stop`` (host) fires after.
 
         Args:
             name: Service name
@@ -1002,17 +1234,33 @@ class ServiceManager:
             Tuple of (success, message)
         """
         try:
-            compose_path = self._service_paths(name)["compose"]
+            paths_ = self._service_paths(name)
         except ServiceValidationError as e:
             return False, str(e)
+        compose_path = paths_["compose"]
         if not compose_path.exists():
             return False, f"Service '{name}' is not installed"
 
-        ok, msg = self._stop_service(name, compose_path)
+        svc: Optional[ServiceDefinition] = None
+        try:
+            svc = load_service_definition(paths_["service"] / "syrvis-service.yaml")
+        except Exception:  # noqa: BLE001 - container hook skipped, host still fires
+            pass
+
+        if fire_hooks:
+            # Stop must always be possible: pre-stop failures log and proceed.
+            self._fire_hooks(svc or name, "pre-stop", force=True, timeout=hook_timeout)
+
+        if stop_timeout is None and svc is not None and svc.shutdown:
+            stop_timeout = svc.shutdown.get("stop_timeout")
+        ok, msg = self._stop_service(name, compose_path, remove=remove, stop_timeout=stop_timeout)
         if ok:
-            # Imperative stop = declared-but-off (enabled: false), NOT undeclared;
-            # reconcile keeps it stopped instead of restarting it.
-            services_d.set_declared_enabled(self.syrvis_home, name, False)
+            if set_intent:
+                # Imperative stop = declared-but-off (enabled: false), NOT
+                # undeclared; reconcile keeps it stopped instead of restarting.
+                services_d.set_declared_enabled(self.syrvis_home, name, False)
+            if fire_hooks:
+                self._fire_hooks(svc or name, "post-stop", force=True, timeout=hook_timeout)
         return ok, msg
 
     def update(self, name: str) -> Tuple[bool, str]:
@@ -1065,6 +1313,14 @@ class ServiceManager:
         except Exception as e:
             return False, f"Updated service definition is invalid: {e}"
 
+        hooks_ok, runs = self._fire_hooks(
+            updated,
+            "pre-deploy",
+            context={"image": updated.image, "previous_image": current.image},
+        )
+        if not hooks_ok:
+            return False, "update aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
+
         # Regenerate compose and traefik config
         self._generate_compose_file(updated)
         try:
@@ -1089,6 +1345,20 @@ class ServiceManager:
             # Restart
             self._stop_service(name, compose_path)
             self._start_service(name, compose_path)
+            deployments.record_service_deploy(
+                self.syrvis_home,
+                updated,
+                action="deploy",
+                trigger="cli",
+                outcome="success",
+                previous_image=current.image,
+            )
+            self._fire_hooks(
+                updated,
+                "post-deploy",
+                force=True,
+                context={"image": updated.image, "previous_image": current.image},
+            )
             return True, f"Service '{name}' updated: {current_version} -> {updated.version}"
 
         return True, f"Service '{name}' is up to date (v{updated.version})"
@@ -1138,6 +1408,12 @@ class ServiceManager:
 
         old_image = current.image
 
+        hooks_ok, runs = self._fire_hooks(
+            updated, "pre-deploy", context={"image": new_image, "previous_image": old_image}
+        )
+        if not hooks_ok:
+            return False, "re-pin aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
+
         # Pull the NEW image FIRST — before touching the manifest or the running
         # container. A valid-format but non-existent/unpullable tag (a typo, a
         # registry blip) must NOT tear down a healthy service: from_dict only
@@ -1176,8 +1452,211 @@ class ServiceManager:
         self._stop_service(name, compose_path)
         ok, msg = self._start_service(name, compose_path)
         if not ok:
+            # The manifest/declaration now hold the new image but the container
+            # is down — a state change history must show (a rollback target
+            # picker needs to see the failed rollout).
+            deployments.record_service_deploy(
+                self.syrvis_home,
+                updated,
+                action="deploy",
+                trigger="cli",
+                outcome="failed",
+                previous_image=old_image,
+                detail=f"re-pinned to {new_image} but restart failed: {msg}",
+            )
             return False, f"re-pinned to {new_image} but restart failed: {msg}"
+        deployments.record_service_deploy(
+            self.syrvis_home,
+            updated,
+            action="deploy",
+            trigger="cli",
+            outcome="success",
+            previous_image=old_image,
+        )
+        self._fire_hooks(
+            updated,
+            "post-deploy",
+            force=True,
+            context={"image": new_image, "previous_image": old_image},
+        )
         return True, f"Service '{name}' re-pinned: {old_image} -> {new_image}"
+
+    def rollback(
+        self, name: str, to: Optional[int] = None, *, trigger: str = "cli"
+    ) -> Tuple[bool, str]:
+        """Re-deploy a prior deployment revision of an installed L2 service.
+
+        Helm-style: the target revision's manifest snapshot is restored through
+        the FULL trust boundary (``ServiceDefinition.from_dict``) and redeployed
+        via the proven set_image shape (pull first, swap manifest, dual-write
+        the declaration, restart), then a NEW revision is recorded with
+        ``rollback_of``. Data dir, env_file secrets, and materialized configs
+        are untouched; current operator orchestration (enabled/critical) is
+        preserved.
+
+        GitOps-ephemeral: the next IaC apply/reconcile that still declares the
+        newer image will redeploy it — make a rollback durable by reverting the
+        image in the deployment repo too.
+        """
+        try:
+            p = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        service_dir = p["service"]
+        manifest_path = service_dir / "syrvis-service.yaml"
+        if not manifest_path.exists():
+            return False, f"Service '{name}' is not installed"
+        if (service_dir / ".git").exists():
+            return False, (
+                f"'{name}' was installed from git — roll back via the repo "
+                "(git revert) + 'syrvis service update'"
+            )
+        try:
+            current = load_service_definition(service_dir)
+        except Exception as e:  # noqa: BLE001
+            return False, f"could not load manifest for '{name}': {e}"
+
+        try:
+            target = deployments.resolve_rollback_target(self.syrvis_home, name, to)
+        except deployments.DeploymentError as e:
+            return False, str(e)
+        try:
+            # Re-validate the stored snapshot through the trust boundary — a
+            # tampered record cannot smuggle an unaudited key or a bad ref.
+            restored = ServiceDefinition.from_dict(target["manifest"])
+        except ServiceValidationError as e:
+            return False, "revision {} manifest no longer validates: {}".format(
+                target.get("revision"), e
+            )
+        # to_dict() drops source_url, but the tier:infra authorship gate needs
+        # it — restore the recorded anchor (falling back to the current one).
+        restored.source_url = target.get("source_url") or current.source_url
+
+        def content(svc: ServiceDefinition) -> Dict[str, Any]:
+            data = svc.to_dict()
+            data.pop("enabled", None)
+            data.pop("critical", None)
+            return data
+
+        if content(restored) == content(current):
+            return True, "Service '{}' already matches revision {} — nothing to do".format(
+                name, target.get("revision")
+            )
+
+        # The restored revision's hostname must not collide with a route some
+        # OTHER service claimed since (same guard as install; last-writer-wins
+        # in Traefik is a silent footgun).
+        if restored.traefik.enabled and restored.traefik.subdomain:
+            owner = self._subdomain_in_use(
+                restored.traefik.subdomain,
+                domain=restored.traefik.domain,
+                exclude=name,
+            )
+            if owner:
+                effective_host = "{}.{}".format(
+                    restored.traefik.subdomain,
+                    restored.traefik.domain or "<instance-domain>",
+                )
+                return False, (
+                    "revision {} routes {!r}, which is now owned by service {!r} — "
+                    "not rolling back".format(target.get("revision"), effective_host, owner)
+                )
+
+        old_image = current.image
+        revision = target.get("revision")
+
+        hooks_ok, runs = self._fire_hooks(
+            restored,
+            "pre-deploy",
+            context={"image": restored.image, "previous_image": old_image},
+        )
+        if not hooks_ok:
+            return False, "rollback aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
+
+        if restored.image != current.image:
+            # Pull the TARGET image first: an unpullable (since-deleted) tag
+            # must not tear down the running service.
+            try:
+                pull = subprocess.run(
+                    ["docker", "pull", restored.image],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+            except subprocess.TimeoutExpired:
+                return False, (f"pulling {restored.image} timed out — service left on {old_image}")
+            except OSError as e:
+                return False, f"could not run docker pull: {e}"
+            if pull.returncode != 0:
+                detail = (pull.stderr or pull.stdout or "").strip().splitlines()[-1:] or [""]
+                deployments.record_service_deploy(
+                    self.syrvis_home,
+                    restored,
+                    action="rollback",
+                    trigger=trigger,
+                    outcome="failed",
+                    previous_image=old_image,
+                    rollback_of=revision,
+                    detail="target image not pullable ({})".format(detail[0]),
+                )
+                return False, (
+                    f"could not pull {restored.image} ({detail[0]}) — "
+                    f"service left unchanged on {old_image}"
+                )
+
+        self._write_manifest(restored, service_dir)
+        self._generate_compose_file(restored)
+        if restored.traefik.enabled and restored.traefik.subdomain:
+            try:
+                domain = get_domain_from_env()
+                self.traefik_config.write_config(restored, domain)
+            except ValueError as e:
+                return False, f"Failed to update Traefik config: {e}"
+        else:
+            # Rolling back to an unrouted revision must drop the newer route —
+            # write_config writes nothing for an unrouted service, so an
+            # explicit remove is required or the stale router lingers.
+            self.traefik_config.remove_config(name)
+        try:
+            # Restores CONTENT only; the operator's current enabled/critical is
+            # preserved (a rollback never resurrects old orchestration).
+            services_d.write_declaration_from_install(self.syrvis_home, restored)
+        except Exception:  # noqa: BLE001 - best-effort; the rollback stands
+            pass
+
+        compose_path = p["compose"]
+        self._stop_service(name, compose_path)
+        ok, msg = self._start_service(name, compose_path)
+        if not ok:
+            deployments.record_service_deploy(
+                self.syrvis_home,
+                restored,
+                action="rollback",
+                trigger=trigger,
+                outcome="failed",
+                previous_image=old_image,
+                rollback_of=revision,
+                detail=f"rolled back to revision {revision} but restart failed: {msg}",
+            )
+            return False, f"rolled back to revision {revision} but restart failed: {msg}"
+        deployments.record_service_deploy(
+            self.syrvis_home,
+            restored,
+            action="rollback",
+            trigger=trigger,
+            outcome="success",
+            previous_image=old_image,
+            rollback_of=revision,
+        )
+        self._fire_hooks(
+            restored,
+            "post-deploy",
+            force=True,
+            context={"image": restored.image, "previous_image": old_image},
+        )
+        return True, "Service '{}' rolled back: {} -> {} (revision {})".format(
+            name, old_image, restored.image, revision
+        )
 
     # -------------------------------------------------------------------------
     # Declared one-shot tasks (operator-seam verb)
@@ -1210,19 +1689,26 @@ class ServiceManager:
             declared = ", ".join(sorted(service.tasks)) or "(none)"
             return False, f"unknown task '{task}' for service '{name}' (declared: {declared})"
 
-        argv = ["docker", "exec", service.container_name] + list(service.tasks[task])
+        ok, output = self._docker_exec_task(service, service.tasks[task], self._TASK_TIMEOUT_S)
+        if not ok:
+            return False, f"task '{task}' {output}"
+        return True, output or f"task '{task}' completed"
+
+    def _docker_exec_task(
+        self, service: ServiceDefinition, task_argv: List[str], timeout: int
+    ) -> Tuple[bool, str]:
+        """Exec one audited argv inside the service's running container."""
+        argv = ["docker", "exec", service.container_name] + list(task_argv)
         try:
-            result = subprocess.run(
-                argv, capture_output=True, text=True, timeout=self._TASK_TIMEOUT_S
-            )
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return False, f"task '{task}' timed out after {self._TASK_TIMEOUT_S}s"
+            return False, f"timed out after {timeout}s"
         except OSError as e:
             return False, f"could not run docker: {e}"
         output = ((result.stdout or "") + (result.stderr or "")).strip()
         if result.returncode != 0:
-            return False, f"task '{task}' failed (exit {result.returncode}):\n{output}"
-        return True, output or f"task '{task}' completed"
+            return False, f"failed (exit {result.returncode}):\n{output}"
+        return True, output
 
     # -------------------------------------------------------------------------
     # Secret management (operator-seam verb)
@@ -1484,18 +1970,29 @@ class ServiceManager:
         ):
             return False, ("tier: infra is only permitted for an operator-authored declaration")
 
+        hooks_ok, runs = self._fire_hooks(service, "pre-deploy", context={"image": service.image})
+        if not hooks_ok:
+            return False, "deploy aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
+
         # 1. Declaration + install/manifest. The declaration is written in BOTH
         #    branches OUTSIDE the rollback boundary (a failed deploy keeps the
         #    declared intent for a retry — the install rollback never removes it).
+        old_image: Optional[str] = None
         if fresh:
             # install_declaration writes the declaration + creates services/<name>/
             # + the manifest + installs WITHOUT starting (configs+secrets must land
             # before first boot). It rolls back its OWN artifacts on failure.
-            ok, msg = self.install_declaration(service, start=False)
+            # record/fire_hooks=False: the bundle records ONE deployment and
+            # fires ONE pre/post-deploy pair at its own boundary.
+            ok, msg = self.install_declaration(service, start=False, record=False, fire_hooks=False)
             if not ok:
                 return False, msg
         else:
             # Update in place — rewrite declaration + effective manifest (data kept).
+            try:
+                old_image = load_service_definition(service_path).image
+            except Exception:  # noqa: BLE001 - unreadable prior manifest
+                pass
             try:
                 services_d.write_declaration(self.syrvis_home, service)
             except Exception as e:  # noqa: BLE001
@@ -1536,9 +2033,37 @@ class ServiceManager:
             # Fresh: drop everything (incl. the just-created data dir). Update:
             # keep data + declaration (they predate this call) for a clean retry.
             self._rollback_add(name, keep_data=not fresh)
+            # Either branch left changed state (fresh keeps the declared intent;
+            # update tore the service down on the new manifest) — history must
+            # show the failed rollout.
+            deployments.record_service_deploy(
+                self.syrvis_home,
+                service,
+                action="deploy",
+                trigger="deploy",
+                outcome="failed",
+                previous_image=old_image,
+                detail=f"deploy of {name!r} failed ({e})",
+                configs=bundle.configs,
+            )
             return False, f"deploy of {name!r} failed ({e})"
 
         verb = "installed" if fresh else "updated"
+        deployments.record_service_deploy(
+            self.syrvis_home,
+            service,
+            action="deploy",
+            trigger="deploy",
+            outcome="success",
+            previous_image=old_image,
+            configs=bundle.configs,
+        )
+        self._fire_hooks(
+            service,
+            "post-deploy",
+            force=True,
+            context={"image": service.image, "previous_image": old_image or ""},
+        )
         return True, (
             f"deployed {name} ({verb}; {len(bundle.configs)} config(s), "
             f"{len(bundle.secrets)} secret(s))"

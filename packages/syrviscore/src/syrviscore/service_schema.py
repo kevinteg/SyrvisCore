@@ -42,7 +42,21 @@ ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Names owned by the core stack — a third-party service may not impersonate
 # or replace them.
-RESERVED_NAMES = frozenset({"traefik", "portainer", "cloudflared", "proxy", "syrvis-macvlan"})
+# "deployments"/"state" are platform-owned subtrees of data/ — a service with
+# one of these names would overlay them (its data dir is data/<name>), and
+# `service remove --purge` would then rmtree the platform's own records.
+# Reserved so the collision can never exist.
+RESERVED_NAMES = frozenset(
+    {
+        "traefik",
+        "portainer",
+        "cloudflared",
+        "proxy",
+        "syrvis-macvlan",
+        "deployments",
+        "state",
+    }
+)
 
 ALLOWED_RESTART = frozenset({"no", "always", "on-failure", "unless-stopped"})
 
@@ -88,6 +102,16 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # run inside the service's own container via `syrvis service task` —
         # e.g. a DB bootstrap. Same trust class + audit rules as `command`.
         "tasks",
+        # Lifecycle container hooks ({event: task_name}): run a DECLARED task
+        # at a transition. Only pre-stop / post-start (the two events where the
+        # container is verifiably running); the referenced task must exist in
+        # `tasks:`, so this selects WHICH audited argv runs WHEN — never code.
+        "hooks",
+        # Graceful-shutdown knobs ({stop_timeout, priority}): how long the
+        # container gets to exit cleanly (SIGTERM grace; DBs set 120+) and its
+        # stop band during instance shutdown (lower stops first; DBs high so
+        # they stop after their consumers).
+        "shutdown",
         # Optional per-service metric panels ({panels: [{title, expr, ...}]})
         # consumed by the dashboard generator (`syrvis dashboard generate`) to
         # add domain-specific rows/panels for this service. Pure PRESENTATION
@@ -102,6 +126,16 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
 # tasks sub-schema: each task is exactly one audited exec-form argv.
 ALLOWED_TASK_KEYS = frozenset({"command"})
 MAX_TASKS = 16
+
+# hooks sub-schema: event -> declared task name. Container hooks are docker
+# exec into a RUNNING container, so only these two events qualify.
+CONTAINER_HOOK_EVENTS = frozenset({"pre-stop", "post-start"})
+MAX_HOOKS = 8
+
+# shutdown sub-schema: graceful-stop knobs for the instance shutdown path.
+ALLOWED_SHUTDOWN_KEYS = frozenset({"stop_timeout", "priority"})
+SHUTDOWN_STOP_TIMEOUT_RANGE = (5, 300)
+SHUTDOWN_PRIORITY_RANGE = (0, 100)
 
 # dashboard sub-schema: optional presentation-only metric panels for the
 # generated Grafana dashboard (see dashboard.py). NOT a trust boundary — the
@@ -359,6 +393,67 @@ def _validate_tasks(data: Any) -> Dict[str, List[str]]:
             out[task_name] = _validate_command(spec["command"])
         except ServiceValidationError as e:
             raise ServiceValidationError("task {!r}: {}".format(task_name, e))
+    return out
+
+
+def _validate_hooks(data: Any, task_names: frozenset) -> Dict[str, str]:
+    """Validate ``hooks: {event: task_name}`` (container lifecycle hooks).
+
+    Selects WHICH declared task runs at WHICH transition — it can never supply
+    code (the argv lives in the audited ``tasks:`` map). Only ``pre-stop`` and
+    ``post-start`` are accepted: a container hook is a docker exec, so the
+    container must be verifiably running.
+    """
+    if not isinstance(data, dict) or not data:
+        raise ServiceValidationError("hooks must be a non-empty mapping of event -> task name")
+    if len(data) > MAX_HOOKS:
+        raise ServiceValidationError("too many hooks ({}; max {})".format(len(data), MAX_HOOKS))
+    out: Dict[str, str] = {}
+    for event, task_name in data.items():
+        if event not in CONTAINER_HOOK_EVENTS:
+            raise ServiceValidationError(
+                "hook event {!r} is not supported for container hooks "
+                "(allowed: {}; other transitions take host hooks in hooks.d/)".format(
+                    event, ", ".join(sorted(CONTAINER_HOOK_EVENTS))
+                )
+            )
+        if not isinstance(task_name, str) or not NAME_RE.fullmatch(task_name):
+            raise ServiceValidationError("hook {!r} has an invalid task name".format(event))
+        if task_name not in task_names:
+            raise ServiceValidationError(
+                "hook {!r} references undeclared task {!r} (declared: {})".format(
+                    event, task_name, ", ".join(sorted(task_names)) or "(none)"
+                )
+            )
+        out[event] = task_name
+    return out
+
+
+def _validate_shutdown(data: Any) -> Dict[str, int]:
+    """Validate ``shutdown: {stop_timeout, priority}`` (graceful-stop knobs)."""
+    if not isinstance(data, dict) or not data:
+        raise ServiceValidationError(
+            "shutdown must be a non-empty mapping (stop_timeout and/or priority)"
+        )
+    unknown = set(data.keys()) - ALLOWED_SHUTDOWN_KEYS
+    if unknown:
+        raise ServiceValidationError(
+            "shutdown has unknown keys {} (allowed: {})".format(
+                ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_SHUTDOWN_KEYS))
+            )
+        )
+    out: Dict[str, int] = {}
+    ranges = {
+        "stop_timeout": SHUTDOWN_STOP_TIMEOUT_RANGE,
+        "priority": SHUTDOWN_PRIORITY_RANGE,
+    }
+    for key, value in data.items():
+        low, high = ranges[key]
+        if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+            raise ServiceValidationError(
+                "shutdown.{} must be an integer {}..{}".format(key, low, high)
+            )
+        out[key] = value
     return out
 
 
@@ -640,6 +735,12 @@ class ServiceDefinition:
     # (_validate_tasks); executed inside the RUNNING container by
     # `syrvis service task <name> --task <task>` (e.g. a DB bootstrap).
     tasks: Dict[str, List[str]] = field(default_factory=dict)
+    # Container lifecycle hooks: {event: task_name} — run a DECLARED task at
+    # pre-stop / post-start (the DB-quiesce path). Validated by _validate_hooks.
+    hooks: Dict[str, str] = field(default_factory=dict)
+    # Graceful-shutdown knobs: {stop_timeout, priority} — SIGTERM grace and
+    # instance-shutdown stop band. None == defaults (30s, band 50).
+    shutdown: Optional[Dict[str, int]] = None
     # Privileged tier selector (design/22): "" (default) | "infra". `infra` unlocks
     # the enumerated read-only host-mount allowlist; only an operator-authored
     # declaration may set it (install-time authorship gate).
@@ -726,6 +827,14 @@ class ServiceDefinition:
         tasks: Dict[str, List[str]] = {}
         if data.get("tasks") is not None:
             tasks = _validate_tasks(data["tasks"])
+
+        hooks: Dict[str, str] = {}
+        if data.get("hooks") is not None:
+            hooks = _validate_hooks(data["hooks"], frozenset(tasks))
+
+        shutdown = None
+        if data.get("shutdown") is not None:
+            shutdown = _validate_shutdown(data["shutdown"])
 
         tier = data.get("tier", "")
         if tier not in ALLOWED_TIERS:
@@ -829,6 +938,8 @@ class ServiceDefinition:
             environment=environment,
             command=command,
             tasks=tasks,
+            hooks=hooks,
+            shutdown=shutdown,
             tier=tier,
             env_file=env_file,
             volumes=volumes,
@@ -894,6 +1005,10 @@ class ServiceDefinition:
             result["command"] = self.command
         if self.tasks:
             result["tasks"] = {name: {"command": argv} for name, argv in self.tasks.items()}
+        if self.hooks:
+            result["hooks"] = dict(self.hooks)
+        if self.shutdown:
+            result["shutdown"] = dict(self.shutdown)
         if self.tier:
             result["tier"] = self.tier
         if self.env_file:

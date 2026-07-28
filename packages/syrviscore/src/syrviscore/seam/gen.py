@@ -117,6 +117,8 @@ _SLOT_PREDICATE = {
     "prune_policy": "is_prune",
     "boolean": "is_bool",
     "stack_service": "is_stacksvc",
+    "revision": "is_revision",
+    "halt_reason": "is_reason",
 }
 
 
@@ -190,6 +192,7 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         'is_keep() { is_num "$1" && [ "$1" -ge 0 ] && [ "$1" -le 50 ]; }',
         'is_tail() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 10000 ]; }',
         'is_port() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }',
+        'is_revision() { is_num "$1" && [ "$1" -ge 1 ] && [ "$1" -le 999999 ]; }',
         "is_giturl()  { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^(https://[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+|git@[A-Za-z0-9.-]+:"
         "[A-Za-z0-9._/-]+|ssh://git@[A-Za-z0-9.-]+(:[0-9]+)?/[A-Za-z0-9._/-]+)$'; }",
@@ -200,6 +203,7 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         + "|".join(STACK_SERVICES)
         + ")$'; }",
         "is_prune()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }",
+        "is_reason()    { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(ups|maintenance)$'; }",
         "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
         "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"

@@ -107,19 +107,93 @@ syrvis stop cloudflared
 Restart all services.
 
 ```bash
-syrvis restart [SERVICE]
+syrvis restart [--graceful] [--json]
 ```
 
-**Arguments:**
-- `SERVICE` - (Optional) Specific service to restart
+**Options:**
+- `--graceful` - Full-instance graceful restart: ordered stop of every managed
+  workload (transition hooks + per-service stop grace, VMs included), then an
+  ordered bring-up. Without it: core-only force-recreate.
 
 **Examples:**
 ```bash
-# Restart all
-syrvis restart
+# Core force-recreate (applies compose + static-config changes)
+sudo syrvis restart
 
-# Restart specific service
-syrvis restart traefik
+# Graceful everything (DBs get their stop grace, hooks fire)
+sudo syrvis restart --graceful
+```
+
+---
+
+### syrvis history
+
+Show deployment history: per-workload revisions with image transitions, env
+var NAMES (values always redacted), volumes, exposure, trigger, and outcome.
+The core tier records under the reserved workload id `@core`.
+
+```bash
+syrvis history [WORKLOAD] [--json] [--limit N] [--revision R]
+```
+
+**Examples:**
+```bash
+syrvis history                        # every workload
+syrvis history cyberquill --limit 5   # one service, newest 5
+syrvis history cyberquill --revision 3 --json   # one revision in full
+```
+
+---
+
+### syrvis service rollback
+
+Roll a service back to a prior deployment revision (Helm-style: the restore is
+recorded as a NEW revision with `rollback_of`). Restores the target revision's
+manifest through the full trust boundary, pulls the target image first (an
+unpullable tag leaves the service untouched), and redeploys. Data and secrets
+are left in place; the operator's current enabled/critical is preserved.
+Git-sourced services are refused (roll back via the repo + `service update`).
+
+```bash
+sudo syrvis service rollback NAME [--to REV] [-y]
+```
+
+Note: rollback is GitOps-ephemeral — the next IaC apply/reconcile that still
+declares the newer image will redeploy it. Revert the deployment repo too to
+make it durable.
+
+---
+
+### syrvis shutdown
+
+Gracefully stop every managed workload and halt the instance — the
+UPS-on-battery verb. Fires the instance pre-shutdown hook, issues VM ACPI
+shutdown (guests drain in parallel), stops Layer 2 services in
+`shutdown.priority` order (pre-stop hooks quiesce databases, then each gets
+its `shutdown.stop_timeout` grace), waits for VMs (force-off stragglers), and
+stops the core stack with Traefik last. Declared intent is untouched.
+
+```bash
+sudo syrvis shutdown [--reason ups|maintenance] [--timeout N] [--vm-deadline N] [--hold] [--json]
+```
+
+- `--reason ups` auto-resumes on the next boot (power returned);
+  `maintenance` (default) stays down until `syrvis resume`.
+- Exit 0 = clean; 2 = completed degraded (failures listed in the report).
+- While halted, `status` shows a banner and bulk bring-up verbs
+  (`start`, `restart`, `reconcile`) refuse until `resume`. Config-only verbs
+  (`stack apply`, declarations) still work — they start nothing.
+
+---
+
+### syrvis resume
+
+Bring a halted instance back: core stack first, then VMs, then Layer 2 via the
+reconcile engine. Clears the halted state; a no-op when the instance is
+active.
+
+```bash
+sudo syrvis resume [--json]
 ```
 
 ---
