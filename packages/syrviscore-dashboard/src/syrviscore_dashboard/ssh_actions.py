@@ -56,6 +56,23 @@ CATALOG: List[SshAction] = [
         why_privileged="uses the compose binary + rewrites the traefik config dir",
     ),
     SshAction(
+        id="shutdown-instance",
+        title="Gracefully halt the instance",
+        description="Ordered stop of every managed workload (hooks, DB stop grace, "
+        "VM ACPI shutdown), then a persisted halted state.",
+        command="sudo syrvis shutdown --reason maintenance",
+        why_privileged="stops the whole instance incl. this dashboard's own container "
+        "— must run from the host, not from inside it",
+    ),
+    SshAction(
+        id="resume-instance",
+        title="Resume a halted instance",
+        description="Bring everything back: core stack, VMs, then Layer 2 services.",
+        command="sudo syrvis resume",
+        why_privileged="compose up + macvlan shim + VM power-on need host root "
+        "(and this container is down while halted)",
+    ),
+    SshAction(
         id="install-version",
         title="Install a service version",
         description="Download + install a service version from GitHub (manager op).",

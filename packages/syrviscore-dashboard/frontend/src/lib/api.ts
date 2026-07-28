@@ -174,6 +174,56 @@ export interface Updates {
 export const getLinks = () => api<LinksResponse>("/api/links");
 export const getUpdates = () => api<Updates>("/api/updates");
 
+// --- Deployment history + instance runstate --------------------------------
+
+export interface DeploymentRecord {
+  revision: number;
+  workload: string;
+  tier: "service" | "core";
+  timestamp: string;
+  action: "deploy" | "rollback" | "remove" | "stack-apply";
+  trigger: string;
+  outcome: "success" | "failed";
+  detail?: string;
+  image?: string | null;
+  previous_image?: string | null;
+  version?: string | null;
+  exposure?: string | null;
+  hostname?: string | null;
+  env_names?: string[];
+  volumes?: { source: string; target: string; mode: string; kind: string }[];
+  rollback_of?: number | null;
+  // Core-tier records
+  pins?: Record<string, string> | null;
+  previous_pins?: Record<string, string> | null;
+  core_enabled?: string[] | null;
+}
+
+export interface DeploymentHistory {
+  workloads: Record<string, DeploymentRecord[]>;
+  invalid: { file: string; error: string }[];
+  error?: string;
+}
+
+export interface Runstate {
+  state: "active" | "halted";
+  reason?: string;
+  at?: string;
+  resume_on_boot?: boolean;
+  workloads?: { name: string; scope: string; state: string }[];
+}
+
+export const getDeployments = (limit = 20) =>
+  api<DeploymentHistory>(`/api/deployments?limit=${limit}`);
+export const getRunstate = () => api<Runstate>("/api/runstate");
+
+export const rollbackService = (name: string, to: number | null) =>
+  api<{ ok: boolean; message: string }>(`/api/services/${encodeURIComponent(name)}/rollback`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ to }),
+  });
+
 export type RouteKind = "core" | "synology" | "service";
 export type Exposure = "internal" | "tunnel";
 export type RouteHealth = "ok" | "degraded" | "down" | "unknown";

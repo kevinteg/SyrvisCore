@@ -14,6 +14,12 @@ class ServiceAddRequest(BaseModel):
     start: bool = True
 
 
+class RollbackRequest(BaseModel):
+    # Deployment revision to restore (see /api/deployments); None = previous
+    # successful revision.
+    to: int | None = None
+
+
 def _core_services() -> dict:
     from syrviscore.docker_manager import DockerManager
 
@@ -59,6 +65,14 @@ def _run_l2(fn, *args) -> dict:
 def add_service(payload: ServiceAddRequest, request: Request) -> dict:
     settings = request.app.state.settings
     return _run_l2(manage.layer2_add, payload.source, payload.start, settings)
+
+
+# Registered BEFORE the generic {action} route so POST /services/x/rollback
+# resolves here (FastAPI matches in registration order).
+@router.post("/services/{name}/rollback")
+def rollback_service(name: str, payload: RollbackRequest, request: Request) -> dict:
+    settings = request.app.state.settings
+    return _run_l2(manage.layer2_rollback, name, payload.to, settings)
 
 
 @router.post("/services/{name}/{action}")

@@ -75,3 +75,14 @@ def layer2_remove(name: str, purge: bool, settings) -> Tuple[bool, str]:
     if not settings.enable_l2_mutations:
         raise ManagementDisabled("Layer 2 mutations are disabled (ENABLE_L2_MUTATIONS=false)")
     return _service_manager().remove(name, purge=purge)
+
+
+def layer2_rollback(name: str, to, settings) -> Tuple[bool, str]:
+    """Roll a service back to a prior deployment revision.
+
+    Same trust class as ``update`` (shells docker pull + compose), so the same
+    ENABLE_L2_MUTATIONS gate. ``to=None`` = the previous successful revision.
+    """
+    if not settings.enable_l2_mutations:
+        raise ManagementDisabled("Layer 2 mutations are disabled (ENABLE_L2_MUTATIONS=false)")
+    return _service_manager().rollback(name, to)

@@ -2,14 +2,17 @@ import { useState } from "react";
 import { Header, type Tab } from "./components/Header";
 import { OverviewPanel } from "./components/OverviewPanel";
 import { ServicesPanel } from "./components/ServicesPanel";
+import { DeploymentsPanel } from "./components/DeploymentsPanel";
 import { RoutesPanel } from "./components/RoutesPanel";
 import { LogsPanel } from "./components/LogsPanel";
 import { ConfigPanel } from "./components/ConfigPanel";
+import { RunstateBanner } from "./components/RunstateBanner";
 import { useHealthStream } from "./lib/useHealthStream";
 
 const TABS: Tab[] = [
   { id: "overview", label: "Overview" },
   { id: "services", label: "Services" },
+  { id: "deploys", label: "Deploys" },
   { id: "routes", label: "Routes" },
   { id: "logs", label: "Logs" },
   { id: "config", label: "Config" },
@@ -24,10 +27,12 @@ export default function App() {
     <div className="min-h-full">
       <Header overall={snapshot?.overall} live={live} tabs={TABS} tab={tab} setTab={setTab} />
       <main className="mx-auto max-w-6xl px-4 py-6">
+        <RunstateBanner />
         {tab === "overview" && (
           <OverviewPanel snapshot={snapshot} isLoading={isLoading} error={error} />
         )}
         {tab === "services" && <ServicesPanel />}
+        {tab === "deploys" && <DeploymentsPanel />}
         {tab === "routes" && <RoutesPanel />}
         {tab === "logs" && <LogsPanel />}
         {tab === "config" && <ConfigPanel />}

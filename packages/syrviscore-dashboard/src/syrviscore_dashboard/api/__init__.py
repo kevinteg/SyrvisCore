@@ -6,6 +6,7 @@ from . import (
     config_routes,
     core,
     declarations,
+    deployments,
     events,
     health,
     links,
@@ -30,5 +31,6 @@ api_router.include_router(me.router)
 api_router.include_router(links.router)
 api_router.include_router(routes.router)
 api_router.include_router(updates.router)
+api_router.include_router(deployments.router)
 
 __all__ = ["api_router"]
