@@ -294,7 +294,10 @@ class TestReconcileCli:
         monkeypatch.setattr(
             ServiceManager,
             "install_declaration",
-            lambda self, service, start=True, preserve_data_on_rollback=False, **kw: (True, "installed"),
+            lambda self, service, start=True, preserve_data_on_rollback=False, **kw: (
+                True,
+                "installed",
+            ),
         )
         result = CliRunner().invoke(cli, ["reconcile", "--json"])
         assert result.exit_code == 1, result.output
