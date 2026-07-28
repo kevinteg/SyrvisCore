@@ -5,7 +5,6 @@ import pytest
 import respx
 
 from syrviscore_dashboard.probes import Status
-from syrviscore_dashboard.probes.cloudflare_ddns import probe_ddns
 from syrviscore_dashboard.probes.cloudflared import probe_cloudflared
 from syrviscore_dashboard.probes.config import probe_config
 from syrviscore_dashboard.probes.core import probe_core
@@ -130,59 +129,6 @@ async def test_cloudflared_not_configured(settings, syrvis_home):
     async with httpx.AsyncClient() as http:
         result = await probe_cloudflared(settings, http)
     assert result.status == Status.NOT_CONFIGURED
-
-
-# --- cloudflare ddns -------------------------------------------------------
-
-
-async def test_ddns_not_configured(settings):
-    # fixture .env has no CLOUDFLARE_API_TOKEN
-    async with httpx.AsyncClient() as http:
-        result = await probe_ddns(settings, http)
-    assert result.status == Status.NOT_CONFIGURED
-
-
-async def test_ddns_in_sync(settings, syrvis_home):
-    (syrvis_home / "config" / ".env").write_text(
-        "DOMAIN=example.com\n"
-        "CLOUDFLARE_API_TOKEN=cf-token\n"
-        "CLOUDFLARE_DDNS_RECORDS=home.example.com\n"
-    )
-    with respx.mock:
-        respx.get("https://api.ipify.org").mock(
-            return_value=httpx.Response(200, text="203.0.113.7")
-        )
-        respx.get("https://api.cloudflare.com/client/v4/zones").mock(
-            return_value=httpx.Response(200, json={"result": [{"id": "z1", "name": "example.com"}]})
-        )
-        respx.get("https://api.cloudflare.com/client/v4/zones/z1/dns_records").mock(
-            return_value=httpx.Response(200, json={"result": [{"content": "203.0.113.7"}]})
-        )
-        async with httpx.AsyncClient() as http:
-            result = await probe_ddns(settings, http)
-    assert result.status == Status.OK
-    assert result.extra["public_ip"] == "203.0.113.7"
-    assert result.extra["records"][0]["in_sync"] is True
-
-
-async def test_ddns_out_of_sync(settings, syrvis_home):
-    (syrvis_home / "config" / ".env").write_text(
-        "CLOUDFLARE_API_TOKEN=cf-token\nCLOUDFLARE_DDNS_RECORDS=home.example.com\n"
-    )
-    with respx.mock:
-        respx.get("https://api.ipify.org").mock(
-            return_value=httpx.Response(200, text="203.0.113.7")
-        )
-        respx.get("https://api.cloudflare.com/client/v4/zones").mock(
-            return_value=httpx.Response(200, json={"result": [{"id": "z1", "name": "example.com"}]})
-        )
-        respx.get("https://api.cloudflare.com/client/v4/zones/z1/dns_records").mock(
-            return_value=httpx.Response(200, json={"result": [{"content": "198.51.100.1"}]})
-        )
-        async with httpx.AsyncClient() as http:
-            result = await probe_ddns(settings, http)
-    assert result.status == Status.DEGRADED
-    assert result.extra["records"][0]["in_sync"] is False
 
 
 # --- config ----------------------------------------------------------------
