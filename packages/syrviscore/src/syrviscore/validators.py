@@ -553,6 +553,17 @@ class DockerValidator:
                 name="User in docker group", passed=False, message="Cannot determine username"
             )
 
+        # Genuine root (no SUDO_USER — e.g. a root cron job) reaches the socket
+        # regardless of group membership; requiring root ∈ docker false-fails
+        # every root-cron verify (found live by the nas-heartbeat dead-man,
+        # 2026-07-28). The sudo'd case still checks SUDO_USER above.
+        if self.username == "root" and os.geteuid() == 0:
+            return CheckResult(
+                name="User in docker group",
+                passed=True,
+                message="root (group membership not required)",
+            )
+
         in_group = privileged_ops.is_user_in_group(self.username, "docker")
 
         if in_group:
