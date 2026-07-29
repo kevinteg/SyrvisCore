@@ -178,6 +178,10 @@ class _FakeManager:
         self.calls.append(("remove", name, purge, keep_declaration))
         return True, "removed"
 
+    def _location_change_refusal(self, name, new_location):
+        self.calls.append(("location_check", name, new_location))
+        return None  # no installed data / no location change in these fakes
+
     def start(self, name):
         self.calls.append(("start", name))
         if name in self.fail:
@@ -569,3 +573,70 @@ class TestTolerantLoad:
             services_d.load_declarations(home, tolerant=True)[0].keys()
             == services_d.load_declarations(home)[0].keys()
         )
+
+
+class TestLocationReplaceRefusal:
+    """design/26: reconcile classifies a location change as REPLACE, and the
+    apply REFUSES it while the installed service still has data — surfacing a
+    per-service error, never crashing the reconcile or tearing anything down.
+    The documented bypass (app-move): clear the old data root, re-apply."""
+
+    def _mgr(self, home, monkeypatch):
+        from syrviscore import paths as paths_mod
+
+        monkeypatch.setattr(
+            paths_mod,
+            "resolve_volume_root",
+            lambda loc: home.parent / "volumes" / str(loc).lstrip("/"),
+        )
+        monkeypatch.setattr(paths_mod, "is_mounted_volume", lambda loc: True)
+        sm = _manager(home)
+        sm._start_service = lambda n, cp: (True, "started")
+        sm._reload_traefik = lambda: None
+        return sm
+
+    def _apply(self, sm, home):
+        decls, invalid = services_d.load_declarations(home)
+        plan = services_d.build_reconcile_plan(sm, decls, invalid)
+        return plan, services_d.apply_reconcile_plan(sm, decls, plan)
+
+    def test_refused_with_data_then_bypass_proceeds(self, home, monkeypatch):
+        import shutil
+
+        sm = self._mgr(home, monkeypatch)
+        assert sm.add_image("app", "ghcr.io/a/app:1.0", start=False)[0]
+        (home / "data" / "app" / "db.sqlite").write_text("payload")
+
+        # redeclare the same service AT a location -> plan says replace
+        _declare(home, "app", location="/volume6")
+        plan, results = self._apply(sm, home)
+        assert [a["kind"] for a in plan["actions"] if a["name"] == "app"] == ["replace"]
+        (row,) = [r for r in results if r["name"] == "app"]
+        assert row["ok"] is False
+        assert "app-move" in row["message"]
+        # nothing was torn down: still installed at the old layout, data intact
+        assert (home / "services" / "app").exists()
+        assert (home / "data" / "app" / "db.sqlite").read_text() == "payload"
+
+        # the app-move bypass: clear the old data root, re-apply
+        shutil.rmtree(home / "data" / "app")
+        plan, results = self._apply(sm, home)
+        (row,) = [r for r in results if r["name"] == "app"]
+        assert row["ok"] is True, row["message"]
+        new_home = home.parent / "volumes" / "volume6" / "syrviscore" / "apps" / "app"
+        assert (new_home / "data").is_dir()
+        manifest = yaml.safe_load(
+            (home / "services" / "app" / "syrvis-service.yaml").read_text()
+        )
+        assert manifest["location"] == "/volume6"
+
+    def test_refusal_isolates_other_services(self, home, monkeypatch):
+        sm = self._mgr(home, monkeypatch)
+        assert sm.add_image("app", "ghcr.io/a/app:1.0", start=False)[0]
+        (home / "data" / "app" / "db.sqlite").write_text("payload")
+        _declare(home, "app", location="/volume6")
+        _declare(home, "other")  # a fresh ADD alongside the refused replace
+        plan, results = self._apply(sm, home)
+        by_name = {r["name"]: r for r in results}
+        assert by_name["app"]["ok"] is False and "app-move" in by_name["app"]["message"]
+        assert by_name["other"]["ok"] is True  # isolation held

@@ -40,6 +40,13 @@ DOMAIN_RE = re.compile(
 
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# design/26: the ONLY shape an app location may take — a DSM volume ROOT.
+# No subpaths, no trailing slash, no '..' (the charset admits none of them).
+# Parse-time validation is regex-ONLY (a laptop validating a declaration has no
+# /volumeN mounts); the is-it-really-a-mounted-volume check happens at INSTALL
+# time (paths.is_mounted_volume), alongside the authorship gate.
+LOCATION_RE = re.compile(r"^/volume\d+$")
+
 # Names owned by the core stack — a third-party service may not impersonate
 # or replace them.
 # "deployments"/"state" are platform-owned subtrees of data/ — a service with
@@ -98,6 +105,13 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # services.d/deploy declaration may set it — never a git/image/catalog
         # service) is enforced at install time in _install_from_definition.
         "tier",
+        # The app's declared home volume (design/26). "" (default) = the legacy
+        # layout under SYRVIS_HOME (data/<name>); "/volume<N>" = the v2 app-home
+        # layout <location>/syrviscore/apps/<name>/{data,config,secrets,logs}.
+        # Validated ^/volume\d+$ at parse; mount-checked + AUTHORSHIP-gated at
+        # install time (only a services.d/deploy declaration may set it — a
+        # git/image/catalog manifest can never redirect its home onto a host path).
+        "location",
         # Declared one-shot tasks ({name: {command: [...]}}) the operator can
         # run inside the service's own container via `syrvis service task` —
         # e.g. a DB bootstrap. Same trust class + audit rules as `command`.
@@ -457,6 +471,23 @@ def _validate_shutdown(data: Any) -> Dict[str, int]:
     return out
 
 
+def _validate_location(value: Any) -> str:
+    """Validate an app ``location:`` — a DSM volume root, nothing else.
+
+    Regex-ONLY on purpose: parsing must work off-box (laptop-side declaration
+    validation) and in reconcile planning, where /volumeN may not exist. The
+    mount-exists check (paths.is_mounted_volume) belongs to install time.
+    The charset rules out every traversal shape (/etc, /volume6/../volume1,
+    subpaths, trailing slash, whitespace) by construction.
+    """
+    if not isinstance(value, str) or not LOCATION_RE.fullmatch(value):
+        raise ServiceValidationError(
+            "Invalid location {!r}: must be a DSM volume root matching "
+            "^/volume<N>$ (e.g. /volume6)".format(value)
+        )
+    return value
+
+
 def _no_control_chars(value: str) -> bool:
     """True if the string has no ASCII control characters (incl. newlines/tabs)."""
     return not any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
@@ -745,6 +776,11 @@ class ServiceDefinition:
     # the enumerated read-only host-mount allowlist; only an operator-authored
     # declaration may set it (install-time authorship gate).
     tier: str = ""
+    # App home volume (design/26): "" (default) = legacy layout under SYRVIS_HOME;
+    # "/volume<N>" = the v2 app home <location>/syrviscore/apps/<name>/. Same
+    # trust anchor as `tier` — only an operator-authored declaration may set it
+    # (install-time authorship gate + mount check in ServiceManager).
+    location: str = ""
     # A data-dir-relative env file (installed 0600) — the recommended home for
     # secrets, keeping them out of this manifest.
     env_file: str = ""
@@ -841,6 +877,10 @@ class ServiceDefinition:
             raise ServiceValidationError(
                 "Invalid tier {!r}: allowed: '' (default) or 'infra'".format(tier)
             )
+
+        location = ""
+        if data.get("location"):
+            location = _validate_location(data["location"])
 
         volumes = data.get("volumes", [])
         if not isinstance(volumes, list):
@@ -941,6 +981,7 @@ class ServiceDefinition:
             hooks=hooks,
             shutdown=shutdown,
             tier=tier,
+            location=location,
             env_file=env_file,
             volumes=volumes,
             networks=networks,
@@ -1011,6 +1052,8 @@ class ServiceDefinition:
             result["shutdown"] = dict(self.shutdown)
         if self.tier:
             result["tier"] = self.tier
+        if self.location:
+            result["location"] = self.location
         if self.env_file:
             result["env_file"] = self.env_file
         if self.volumes:

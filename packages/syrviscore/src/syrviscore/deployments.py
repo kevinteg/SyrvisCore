@@ -149,7 +149,16 @@ def _config_checksums(home: Path, service, configs=None) -> Dict[str, str]:
     import hashlib
 
     sums: Dict[str, str] = {}
-    data_dir = Path(home) / "data" / service.name
+    location = getattr(service, "location", "") or ""
+    if location:
+        # v2 app home (design/26): rendered configs live under home/config.
+        from . import paths as paths_mod
+
+        data_dir = (
+            paths_mod.resolve_volume_root(location) / "syrviscore" / "apps" / service.name / "config"
+        )
+    else:
+        data_dir = Path(home) / "data" / service.name
     dests = [t.dest for t in (service.config_templates or [])]
     for cfg in configs or []:
         dest = getattr(cfg, "dest", None)
@@ -207,6 +216,9 @@ def record_service_deploy(
             "config_checksums": _config_checksums(home, service, configs),
             "source_url": service.source_url,
             "tier_selector": service.tier,
+            # design/26: where the app's home lives ("" = legacy layout).
+            # Additive v1-schema field; readers are .get()-safe.
+            "location": getattr(service, "location", "") or "",
             "rollback_of": rollback_of,
             "manifest": service.to_dict(),
         }
@@ -245,6 +257,7 @@ def record_service_remove(
             "config_checksums": {},
             "source_url": None,
             "tier_selector": "",
+            "location": None,
             "rollback_of": None,
             "manifest": None,
         }

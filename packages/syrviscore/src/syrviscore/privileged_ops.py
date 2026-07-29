@@ -323,6 +323,17 @@ fi
 # Ensure user is in docker group
 /usr/syno/sbin/synogroup --member docker {username} 2>/dev/null || true
 
+# Self-heal the operator seam: DSM regenerates /etc/passwd on EVERY boot,
+# resetting the seam accounts' shells to /sbin/nologin — which kills SSH for
+# the operator (and reader) until re-provisioned. Re-assert the login shells.
+# Idempotent (the sed only matches a :/sbin/nologin ending) and guarded so an
+# absent account is a no-op.
+for SEAM_USER in syrvis-operator syrvis-reader; do
+    if grep -q "^$SEAM_USER:" /etc/passwd 2>/dev/null; then
+        sed -i "s#^\\($SEAM_USER:.*\\):/sbin/nologin\\$#\\1:/bin/sh#" /etc/passwd
+    fi
+done
+
 # Load environment variables (source, don't word-split — values may contain
 # spaces or '#', and the Cloudflare token must not leak through xargs)
 if [ -f "{env_path}" ]; then

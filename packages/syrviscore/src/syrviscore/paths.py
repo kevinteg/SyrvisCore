@@ -55,6 +55,76 @@ def get_sim_root() -> Optional[Path]:
     return None
 
 
+def resolve_volume_root(location: str) -> Path:
+    """Map a declared ``/volume<N>`` root to its real directory.
+
+    On DSM this is the identity. Under the DSM simulator (and tmp-path tests)
+    the volume roots live under ``DSM_SIM_ROOT``, so ``/volume6`` maps to
+    ``<sim_root>/volume6`` — which is what lets the v2 app-home layout be
+    exercised without a real ``/volumeN``. Kept module-level so tests can
+    monkeypatch it directly.
+    """
+    if is_simulation_mode():
+        root = get_sim_root()
+        if root is not None:
+            return root / str(location).lstrip("/")
+    return Path(location)
+
+
+def is_mounted_volume(location) -> bool:
+    """True iff ``location`` is an existing directory that is a real mountpoint.
+
+    The install-time half of the ``location:`` validation (design/26) — the
+    schema's parse-time check is regex-only. A SYMLINKED volume root is
+    rejected in EVERY mode (explicitly, before any dir test — in prod
+    ``os.path.ismount`` would reject it too, but sim mode must not reopen that
+    hole, adversarial review #9). Under the DSM simulator only the mountpoint
+    requirement itself is waived (sim volumes are plain directories under the
+    sim root). Module-level on purpose: tests monkeypatch it.
+    """
+    target = resolve_volume_root(str(location))
+    if os.path.islink(str(target)):
+        return False  # a symlinked volume root is never a mounted volume
+    if not os.path.isdir(str(target)):
+        return False
+    if is_simulation_mode():
+        return True
+    return os.path.ismount(str(target))
+
+
+def _is_install_root(candidate: Path) -> bool:
+    """True iff `candidate` holds a manifest that SELF-IDENTIFIES as this install.
+
+    A genuine install manifest records `install_path` == its own root (and carries
+    `schema_version`/`versions`). A stray copy dropped under a location root (e.g.
+    a mis-scoped restore under `/volume6/syrviscore`) records a DIFFERENT
+    install_path — so it can never masquerade as the root during auto-detection.
+    Falls back to accepting a manifest that predates `install_path` (older
+    installs) as long as it parses and looks like an install manifest, never a
+    bare marker. Any read/parse failure → not an install root (fail closed).
+    """
+    manifest = candidate / ".syrviscore-manifest.json"
+    if not candidate.exists() or not manifest.exists():
+        return False
+    try:
+        import json as _json
+
+        data = _json.loads(manifest.read_text())
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    recorded = data.get("install_path")
+    if recorded:
+        try:
+            return Path(recorded).resolve() == candidate.resolve()
+        except Exception:
+            return False
+    # Pre-`install_path` manifest: accept only if it still looks like an install
+    # manifest (has the version bookkeeping a bare marker wouldn't).
+    return "schema_version" in data or "versions" in data
+
+
 def get_syrvis_home() -> Path:
     """
     Get the SYRVIS_HOME directory with auto-detection fallback.
@@ -80,13 +150,17 @@ def get_syrvis_home() -> Path:
 
     # Strategy 2: Default location
     default = Path("/volume1/syrviscore")
-    if default.exists() and (default / ".syrviscore-manifest.json").exists():
+    if _is_install_root(default):
         return default
 
-    # Strategy 3: Search other volumes
+    # Strategy 3: Search other volumes. NB per-service app homes now materialize
+    # a real `<location>/syrviscore/apps/` tree on secondary volumes (design/26),
+    # so a bare `.syrviscore-manifest.json` marker is no longer sufficient proof
+    # of an install root — a stray/mis-scoped copy under a location root would
+    # otherwise mis-root the whole CLI. Require the manifest to self-identify.
     for vol_num in range(2, 10):
         candidate = Path(f"/volume{vol_num}/syrviscore")
-        if candidate.exists() and (candidate / ".syrviscore-manifest.json").exists():
+        if _is_install_root(candidate):
             return candidate
 
     # Strategy 4: Derive from script location (if installed)

@@ -100,6 +100,57 @@ class TestGetSyrvisHome:
             get_syrvis_home()
 
 
+class TestIsInstallRoot:
+    """_is_install_root: a candidate must SELF-IDENTIFY, not just carry a marker.
+
+    Guards the design/26 hardening — per-service app homes now materialize
+    `<location>/syrviscore/apps/` on secondary volumes, so a stray/mis-scoped
+    manifest under a location root must never masquerade as the install root.
+    """
+
+    def _mk(self, tmp_path, payload):
+        root = tmp_path / "syrviscore"
+        root.mkdir()
+        (root / ".syrviscore-manifest.json").write_text(json.dumps(payload))
+        return root
+
+    def test_self_identifying_root_accepted(self, tmp_path):
+        from syrviscore.paths import _is_install_root
+
+        root = self._mk(tmp_path, {"schema_version": 1, "versions": {}, "install_path": ""})
+        (root / ".syrviscore-manifest.json").write_text(
+            json.dumps({"schema_version": 1, "versions": {}, "install_path": str(root)})
+        )
+        assert _is_install_root(root) is True
+
+    def test_stray_copy_rejected(self, tmp_path):
+        from syrviscore.paths import _is_install_root
+
+        # install_path points at a DIFFERENT root (a copied/restored manifest)
+        root = self._mk(tmp_path, {"schema_version": 1, "install_path": "/volume4/syrviscore"})
+        assert _is_install_root(root) is False
+
+    def test_bare_marker_rejected(self, tmp_path):
+        from syrviscore.paths import _is_install_root
+
+        root = self._mk(tmp_path, {"apps": ["onyx"]})
+        assert _is_install_root(root) is False
+
+    def test_legacy_manifest_without_install_path_accepted(self, tmp_path):
+        from syrviscore.paths import _is_install_root
+
+        root = self._mk(tmp_path, {"schema_version": 1, "versions": {}})
+        assert _is_install_root(root) is True
+
+    def test_corrupt_manifest_rejected(self, tmp_path):
+        from syrviscore.paths import _is_install_root
+
+        root = tmp_path / "syrviscore"
+        root.mkdir()
+        (root / ".syrviscore-manifest.json").write_text("{not json")
+        assert _is_install_root(root) is False
+
+
 class TestGetDockerComposePath:
     """Test get_docker_compose_path function."""
 
@@ -307,3 +358,76 @@ class TestSyrvisHomeError:
         error = SyrvisHomeError("test message")
         assert isinstance(error, Exception)
         assert str(error) == "test message"
+
+
+class TestIsMountedVolume:
+    """design/26: the install-time half of `location:` validation.
+
+    Parse-time is regex-only; this is the on-box check that the declared
+    /volumeN is a real, mounted DSM volume — a symlink or a bare directory
+    (an UNMOUNTED /volumeN is exactly that) must never pass outside sim mode.
+    """
+
+    def _no_sim(self, monkeypatch):
+        monkeypatch.delenv("DSM_SIM_ACTIVE", raising=False)
+        monkeypatch.delenv("DSM_SIM_ROOT", raising=False)
+
+    def test_nonexistent_path_rejected(self, monkeypatch):
+        from syrviscore.paths import is_mounted_volume
+
+        self._no_sim(monkeypatch)
+        assert is_mounted_volume("/volume987654") is False
+
+    def test_plain_directory_is_not_a_mount(self, monkeypatch, tmp_path):
+        from syrviscore import paths as paths_mod
+
+        self._no_sim(monkeypatch)
+        vol = tmp_path / "volume6"
+        vol.mkdir()
+        monkeypatch.setattr(paths_mod, "resolve_volume_root", lambda loc: vol)
+        assert paths_mod.is_mounted_volume("/volume6") is False
+
+    def test_symlink_to_directory_rejected(self, monkeypatch, tmp_path):
+        # os.path.ismount returns False for a symlink — a symlinked /volumeN
+        # (the class of trick the old nvme-flip workaround used) never passes.
+        from syrviscore import paths as paths_mod
+
+        self._no_sim(monkeypatch)
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "volume7"
+        link.symlink_to(real)
+        monkeypatch.setattr(paths_mod, "resolve_volume_root", lambda loc: link)
+        assert paths_mod.is_mounted_volume("/volume7") is False
+
+    def test_real_mountpoint_accepted(self, monkeypatch):
+        # "/" is a mountpoint on every platform the suite runs on.
+        from syrviscore import paths as paths_mod
+
+        self._no_sim(monkeypatch)
+        monkeypatch.setattr(paths_mod, "resolve_volume_root", lambda loc: __import__("pathlib").Path("/"))
+        assert paths_mod.is_mounted_volume("/volume1") is True
+
+    def test_sim_mode_accepts_existing_dir_under_sim_root(self, monkeypatch, tmp_path):
+        from syrviscore.paths import is_mounted_volume, resolve_volume_root
+
+        monkeypatch.setenv("DSM_SIM_ACTIVE", "1")
+        monkeypatch.setenv("DSM_SIM_ROOT", str(tmp_path))
+        (tmp_path / "volume6").mkdir()
+        assert resolve_volume_root("/volume6") == tmp_path / "volume6"
+        assert is_mounted_volume("/volume6") is True
+        assert is_mounted_volume("/volume9") is False  # absent even under sim
+
+    def test_sim_mode_still_rejects_symlinked_volume(self, monkeypatch, tmp_path):
+        # Adversarial review #9: sim mode waives only the mountpoint
+        # requirement — a SYMLINKED volume root stays rejected in every mode.
+        from syrviscore.paths import is_mounted_volume
+
+        monkeypatch.setenv("DSM_SIM_ACTIVE", "1")
+        monkeypatch.setenv("DSM_SIM_ROOT", str(tmp_path))
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_path / "volume9").symlink_to(elsewhere)
+        (tmp_path / "volume6").mkdir()
+        assert is_mounted_volume("/volume9") is False  # symlink: refused
+        assert is_mounted_volume("/volume6") is True  # plain dir: sim-accepted

@@ -283,22 +283,37 @@ def apply_reconcile_plan(
                     declarations[name], start=True, trigger=trigger
                 )
             elif kind == "replace":
-                # keep_declaration=True also keeps the history silent: the
-                # reinstall below records the ONE logical deploy (with the
-                # image transition), never a remove+add pair. fire_hooks=False
-                # for the same reason — a replace fires one pre/post-deploy
-                # pair (from the reinstall), never a spurious stop quiesce.
-                ok, msg = manager.remove(name, purge=False, keep_declaration=True, fire_hooks=False)
-                if ok:
-                    # The data dir predates this replace: a failed re-install
-                    # must roll back the new artifacts WITHOUT destroying it.
-                    ok, msg = manager.install_declaration(
-                        declarations[name],
-                        start=True,
-                        preserve_data_on_rollback=True,
-                        trigger=trigger,
-                        previous_image=action.get("from_image"),
+                # design/26: a location change on an installed service that
+                # still has data is REFUSED before anything is torn down — a
+                # naive replace would materialize an EMPTY home at the new
+                # location (a DB would re-init: presents as data loss). The
+                # refusal surfaces as this service's own failed action; the
+                # rest of the plan proceeds (failure isolation). The bypass is
+                # the app-move procedure (empty/absent old data root proceeds).
+                refusal = manager._location_change_refusal(name, declarations[name].location)
+                if refusal:
+                    ok, msg = False, refusal
+                else:
+                    # keep_declaration=True also keeps the history silent: the
+                    # reinstall below records the ONE logical deploy (with the
+                    # image transition), never a remove+add pair.
+                    # fire_hooks=False for the same reason — a replace fires
+                    # one pre/post-deploy pair (from the reinstall), never a
+                    # spurious stop quiesce.
+                    ok, msg = manager.remove(
+                        name, purge=False, keep_declaration=True, fire_hooks=False
                     )
+                    if ok:
+                        # The data dir predates this replace: a failed
+                        # re-install must roll back the new artifacts WITHOUT
+                        # destroying it.
+                        ok, msg = manager.install_declaration(
+                            declarations[name],
+                            start=True,
+                            preserve_data_on_rollback=True,
+                            trigger=trigger,
+                            previous_image=action.get("from_image"),
+                        )
             elif kind == "start":
                 ok, msg = manager.start(name)
             elif kind == "stop":

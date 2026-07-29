@@ -24,6 +24,7 @@ from . import lifecycle
 from . import paths
 from .compose_cmd import resolve_compose_cmd
 from .service_schema import (
+    LOCATION_RE,
     SUBDOMAIN_RE,
     ServiceDefinition,
     ServiceValidationError,
@@ -55,6 +56,16 @@ def _image_tag(image: str) -> str:
 # NEVER escalate itself to the infra tier. This tuple is the whole authorship gate.
 OPERATOR_AUTHORED_PREFIXES = ("services.d:", "deploy:")
 
+# design/26: refusal message for a location change on an installed service that
+# still has data — a naive replace would materialize an EMPTY home at the new
+# location (Postgres would happily initdb: presents as data loss). The
+# documented bypass is the app-move procedure: stop -> copy data to the new
+# home -> clear the old data root -> re-declare -> deploy.
+LOCATION_CHANGE_REFUSAL = (
+    "location change on an installed service requires the app-move procedure "
+    "(wiki/runbooks/app-move.md)"
+)
+
 
 class ServiceManager:
     """Manage Layer 2 services for SyrvisCore."""
@@ -81,38 +92,134 @@ class ServiceManager:
             config_dir=self.syrvis_home / "data" / "traefik" / "config" / "dynamic"
         )
 
-    def _service_paths(self, name: str) -> Dict[str, Path]:
+    def _manifest_location(self, name: str) -> str:
+        """The ``location:`` recorded in the CENTRAL materialized manifest, or "".
+
+        Name-only lifecycle ops (stop/remove/logs/secret) have no definition in
+        hand; the manifest at ``services/<name>/syrvis-service.yaml`` — always
+        on SYRVIS_HOME, the platform's index of installed apps — is where the
+        app's home is looked up.
+
+        Fail-open vs fail-closed (adversarial review #4): only a genuinely
+        ABSENT manifest means "legacy/not-installed" ("" return). Any OTHER
+        read/parse failure raises — a v2 app whose manifest went corrupt must
+        NEVER silently resolve to the legacy path (a purge would then rmtree
+        the wrong tree while leaking the real home).
+        """
+        manifest = self.services_dir / name / "syrvis-service.yaml"
+        try:
+            text = manifest.read_text()
+        except FileNotFoundError:
+            return ""  # genuinely not installed / legacy-era removal in flight
+        except OSError as e:
+            raise ServiceValidationError(
+                "Service {!r} has an unreadable materialized manifest ({}) — "
+                "refusing to derive paths (fail closed); repair "
+                "services/{}/syrvis-service.yaml first".format(name, e, name)
+            )
+        try:
+            data = yaml.safe_load(text)
+        except Exception as e:  # noqa: BLE001 - corrupt yaml: fail closed
+            raise ServiceValidationError(
+                "Service {!r} has an unreadable materialized manifest ({}) — "
+                "refusing to derive paths (fail closed); repair "
+                "services/{}/syrvis-service.yaml first".format(name, e, name)
+            )
+        if not isinstance(data, dict):
+            raise ServiceValidationError(
+                "Service {!r} has an unreadable materialized manifest (not a "
+                "mapping) — refusing to derive paths (fail closed); repair "
+                "services/{}/syrvis-service.yaml first".format(name, name)
+            )
+        return str(data.get("location") or "")
+
+    def _app_home(self, service_or_name) -> Optional[Path]:
+        """The ONE resolution point for an app's home (design/26).
+
+        A ServiceDefinition/dict with a truthy ``location`` resolves to
+        ``<location>/syrviscore/apps/<name>``; a bare NAME reads ``location``
+        from the central materialized manifest and resolves the same way.
+        No location -> None (the legacy layout under SYRVIS_HOME).
+
+        A location that reaches here MUST re-match ``^/volume\\d+$`` — a
+        tampered manifest must fail CLOSED (refuse the operation), never fall
+        back to a different tree that a later purge/prune would resolve wrong.
+        """
+        if isinstance(service_or_name, ServiceDefinition):
+            name = service_or_name.name
+            location = service_or_name.location or ""
+        elif isinstance(service_or_name, dict):
+            name = str(service_or_name.get("name") or "")
+            location = str(service_or_name.get("location") or "")
+        else:
+            name = str(service_or_name)
+            location = self._manifest_location(name)
+        if not location:
+            return None
+        validate_service_name(name, "service name")
+        if not LOCATION_RE.fullmatch(location):
+            raise ServiceValidationError(
+                "Service {!r} declares invalid location {!r} (must match "
+                "^/volume<N>$) — refusing to derive paths from it".format(name, location)
+            )
+        return paths.resolve_volume_root(location) / "syrviscore" / "apps" / name
+
+    def _service_paths(
+        self, name: str, service: Optional[ServiceDefinition] = None
+    ) -> Dict[str, Path]:
         """Return the derived paths for a service, containment-checked.
 
         Even though names are validated at parse time, we re-validate here and
         assert every derived path stays within its parent — defense in depth
         against a name that reaches this layer unvalidated.
+
+        Layout-aware (design/26): a LEGACY service (no ``location``) returns
+        exactly {service, data, compose} rooted on SYRVIS_HOME, byte-for-byte
+        today's paths. A v2 app additionally carries its home and the four
+        standard slots — data/config/secrets/logs under
+        ``<location>/syrviscore/apps/<name>/`` — each containment-asserted
+        against the app home (and the home against the apps base), so a
+        symlinked home or slot can never redirect an operation elsewhere.
+
+        ``service`` (optional) makes the DEFINITION authoritative for the home
+        (install/compose-gen paths, where the manifest was just written from
+        it); name-only callers resolve via the central materialized manifest.
         """
         validate_service_name(name, "service name")
-        base_dirs = {
-            "service": self.services_dir,
-            "data": self.data_dir,
-            "compose_dir": self.compose_dir,
-        }
         result = {
             "service": self.services_dir / name,
             "data": self.data_dir / name,
             "compose": self.compose_dir / "{}.yaml".format(name),
         }
+        home = self._app_home(service if service is not None else name)
+        if home is not None:
+            result["home"] = home
+            result["data"] = home / "data"
+            result["config"] = home / "config"
+            result["secrets"] = home / "secrets"
+            result["logs"] = home / "logs"
+
         # Containment assertions: every derived path's parent must be exactly
         # the intended base directory.
-        for key, base in base_dirs.items():
-            target = result["compose"] if key == "compose_dir" else result[key]
+        def _assert_parent(target: Path, base: Path, where: str, of_parent: bool = False) -> None:
             base_real = os.path.realpath(str(base))
-            if key == "compose_dir":
+            if of_parent:
                 parent_real = os.path.realpath(str(target.parent))
             else:
                 parent_real = os.path.dirname(os.path.realpath(str(target)))
             if parent_real != base_real:
-                where = "compose" if key == "compose_dir" else key
                 raise ServiceValidationError(
                     "Service {!r} escapes the {} directory".format(name, where)
                 )
+
+        _assert_parent(result["service"], self.services_dir, "service")
+        _assert_parent(result["compose"], self.compose_dir, "compose", of_parent=True)
+        if home is None:
+            _assert_parent(result["data"], self.data_dir, "data")
+        else:
+            _assert_parent(home, home.parent, "apps")
+            for slot in ("data", "config", "secrets", "logs"):
+                _assert_parent(result[slot], home, "app home ({})".format(slot))
         return result
 
     def _project_name(self, name: str) -> str:
@@ -124,6 +231,73 @@ class ServiceManager:
         self.services_dir.mkdir(parents=True, exist_ok=True)
         self.compose_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_app_home(self, home: Path) -> None:
+        """Materialize a v2 app home's standard layout (idempotent, adopting).
+
+        The DSM daemon creates NOTHING (it refuses to auto-create bind-mount
+        sources), so every slot is pre-created here. ``exist_ok`` semantics
+        throughout: a PRE-POPULATED home (the end state of the app-move
+        procedure) is silently ADOPTED — existing content is never wiped and
+        never requires a flag. Modes: data/logs 0777 (the `_ensure_volume_dir`
+        convention — container UID unknown), config 0755 (read-only mounts),
+        secrets 0700 (root-only; env_file inside is 0600).
+        """
+        home.mkdir(parents=True, exist_ok=True)
+        # Layout perms are UMASK-INDEPENDENT (adversarial review #8): under a
+        # hardened root shell (umask 077) the mkdirs above would land 0700 and
+        # a non-root container UID could not even traverse to its data dir.
+        # Explicit best-effort 0755 on the home and the created ancestors
+        # (<vol>/syrviscore and <vol>/syrviscore/apps) — same explicit-chmod
+        # discipline every slot below gets. The volume root itself is DSM's.
+        for ancestor in (home, home.parent, home.parent.parent):
+            try:
+                os.chmod(str(ancestor), 0o755)
+            except OSError:
+                pass
+        self._ensure_volume_dir(home / "data", "rw")
+        self._ensure_volume_dir(home / "logs", "rw")
+        for slot, mode in (("config", 0o755), ("secrets", 0o700)):
+            path = home / slot
+            path.mkdir(exist_ok=True)
+            try:
+                os.chmod(str(path), mode)
+            except OSError:
+                pass  # best-effort (mirrors _ensure_volume_dir)
+
+    @staticmethod
+    def _dir_nonempty(path: Path) -> bool:
+        """True iff ``path`` exists and contains ANY entry."""
+        try:
+            next(iter(path.iterdir()))
+            return True
+        except (OSError, StopIteration):
+            return False
+
+    def _current_data_root(self, name: str) -> Path:
+        """The INSTALLED service's resolved data root (old layout or old home data/)."""
+        home = self._app_home(name)
+        if home is not None:
+            return home / "data"
+        return self.data_dir / name
+
+    def _location_change_refusal(self, name: str, new_location: str) -> Optional[str]:
+        """The design/26 immutability guard, or None when the change may proceed.
+
+        Refuses ONLY when (installed manifest's location != incoming location)
+        AND the CURRENT resolved data root exists non-empty — a naive replace
+        would materialize an EMPTY home at the new location (a DB would happily
+        re-init: presents as data loss). An empty/absent old data root lets the
+        change proceed: that is the documented app-move bypass (stop -> copy ->
+        clear old root -> re-declare -> deploy). A not-installed service (no
+        manifest) trivially proceeds — fresh installs are never blocked.
+        """
+        old_location = self._manifest_location(name)
+        if (old_location or "") == (new_location or ""):
+            return None
+        if self._dir_nonempty(self._current_data_root(name)):
+            return LOCATION_CHANGE_REFUSAL
+        return None
 
     def _is_git_url(self, source: str) -> bool:
         """Check if source is a safe git URL.
@@ -523,13 +697,48 @@ class ServiceManager:
         if service.tier == "infra" and not str(service.source_url or "").startswith(
             OPERATOR_AUTHORED_PREFIXES
         ):
-            self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
+            # keep_data=True (adversarial review, release-blocker #1): the data
+            # dir is only created further down, so anything at the data
+            # location right now PREDATES this call (e.g. data kept by a
+            # remove-without-purge, or a pre-populated v2 home) — a gate
+            # refusal must never destroy it. Same rule as the location gate.
+            self._rollback_add(service.name, keep_data=True)
             return False, (
                 "tier: infra is only permitted for an operator-authored "
                 "services.d/deploy declaration — not a {} service".format(
                     service.source_url or "repo/image"
                 )
             )
+        # AUTHORSHIP GATE for the app location (design/26) — the same trust
+        # anchor as tier: a location redirects the app's home onto a host
+        # volume, so it is permitted ONLY for an operator-authored services.d/
+        # deploy declaration. A git-repo, image-first, or catalog manifest that
+        # carries one is refused here. keep_data=True: nothing at the (declared
+        # or legacy) data location was created by THIS call yet, so an abort
+        # must never destroy what may already be there.
+        if service.location:
+            if not str(service.source_url or "").startswith(OPERATOR_AUTHORED_PREFIXES):
+                self._rollback_add(service.name, keep_data=True)
+                return False, (
+                    "location: is only permitted for an operator-authored "
+                    "services.d/deploy declaration — not a {} service".format(
+                        service.source_url or "repo/image"
+                    )
+                )
+            # Operator-authored: the value must (still) be a volume root AND a
+            # real mounted volume — deploying onto an unmounted /volumeN would
+            # materialize the app home on the bare root filesystem.
+            if not LOCATION_RE.fullmatch(service.location):
+                self._rollback_add(service.name, keep_data=True)
+                return False, (
+                    "invalid location {!r}: must match ^/volume<N>$".format(service.location)
+                )
+            if not paths.is_mounted_volume(service.location):
+                self._rollback_add(service.name, keep_data=True)
+                return False, (
+                    "location {!r} is not a mounted volume — refusing to "
+                    "materialize the app home there".format(service.location)
+                )
         # pre-deploy host hook: the one abortable deploy gate (e.g. a backup
         # taken before every rollout). The declaration/manifest were already
         # written — a persistent hook failure surfaces as an isolated,
@@ -570,14 +779,33 @@ class ServiceManager:
                 return False, "hostname {!r} is already routed by service {!r}".format(
                     effective_host, owner
                 )
+        # A v2 home that ALREADY has content (the end state of the app-move
+        # procedure) is silently adopted — and must then survive a failed
+        # install's rollback exactly like reconcile-REPLACE data does: it
+        # predates this call, so the rollback may never destroy it. The
+        # predicate is the WHOLE home (adversarial review #6): a home
+        # pre-staged with only config/ (no data yet) is just as much not-ours-
+        # to-delete. Evaluated BEFORE _ensure_app_home creates any slot.
+        home = self._app_home(service)
+        adopted = home is not None and self._dir_nonempty(home)
         try:
-            service_data_dir = self.data_dir / service.name
-            service_data_dir.mkdir(parents=True, exist_ok=True)
+            if home is not None:
+                # Containment (incl. the four slots) BEFORE creating/adopting:
+                # a pre-planted symlinked slot must fail the install, not
+                # redirect template copies or mounts.
+                self._service_paths(service.name, service)
+                self._ensure_app_home(home)
+                service_data_dir = home / "data"
+                config_root = home / "config"
+            else:
+                service_data_dir = self.data_dir / service.name
+                service_data_dir.mkdir(parents=True, exist_ok=True)
+                config_root = service_data_dir
 
             if service.config_templates:
                 for template in service.config_templates:
                     src = service_path / template.source
-                    dest = service_data_dir / template.dest
+                    dest = config_root / template.dest
                     if src.exists():
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src, dest)
@@ -601,7 +829,7 @@ class ServiceManager:
                 self._reload_traefik()
                 message = f"Service '{service.name}' added (not started){route_note}"
         except Exception as e:
-            self._rollback_add(service.name, keep_data=preserve_data_on_rollback)
+            self._rollback_add(service.name, keep_data=preserve_data_on_rollback or adopted)
             # A failed reconcile REPLACE left changed state (the old service was
             # already torn down) — history must show the failed rollout, like
             # set_image/deploy_bundle do. A fully-rolled-back FRESH add changed
@@ -698,7 +926,11 @@ class ServiceManager:
             self._stop_service(name, p["compose"])
             p["compose"].unlink()
         self.traefik_config.remove_config(name)
-        doomed = (p["service"],) if keep_data else (p["service"], p["data"])
+        # A v2 app's data-bearing artifact is its whole HOME (self-contained
+        # unit): dropping only home/data would leave config/secrets orphaned
+        # at the location root. Legacy keeps today's data/<name> target.
+        data_target = p.get("home") or p["data"]
+        doomed = (p["service"],) if keep_data else (p["service"], data_target)
         for path in doomed:
             if path.exists():
                 shutil.rmtree(path, ignore_errors=True)
@@ -782,11 +1014,35 @@ class ServiceManager:
         # absolute host path, not resolved under data/<svc>/ and not pre-created
         # (they already exist). The authorship gate that only an operator may set
         # tier: infra was enforced at install time.
+        # design/26 (adversarial review, release-blocker #2): the mount check
+        # is NOT install-time-only. Every start/up/update path shares this
+        # choke point, and it must refuse BEFORE creating anything — otherwise
+        # a boot/start while the declared volume is unmounted would silently
+        # re-materialize an EMPTY home on the bare mountpoint (a DB would
+        # happily initdb there: presents as data loss, then hides under the
+        # real volume when it mounts later).
+        if service.location and not paths.is_mounted_volume(service.location):
+            raise ServiceValidationError(
+                "location {!r} is not a mounted volume — refusing to "
+                "materialize or start service {!r} (mount the volume, then "
+                "retry)".format(service.location, service.name)
+            )
+
+        # Layout-aware roots (design/26): the definition is authoritative here —
+        # the materialized manifest was just written from it on every install/
+        # update path. Legacy: both roots are data/<name> (byte-for-byte
+        # today's behavior). v2: volumes resolve under home/data, the env_file
+        # under home/secrets. Slot containment was asserted by _service_paths.
+        paths_ = self._service_paths(service.name, service)
+        is_v2 = "home" in paths_
+        data_root_dir = paths_["data"]
+        secrets_root_dir = paths_.get("secrets") or data_root_dir
+
         if service.volumes:
             from .service_schema import INFRA_HOST_MOUNTS
 
             is_infra = service.tier == "infra"
-            data_root = os.path.realpath(str(self.data_dir / service.name))
+            data_root = os.path.realpath(str(data_root_dir))
             processed_volumes = []
             for vol in service.volumes:
                 parts = vol.split(":")
@@ -796,6 +1052,39 @@ class ServiceManager:
                 if is_infra and host_path in INFRA_HOST_MOUNTS:
                     # Belt-and-braces: only ever read-only, only the allowlist.
                     processed_volumes.append(f"{host_path}:{container_path}:ro")
+                    continue
+
+                # v2 SLOT MAPPING (design/26, owner-decided): the standard
+                # layout is SEMANTIC for a located app. A relative source named
+                # exactly "config" mounts home/config (so the container reads
+                # exactly what _place_config wrote) and exactly "logs" mounts
+                # home/logs; every other relative source stays under home/data.
+                # "secrets" is REFUSED — env_file is the one secrets mechanism;
+                # a secrets bind-mount would bypass the 0700/0600 discipline.
+                # Legacy services never enter this branch (everything resolves
+                # under data/<svc> exactly as today).
+                if is_v2 and host_path == "secrets":
+                    raise ServiceValidationError(
+                        "Volume {!r}: a located app may not bind-mount the "
+                        "secrets slot — secrets flow through env_file".format(vol)
+                    )
+                if is_v2 and host_path in ("config", "logs"):
+                    # Containment for the mapped slot was asserted against the
+                    # app home by _service_paths (parent(realpath(slot)) ==
+                    # realpath(home)); the source is a fixed name, so there is
+                    # no path component to traverse with.
+                    slot_dir = Path(os.path.realpath(str(paths_[host_path])))
+                    if host_path == "logs":
+                        self._ensure_volume_dir(slot_dir, mode)
+                    else:
+                        # config keeps the slot convention (0755) — never the
+                        # 0777 any-UID-writable treatment data dirs get.
+                        slot_dir.mkdir(parents=True, exist_ok=True)
+                        try:
+                            os.chmod(str(slot_dir), 0o755)
+                        except OSError:
+                            pass
+                    processed_volumes.append(f"{slot_dir}:{container_path}:{mode}")
                     continue
 
                 resolved = os.path.realpath(os.path.join(data_root, host_path))
@@ -816,18 +1105,20 @@ class ServiceManager:
         # NB: depends_on is rejected at schema-validation time (a single-service
         # compose project cannot depend on another), so it is never emitted here.
 
-        # env_file: a data-dir-relative file holding secrets (kept out of the
-        # manifest). Materialize an empty 0600 file if absent so the first
-        # `up -d` doesn't fail before the operator fills it in, and clamp an
-        # existing one to 0600 (it holds secrets by definition).
+        # env_file: a secrets file kept out of the manifest (legacy: relative to
+        # data/<name>; v2: relative to home/secrets). Materialize an empty 0600
+        # file if absent so the first `up -d` doesn't fail before the operator
+        # fills it in, and clamp an existing one to 0600 (it holds secrets by
+        # definition).
         if service.env_file:
-            env_file_path = Path(
-                os.path.realpath(str((self.data_dir / service.name) / service.env_file))
-            )
-            data_root = os.path.realpath(str(self.data_dir / service.name))
-            if not str(env_file_path).startswith(data_root + os.sep):
+            env_file_path = Path(os.path.realpath(str(secrets_root_dir / service.env_file)))
+            env_root = os.path.realpath(str(secrets_root_dir))
+            if not str(env_file_path).startswith(env_root + os.sep):
                 raise ServiceValidationError(
-                    "env_file {!r} escapes the service data directory".format(service.env_file)
+                    "env_file {!r} escapes the service {} directory".format(
+                        service.env_file,
+                        "secrets" if "secrets" in paths_ else "data",
+                    )
                 )
             env_file_path.parent.mkdir(parents=True, exist_ok=True)
             if not env_file_path.exists():
@@ -852,7 +1143,7 @@ class ServiceManager:
             if "memory" in service.resources:
                 svc["mem_limit"] = service.resources["memory"]
 
-        compose_path = self._service_paths(service.name)["compose"]
+        compose_path = paths_["compose"]
         with open(compose_path, "w") as f:
             yaml.dump(compose, f, default_flow_style=False, sort_keys=False)
 
@@ -880,8 +1171,57 @@ class ServiceManager:
         except FileNotFoundError:
             return False, "Docker is not installed"
 
+    # Best-effort image pre-pull budget before the timed `up -d` (design/26
+    # companion fix): a very large image (multi-GB model servers) cannot pull
+    # inside up's 120s window. 900s covers the pathological first pull; pull
+    # failure is logged-not-fatal because `up` is authoritative (it pulls
+    # whatever is still missing, and an already-present image needs neither).
+    _PULL_TIMEOUT_S = 900
+
+    @staticmethod
+    def _compose_image(name: str, compose_path: Path) -> Optional[str]:
+        """The image ref the generated compose file pins for ``name`` (best-effort)."""
+        try:
+            data = yaml.safe_load(Path(compose_path).read_text())
+            image = data["services"][name]["image"]
+            return image if isinstance(image, str) and image else None
+        except Exception:  # noqa: BLE001 - absent/foreign compose: undetermined
+            return None
+
+    @staticmethod
+    def _image_present_locally(image: str) -> bool:
+        """True iff the pinned image already exists in the local docker store."""
+        try:
+            import docker
+
+            docker.from_env().images.get(image)
+            return True
+        except Exception:  # noqa: BLE001 - not found / no daemon: not present
+            return False
+
     def _start_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
-        """Start a service using docker compose."""
+        """Start a service using docker compose (best-effort pre-pull first).
+
+        The pre-pull is SKIPPED when the pinned image is already local
+        (adversarial review #7): every routine start (boot resume, reconcile)
+        must not touch the registry — with a blackholed registry, 19 services
+        x 900s would stall a resume for hours. The 900s budget applies only to
+        a genuinely-missing image (the huge-first-pull case it exists for);
+        an undetermined image errs toward pulling (pull is best-effort anyway).
+        """
+        image = self._compose_image(name, compose_path)
+        if image and self._image_present_locally(image):
+            return self._up_service(name, compose_path)
+        pull_ok, pull_msg = self._compose(name, compose_path, "pull", timeout=self._PULL_TIMEOUT_S)
+        if not pull_ok:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "pre-pull for service %r failed (%s) — proceeding to up", name, pull_msg
+            )
+        return self._up_service(name, compose_path)
+
+    def _up_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
         ok, msg = self._compose(name, compose_path, "up", "-d", timeout=120)
         return (True, "Started") if ok else (False, msg)
 
@@ -1005,7 +1345,11 @@ class ServiceManager:
         except ServiceValidationError as e:
             return False, str(e)
 
-        service_dir, compose_path, data_dir = p["service"], p["compose"], p["data"]
+        service_dir, compose_path = p["service"], p["compose"]
+        # Purge target: a v2 app's data-bearing artifact is its whole HOME
+        # (self-contained unit — leaving config/secrets behind would orphan
+        # them at the location root); legacy purges data/<name> as today.
+        data_dir = p.get("home") or p["data"]
 
         if not service_dir.exists() and not compose_path.exists():
             return False, f"Service '{name}' is not installed"
@@ -1086,6 +1430,7 @@ class ServiceManager:
                         "status": "error",
                         "url": "",
                         "description": "Failed to load service definition",
+                        "location": "",
                     }
                 )
                 continue
@@ -1120,6 +1465,9 @@ class ServiceManager:
                     # hostnames.py reads this to build the correct external hostname.
                     "domain": service.traefik.domain if service.traefik.enabled else "",
                     "exposure": (service.traefik.exposure if service.traefik.enabled else None),
+                    # The app's declared home volume ("" = legacy layout on
+                    # SYRVIS_HOME). Flows to the seam/dashboard rows as-is.
+                    "location": service.location or "",
                 }
             )
 
@@ -1189,6 +1537,11 @@ class ServiceManager:
         try:
             svc = load_service_definition(manifest_path)
             self._generate_compose_file(svc)
+        except ServiceValidationError as e:
+            # Fail CLOSED: a REFUSED re-materialization (unmounted location,
+            # containment breach) must refuse the start — never fall back to a
+            # stale compose file that points at the wrong (or empty) tree.
+            return False, str(e)
         except Exception:  # noqa: BLE001 - fall back to the existing compose file
             pass
 
@@ -1285,12 +1638,32 @@ class ServiceManager:
         if not git_dir.exists():
             return False, f"Service '{name}' was not installed from git"
 
-        # Get current version
+        # Get current (INSTALLED) definition — the trust baseline the gate
+        # below compares against. Loaded BEFORE the pull: for a git service the
+        # materialized manifest IS the repo file, so after the pull it already
+        # holds the candidate content.
+        current: Optional[ServiceDefinition] = None
         try:
             current = load_service_definition(service_dir)
             current_version = current.version
         except Exception:
             current_version = "unknown"
+
+        # Remember the pre-pull commit so a refused update can be reverted —
+        # otherwise the on-disk manifest would already carry the refused
+        # tier/location and every later name-only path lookup would honor it.
+        pre_pull_head = ""
+        try:
+            head = subprocess.run(
+                ["git", "-C", str(service_dir), "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if head.returncode == 0:
+                pre_pull_head = head.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
         # Pull latest
         try:
@@ -1313,10 +1686,72 @@ class ServiceManager:
         except Exception as e:
             return False, f"Updated service definition is invalid: {e}"
 
+        # AUTHORSHIP GATE, update path (design/22 gap fix + design/26): a
+        # git-pull update is by definition NOT operator-authored (this verb
+        # requires a .git working tree), so it may never CHANGE the privileged
+        # fields — tier (host mounts) or location (the app's home volume).
+        # Both fields, one code path. On refusal the on-disk baseline is
+        # RESTORED (adversarial review #3/#6): the manifest is re-materialized
+        # from the in-memory ``current`` (the last-AUTHORIZED definition), so a
+        # second update can never launder the change by comparing against a
+        # polluted on-disk manifest; the git working tree is additionally reset
+        # (returncode CHECKED) so pulled non-manifest files don't linger.
+        installed_tier = current.tier if current is not None else ""
+        installed_location = current.location if current is not None else ""
+        for field_name, old, new in (
+            ("tier", installed_tier, updated.tier),
+            ("location", installed_location, updated.location),
+        ):
+            if old != new:
+                git_reverted = False
+                if pre_pull_head:
+                    try:
+                        reset = subprocess.run(
+                            ["git", "-C", str(service_dir), "reset", "--hard", pre_pull_head],
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        git_reverted = reset.returncode == 0
+                    except (subprocess.TimeoutExpired, OSError):
+                        git_reverted = False
+                # The load-bearing restore: the MANIFEST (the gate's baseline
+                # and every name-only path lookup's truth) comes back from the
+                # last-authorized in-memory copy, independent of git state.
+                manifest_restored = False
+                if current is not None:
+                    try:
+                        self._write_manifest(current, service_dir)
+                        manifest_restored = True
+                    except OSError:
+                        manifest_restored = False
+                base_msg = (
+                    "update changes {} ({!r} -> {!r}): {} is only permitted for an "
+                    "operator-authored services.d/deploy declaration — a git-sourced "
+                    "update cannot change it".format(field_name, old, new, field_name)
+                )
+                if git_reverted and manifest_restored:
+                    return False, base_msg + " (pull reverted)"
+                if manifest_restored:
+                    return False, base_msg + (
+                        " — git REVERT FAILED; the installed manifest was restored "
+                        "from the last-authorized copy, but the git working tree at "
+                        "services/{} may still hold the refused change — manual "
+                        "intervention required".format(name)
+                    )
+                return False, base_msg + (
+                    " — REVERT FAILED; the refused manifest may still be the on-disk "
+                    "truth at services/{} — manual intervention required before any "
+                    "further operation on this service".format(name)
+                )
+
         hooks_ok, runs = self._fire_hooks(
             updated,
             "pre-deploy",
-            context={"image": updated.image, "previous_image": current.image},
+            context={
+                "image": updated.image,
+                "previous_image": current.image if current is not None else "",
+            },
         )
         if not hooks_ok:
             return False, "update aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
@@ -1337,8 +1772,9 @@ class ServiceManager:
         except Exception:  # noqa: BLE001 - best-effort; update result stands
             pass
 
-        # Restart if image changed
-        if current.image != updated.image or current_version != updated.version:
+        # Restart if image changed (an unreadable prior manifest counts as changed)
+        current_image = current.image if current is not None else None
+        if current_image != updated.image or current_version != updated.version:
             compose_path = p["compose"]
             # Pull new image (scoped to this service's compose project)
             self._compose(name, compose_path, "pull", timeout=120)
@@ -1351,13 +1787,13 @@ class ServiceManager:
                 action="deploy",
                 trigger="cli",
                 outcome="success",
-                previous_image=current.image,
+                previous_image=current_image,
             )
             self._fire_hooks(
                 updated,
                 "post-deploy",
                 force=True,
-                context={"image": updated.image, "previous_image": current.image},
+                context={"image": updated.image, "previous_image": current_image or ""},
             )
             return True, f"Service '{name}' updated: {current_version} -> {updated.version}"
 
@@ -1405,6 +1841,14 @@ class ServiceManager:
             updated = ServiceDefinition.from_dict(data)
         except ServiceValidationError as e:
             return False, f"invalid image {new_image!r}: {e}"
+
+        # design/26: location is immutable while installed (by construction the
+        # round-trip above preserves it, but the guard keeps future edits to
+        # this path honest — a re-pin must never relocate an app's home).
+        if updated.location != current.location and self._dir_nonempty(
+            self._current_data_root(name)
+        ):
+            return False, LOCATION_CHANGE_REFUSAL
 
         old_image = current.image
 
@@ -1542,6 +1986,14 @@ class ServiceManager:
             return True, "Service '{}' already matches revision {} — nothing to do".format(
                 name, target.get("revision")
             )
+
+        # design/26: a revision recorded at a DIFFERENT location must not be
+        # re-materialized over an app that has data at its current home — the
+        # compose would point at an empty (or stale) tree.
+        if restored.location != current.location and self._dir_nonempty(
+            self._current_data_root(name)
+        ):
+            return False, LOCATION_CHANGE_REFUSAL
 
         # The restored revision's hostname must not collide with a route some
         # OTHER service claimed since (same guard as install; last-writer-wins
@@ -1742,11 +2194,14 @@ class ServiceManager:
                 f"secret content too large ({len(content_bytes)} bytes; max {self._SECRET_MAX_BYTES})"
             )
 
-        # --- name re-validation ----------------------------------------------
+        # --- name re-validation + layout-aware root (design/26) ---------------
+        # Legacy: the secrets root IS data/<name>. v2: home/secrets (slot
+        # containment already asserted by _service_paths).
         try:
-            self._service_paths(name)
+            paths_ = self._service_paths(name)
         except ServiceValidationError as e:
             return False, str(e)
+        secrets_root_dir = paths_.get("secrets") or (self.data_dir / name)
 
         # --- declaration check (service must exist and have env_file) --------
         try:
@@ -1765,18 +2220,18 @@ class ServiceManager:
             )
 
         # --- path containment check ------------------------------------------
-        data_dir_for_svc = self.data_dir / name
-        env_file_path = Path(os.path.realpath(str(data_dir_for_svc / declared.env_file)))
-        data_root = os.path.realpath(str(data_dir_for_svc))
+        env_file_path = Path(os.path.realpath(str(secrets_root_dir / declared.env_file)))
+        data_root = os.path.realpath(str(secrets_root_dir))
         if not str(env_file_path).startswith(data_root + os.sep):
             return False, (
-                f"env_file {declared.env_file!r} escapes the service data directory (path traversal)"
+                f"env_file {declared.env_file!r} escapes the service "
+                f"{'secrets' if 'secrets' in paths_ else 'data'} directory (path traversal)"
             )
 
-        # --- data dir must already exist (created by reconcile/install) ------
-        if not data_dir_for_svc.exists():
+        # --- target dir must already exist (created by reconcile/install) -----
+        if not secrets_root_dir.exists():
             return False, (
-                f"data directory {data_dir_for_svc} does not exist — "
+                f"data directory {secrets_root_dir} does not exist — "
                 "deploy the service first (syrvis reconcile creates it)"
             )
 
@@ -1953,6 +2408,14 @@ class ServiceManager:
         self._ensure_directories()
         service_path = self.services_dir / name
         fresh = not service_path.exists()
+        # Adoption probe (design/26): a v2 home that already has ANY content
+        # (the end state of the app-move procedure — data, or even just a
+        # pre-staged config/) predates this call; even a FRESH install's
+        # failure rollback must never destroy it (adversarial review #6).
+        adopted = False
+        if service.location:
+            probe_home = self._app_home(service)
+            adopted = probe_home is not None and self._dir_nonempty(probe_home)
 
         # A deploy bundle is delivered over the operator seam → operator-authored by
         # construction (the bundle schema never carries source_url, so it's None
@@ -1989,6 +2452,32 @@ class ServiceManager:
                 return False, msg
         else:
             # Update in place — rewrite declaration + effective manifest (data kept).
+            # design/26 gates for THIS branch (the fresh branch routes through
+            # _install_from_definition's): (a) location is immutable while the
+            # app has data — checked against the INSTALLED manifest BEFORE it
+            # is overwritten below; (b) a location must be operator-authored
+            # (a bundle is, by construction — the check stays explicit, not
+            # incidental, mirroring the tier N1 fix) and a mounted volume.
+            try:
+                refusal = self._location_change_refusal(name, service.location)
+            except ServiceValidationError as e:
+                return False, str(e)  # tampered installed manifest: fail closed
+            if refusal:
+                return False, refusal
+            if service.location:
+                if not str(service.source_url or "").startswith(OPERATOR_AUTHORED_PREFIXES):
+                    return False, (
+                        "location: is only permitted for an operator-authored declaration"
+                    )
+                if not LOCATION_RE.fullmatch(service.location):
+                    return False, "invalid location {!r}: must match ^/volume<N>$".format(
+                        service.location
+                    )
+                if not paths.is_mounted_volume(service.location):
+                    return False, (
+                        "location {!r} is not a mounted volume — refusing to "
+                        "materialize the app home there".format(service.location)
+                    )
             try:
                 old_image = load_service_definition(service_path).image
             except Exception:  # noqa: BLE001 - unreadable prior manifest
@@ -1998,6 +2487,16 @@ class ServiceManager:
             except Exception as e:  # noqa: BLE001
                 return False, f"could not write declaration for {name!r}: {e}"
             self._write_manifest(service, service_path)
+            # Make the app home exist for the config/secret writes below —
+            # exist_ok/adopting semantics (an update repairs missing slots, a
+            # legacy->v2 transition over an EMPTY data root materializes them).
+            home = self._app_home(service)
+            if home is not None:
+                try:
+                    self._service_paths(name, service)  # slot containment first
+                except ServiceValidationError as e:
+                    return False, str(e)
+                self._ensure_app_home(home)
 
         try:
             # 2. Configs — 0644 (container-readable) or 0600 (secret config file).
@@ -2030,9 +2529,10 @@ class ServiceManager:
                 self._compose(name, compose_path, "restart", timeout=90)
             self._reload_traefik()
         except Exception as e:  # noqa: BLE001
-            # Fresh: drop everything (incl. the just-created data dir). Update:
-            # keep data + declaration (they predate this call) for a clean retry.
-            self._rollback_add(name, keep_data=not fresh)
+            # Fresh: drop everything (incl. the just-created data dir) — unless
+            # a pre-populated v2 home was ADOPTED (it predates this call).
+            # Update: keep data + declaration for a clean retry.
+            self._rollback_add(name, keep_data=(not fresh) or adopted)
             # Either branch left changed state (fresh keeps the declared intent;
             # update tore the service down on the new manifest) — history must
             # show the failed rollout.
@@ -2093,13 +2593,20 @@ class ServiceManager:
         if os.path.isabs(relpath) or ".." in PurePosixPath(relpath).parts:
             return False, f"invalid config dest {relpath!r}: must be relative with no '..'"
 
-        data_dir_for_svc = self.data_dir / name
+        # Layout-aware root (design/26): legacy configs land under data/<name>
+        # (today's behavior, dests conventionally carry a config/ prefix); a v2
+        # app's configs land under home/config (dests are config-root-relative).
+        try:
+            paths_ = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        data_dir_for_svc = paths_.get("config") or (self.data_dir / name)
         dest_path = Path(os.path.realpath(str(data_dir_for_svc / relpath)))
         data_root = os.path.realpath(str(data_dir_for_svc))
         if dest_path != Path(data_root) and not str(dest_path).startswith(data_root + os.sep):
-            return False, f"config dest {relpath!r} escapes the service data directory"
+            return False, f"config dest {relpath!r} escapes the service config directory"
         if not data_dir_for_svc.exists():
-            return False, f"data directory {data_dir_for_svc} does not exist"
+            return False, f"config directory {data_dir_for_svc} does not exist"
         # Never DOWNGRADE an existing 0600 secret to a world-readable 0644 write.
         # A secret config writes 0600 (not a downgrade), so this guard is 0644-only.
         if not secret and dest_path.exists():

@@ -229,3 +229,51 @@ class TestStartupScriptReconcile:
         assert 'while ! "$DOCKER_BIN" info >/dev/null 2>&1; do' in content
         assert "DOCKER_WAIT" in content
         assert content.index("DOCKER_WAIT") < content.index(reconcile_line)
+
+
+class TestStartupScriptSeamSelfHeal:
+    """design/26 §8.3: DSM regenerates /etc/passwd on EVERY boot, resetting the
+    seam accounts' shells to /sbin/nologin — the startup script must re-assert
+    them (idempotent, guarded so an absent account is a no-op)."""
+
+    def _content(self, tmp_path):
+        install_dir = tmp_path / "install"
+        ok, _ = DsmOperations().ensure_startup_script(install_dir, "syrvisuser")
+        assert ok
+        return (install_dir / "bin" / "syrvis-startup.sh").read_text()
+
+    def test_reasserts_both_seam_shells(self, tmp_path):
+        content = self._content(tmp_path)
+        assert "syrvis-operator syrvis-reader" in content
+        # guarded: only touches /etc/passwd when the account exists
+        assert 'grep -q "^$SEAM_USER:" /etc/passwd' in content
+        assert (
+            'sed -i "s#^\\($SEAM_USER:.*\\):/sbin/nologin\\$#\\1:/bin/sh#" /etc/passwd'
+            in content
+        )
+        # strictly in the boot path, before the reconcile step
+        assert content.index("SEAM_USER") < content.index("reconcile --boot")
+
+    def test_sed_expression_actually_flips_the_shell(self, tmp_path):
+        # Extract the generated sed and run it (sans -i) over sample passwd
+        # lines — pinning the escaping, not just the source text.
+        import subprocess
+
+        content = self._content(tmp_path)
+        sed_line = next(
+            line.strip() for line in content.splitlines() if line.strip().startswith("sed -i")
+        )
+        piped = sed_line.replace("sed -i ", "sed ").replace(" /etc/passwd", "")
+        broken = "syrvis-operator:x:1027:100::/var/services/homes/o:/sbin/nologin"
+        healthy = "syrvis-operator:x:1027:100::/var/services/homes/o:/bin/sh"
+        other = "root:x:0:0::/root:/sbin/nologin"
+        script = 'SEAM_USER=syrvis-operator; printf \'%s\\n\' "$1" | {}'.format(piped)
+        for line_in, expected in ((broken, healthy), (healthy, healthy), (other, other)):
+            out = subprocess.run(
+                ["sh", "-c", script, "sh", line_in],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            assert out.returncode == 0, out.stderr
+            assert out.stdout.strip() == expected

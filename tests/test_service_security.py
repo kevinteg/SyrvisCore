@@ -624,3 +624,823 @@ class TestInfraTier:
             "volumes"
         ]
         assert vols == ["/:/rootfs:ro"]
+
+
+# ---------------------------------------------------------------------------
+# design/26 — the app/location model: a service's home on a declared volume
+# ---------------------------------------------------------------------------
+
+
+def _v2_mgr(tmp_path, monkeypatch, mounted=True, start_ok=True):
+    """A ServiceManager with the /volumeN plumbing faked onto tmp_path.
+
+    ``resolve_volume_root`` maps /volumeN -> tmp_path/volumes/volumeN (the
+    same seam DSM-sim uses) and ``is_mounted_volume`` is stubbed — both are
+    module-level in syrviscore.paths precisely so tests can do this.
+    """
+    import os
+
+    from syrviscore import paths as paths_mod
+    from syrviscore.service_manager import ServiceManager
+
+    os.environ.setdefault("DOMAIN", "example.com")
+    monkeypatch.setattr(
+        paths_mod,
+        "resolve_volume_root",
+        lambda loc: tmp_path / "volumes" / str(loc).lstrip("/"),
+    )
+    monkeypatch.setattr(paths_mod, "is_mounted_volume", lambda loc: mounted)
+    m = ServiceManager(syrvis_home=tmp_path / "home")
+    m._ensure_directories()
+    m._start_service = lambda n, cp: (start_ok, "started" if start_ok else "boom")
+    m._reload_traefik = lambda: None
+    return m
+
+
+def _resolved_home(tmp_path, name, volume="volume6"):
+    return tmp_path / "volumes" / volume / "syrviscore" / "apps" / name
+
+
+class TestLocationSchema:
+    """(i)+(iii): parse-time validation is regex-ONLY; round-trips everywhere."""
+
+    def test_valid_location_parses_and_round_trips(self):
+        svc = ServiceDefinition.from_dict(base_service(location="/volume6"))
+        assert svc.location == "/volume6"
+        out = svc.to_dict()
+        assert out["location"] == "/volume6"
+        assert ServiceDefinition.from_dict(out).location == "/volume6"
+
+    def test_default_location_omitted_from_dict(self):
+        assert "location" not in ServiceDefinition.from_dict(base_service()).to_dict()
+
+    @pytest.mark.parametrize(
+        "loc",
+        [
+            "/etc",
+            "/volume6/../volume1",
+            "/volume6/sub",
+            "volume6",
+            "/volume6/",
+            "/Volume6",
+            " /volume6",
+            "/volume6 ",
+            "/volume",
+            "~/volume6",
+            6,
+            ["/volume6"],
+        ],
+    )
+    def test_bad_location_rejected_at_parse(self, loc):
+        with pytest.raises(ServiceValidationError, match="location"):
+            ServiceDefinition.from_dict(base_service(location=loc))
+
+    def test_no_mount_check_at_parse(self, monkeypatch):
+        # Laptop-side declaration validation must keep working: parsing NEVER
+        # touches the filesystem for `location`.
+        from syrviscore import paths as paths_mod
+
+        def boom(loc):  # pragma: no cover - must not be called
+            raise AssertionError("parse must not mount-check")
+
+        monkeypatch.setattr(paths_mod, "is_mounted_volume", boom)
+        assert ServiceDefinition.from_dict(base_service(location="/volume9")).location == "/volume9"
+
+    def test_location_survives_materialized_manifest_writer(self, tmp_path):
+        # dump_definition(include_orchestration=False) is the ONE writer behind
+        # installed manifests — location must survive it (lifecycle ops read it
+        # back by name) while enabled/critical are stripped.
+        from syrviscore.service_schema import dump_definition
+
+        svc = ServiceDefinition.from_dict(
+            base_service(location="/volume6", enabled=False, critical=True)
+        )
+        out = tmp_path / "syrvis-service.yaml"
+        dump_definition(svc, out, include_orchestration=False)
+        import yaml
+
+        data = yaml.safe_load(out.read_text())
+        assert data["location"] == "/volume6"
+        assert "enabled" not in data and "critical" not in data
+        assert ServiceDefinition.from_dict(data).location == "/volume6"
+
+    def test_location_is_content_for_reconcile_diff(self):
+        # A location change must classify as REPLACE (content), never be
+        # ignored as orchestration.
+        from syrviscore.services_d import _content_dict
+
+        a = ServiceDefinition.from_dict(base_service())
+        b = ServiceDefinition.from_dict(base_service(location="/volume6"))
+        assert _content_dict(a) != _content_dict(b)
+
+
+class TestLocationAuthorshipGate:
+    """(ii): only an operator-authored services.d/deploy declaration may set
+    a location — a git/image/catalog manifest is refused at install."""
+
+    @pytest.mark.parametrize(
+        "source_url",
+        [
+            "https://github.com/attacker/evil.git",  # service add (git repo)
+            "ghcr.io/attacker/evil:1.0.0",  # service run (image-first)
+            "catalog:evil",  # catalog template
+            None,  # unknown provenance
+        ],
+    )
+    def test_non_operator_location_rejected(self, tmp_path, monkeypatch, source_url):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = ServiceDefinition.from_dict(base_service(name="evil", location="/volume6"))
+        svc.source_url = source_url
+        sp = mgr.services_dir / "evil"
+        sp.mkdir(parents=True, exist_ok=True)
+        ok, msg = mgr._install_from_definition(svc, sp, start=False)
+        assert not ok
+        assert "location" in msg and "operator-authored" in msg
+
+    def test_services_d_declaration_accepted(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert ok, msg
+        assert svc.source_url == "services.d:pg"
+
+    def test_unmounted_location_refused_even_for_operator(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch, mounted=False)
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert not ok and "not a mounted volume" in msg
+        # nothing materialized at the (unmounted) location
+        assert not (tmp_path / "volumes").exists()
+
+
+class TestUpdateGate:
+    """The design/22 gap fix: a git-pull update may not CHANGE tier or
+    location (both fields, one code path), and the refused pull is reverted."""
+
+    def _git_service(self, mgr, name, manifest):
+        import yaml
+
+        sp = mgr.services_dir / name
+        (sp / ".git").mkdir(parents=True)
+        (sp / "syrvis-service.yaml").write_text(yaml.safe_dump(manifest))
+        return sp
+
+    def _fake_git(
+        self,
+        monkeypatch,
+        sp,
+        pulled_manifest,
+        calls,
+        reset_rc=0,
+        head_ok=True,
+        reset_restores=True,
+    ):
+        import yaml
+
+        from syrviscore import service_manager as sm_mod
+
+        manifest_path = sp / "syrvis-service.yaml"
+        old_text = manifest_path.read_text()
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+
+            class R:
+                returncode = 0
+                stdout = "aaaa1111\n"
+                stderr = ""
+
+            if "rev-parse" in cmd and not head_ok:
+                R.returncode = 1
+                R.stdout = ""
+                R.stderr = "fatal: not a git repository"
+            if "pull" in cmd:
+                # every pull re-lands the (possibly hostile) repo manifest
+                manifest_path.write_text(yaml.safe_dump(pulled_manifest))
+            if "reset" in cmd:
+                R.returncode = reset_rc
+                if reset_rc == 0 and reset_restores:
+                    manifest_path.write_text(old_text)
+                else:
+                    R.stderr = "fatal: unable to write new index file"
+            return R()
+
+        monkeypatch.setattr(sm_mod.subprocess, "run", fake_run)
+
+    @pytest.mark.parametrize(
+        "field,value",
+        [("tier", "infra"), ("location", "/volume6")],
+    )
+    def test_update_refuses_privileged_field_change(self, tmp_path, monkeypatch, field, value):
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        old = base_service(name="app")
+        sp = self._git_service(mgr, "app", old)
+        pulled = base_service(name="app", version="2.0.0")
+        pulled[field] = value
+        if field == "tier":
+            pulled["volumes"] = ["/proc:/host/proc:ro"]
+        calls = []
+        self._fake_git(monkeypatch, sp, pulled, calls)
+
+        ok, msg = mgr.update("app")
+        assert not ok
+        assert field in msg and "operator-authored" in msg
+        assert "pull reverted" in msg  # both revert layers succeeded
+        # the pull was reverted: the on-disk manifest no longer carries the
+        # refused field (name-only path lookups would otherwise honor it)
+        data = yaml.safe_load((sp / "syrvis-service.yaml").read_text())
+        assert field not in data
+        assert any("reset" in c for c in calls)
+
+    def test_update_with_unchanged_fields_proceeds(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        old = base_service(name="app")
+        sp = self._git_service(mgr, "app", old)
+        calls = []
+        self._fake_git(monkeypatch, sp, dict(old), calls)
+        ok, msg = mgr.update("app")
+        assert ok, msg
+        assert not any("reset" in c for c in calls)
+
+    # -- adversarial review #3/#6: revert-failure variants + two-step bypass --
+
+    @pytest.mark.parametrize(
+        "variant_kwargs",
+        [
+            {"reset_rc": 1, "reset_restores": False},  # A: git reset fails
+            {"head_ok": False},  # B: no pre-pull HEAD -> no reset attempted
+        ],
+        ids=["reset-fails", "rev-parse-empty"],
+    )
+    @pytest.mark.parametrize("field,value", [("tier", "infra"), ("location", "/volume6")])
+    def test_refusal_restores_manifest_even_when_git_revert_fails(
+        self, tmp_path, monkeypatch, field, value, variant_kwargs
+    ):
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        old = base_service(name="app")
+        sp = self._git_service(mgr, "app", old)
+        pulled = base_service(name="app", version="2.0.0")
+        pulled[field] = value
+        if field == "tier":
+            pulled["volumes"] = ["/proc:/host/proc:ro"]
+        calls = []
+        self._fake_git(monkeypatch, sp, pulled, calls, **variant_kwargs)
+
+        ok, msg = mgr.update("app")
+        assert not ok and field in msg
+        # honest message: the git revert did NOT run/succeed
+        assert "pull reverted" not in msg
+        assert "REVERT FAILED" in msg
+        # the load-bearing restore: the manifest came back from the in-memory
+        # last-authorized copy, so the on-disk baseline never drifted
+        data = yaml.safe_load((sp / "syrvis-service.yaml").read_text())
+        assert field not in data
+
+    @pytest.mark.parametrize("field,value", [("tier", "infra"), ("location", "/volume6")])
+    def test_two_step_update_cannot_launder_the_change(
+        self, tmp_path, monkeypatch, field, value
+    ):
+        # probe_two_step.py: with the revert silently failing, update #2 used
+        # to load the polluted manifest as its baseline, see "no change", and
+        # pass the gate — regenerating compose + services.d with the smuggled
+        # field. The manifest re-materialization kills the laundering.
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        old = base_service(name="app")
+        sp = self._git_service(mgr, "app", old)
+        pulled = base_service(name="app", version="2.0.0")
+        pulled[field] = value
+        if field == "tier":
+            pulled["volumes"] = ["/proc:/host/proc:ro"]
+        calls = []
+        self._fake_git(monkeypatch, sp, pulled, calls, reset_rc=1, reset_restores=False)
+
+        ok1, msg1 = mgr.update("app")
+        ok2, msg2 = mgr.update("app")
+        assert not ok1 and not ok2
+        assert field in msg2 and "operator-authored" in msg2  # gate held BOTH times
+        # nothing downstream ever carried the smuggled field
+        data = yaml.safe_load((sp / "syrvis-service.yaml").read_text())
+        assert field not in data
+        assert not (mgr.compose_dir / "app.yaml").exists()
+        decl = mgr.syrvis_home / "config" / "services.d" / "app.yaml"
+        assert not decl.exists()
+
+
+class TestAppHomeLayout:
+    """(iv): the v2 standard layout, slot modes, and containment."""
+
+    def _pg(self, name="pg"):
+        return ServiceDefinition.from_dict(
+            base_service(
+                name=name,
+                location="/volume6",
+                volumes=["pgdata:/var/lib/postgresql/data"],
+                env_file="secrets.env",
+            )
+        )
+
+    def test_install_materializes_standard_layout(self, tmp_path, monkeypatch):
+        import os
+        import stat as stat_mod
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        ok, msg = mgr.install_declaration(self._pg(), start=False)
+        assert ok, msg
+        home = _resolved_home(tmp_path, "pg")
+        modes = {
+            "data": 0o777,
+            "config": 0o755,
+            "secrets": 0o700,
+            "logs": 0o777,
+        }
+        for slot, mode in modes.items():
+            path = home / slot
+            assert path.is_dir(), slot
+            assert stat_mod.S_IMODE(path.stat().st_mode) == mode, slot
+        # compose: the bind source lives under home/data, not SYRVIS_HOME
+        compose = yaml.safe_load((mgr.compose_dir / "pg.yaml").read_text())
+        svc = compose["services"]["pg"]
+        expected_src = os.path.realpath(str(home / "data" / "pgdata"))
+        assert svc["volumes"] == ["{}:/var/lib/postgresql/data:rw".format(expected_src)]
+        # env_file: materialized 0600 under home/secrets
+        env_path = home / "secrets" / "secrets.env"
+        assert svc["env_file"] == [str(env_path.resolve())] or svc["env_file"] == [
+            os.path.realpath(str(env_path))
+        ]
+        assert stat_mod.S_IMODE(env_path.stat().st_mode) == 0o600
+        # the LEGACY data dir was never created
+        assert not (mgr.data_dir / "pg").exists()
+        # manifest + dual-written declaration both carry the location
+        manifest = yaml.safe_load((mgr.services_dir / "pg" / "syrvis-service.yaml").read_text())
+        assert manifest["location"] == "/volume6"
+        decl = yaml.safe_load(
+            (mgr.syrvis_home / "config" / "services.d" / "pg.yaml").read_text()
+        )
+        assert decl["location"] == "/volume6"
+
+    def test_name_only_resolution_reads_manifest(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        home = _resolved_home(tmp_path, "pg")
+        p = mgr._service_paths("pg")
+        assert p["home"] == home
+        assert p["data"] == home / "data"
+        assert p["config"] == home / "config"
+        assert p["secrets"] == home / "secrets"
+        assert p["logs"] == home / "logs"
+        # control plane stays central
+        assert p["service"] == mgr.services_dir / "pg"
+        assert p["compose"] == mgr.compose_dir / "pg.yaml"
+
+    def test_symlinked_app_home_refused(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        apps = _resolved_home(tmp_path, "pg").parent
+        apps.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (apps / "pg").symlink_to(elsewhere)
+        ok, msg = mgr.install_declaration(self._pg(), start=False)
+        assert not ok and "escapes" in msg
+
+    def test_symlinked_slot_refused(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        home = _resolved_home(tmp_path, "pg")
+        home.mkdir(parents=True)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        (home / "data").symlink_to(elsewhere)
+        ok, msg = mgr.install_declaration(self._pg(), start=False)
+        assert not ok and "escapes" in msg
+
+    def test_tampered_manifest_location_fails_closed(self, tmp_path, monkeypatch):
+        # A hand-tampered manifest with a non-/volumeN location must refuse the
+        # operation (never silently fall back to a legacy path a purge would
+        # then resolve wrong).
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = ServiceDefinition.from_dict(base_service(name="web"))
+        assert mgr.install_declaration(svc, start=False)[0]
+        manifest = mgr.services_dir / "web" / "syrvis-service.yaml"
+        data = yaml.safe_load(manifest.read_text())
+        data["location"] = "/etc"
+        manifest.write_text(yaml.safe_dump(data))
+        ok, msg = mgr.remove("web")
+        assert not ok and "invalid location" in msg
+        ok, msg = mgr.stop("web")
+        assert not ok and "invalid location" in msg
+
+    def test_write_secret_targets_home_secrets(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        ok, msg = mgr.write_secret("pg", "POSTGRES_PASSWORD=hunter2\n")
+        assert ok, msg
+        target = _resolved_home(tmp_path, "pg") / "secrets" / "secrets.env"
+        assert target.read_text() == "POSTGRES_PASSWORD=hunter2\n"
+
+    def test_remove_purge_resolves_the_app_home(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        home = _resolved_home(tmp_path, "pg")
+        (home / "data" / "pgdata").mkdir(parents=True, exist_ok=True)
+        (home / "data" / "pgdata" / "PG_VERSION").write_text("16")
+        ok, msg = mgr.remove("pg", purge=True)
+        assert ok, msg
+        # the WHOLE home is gone (self-contained unit), never a stale
+        # SYRVIS_HOME/data path
+        assert not home.exists()
+
+    def test_remove_without_purge_keeps_home(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        home = _resolved_home(tmp_path, "pg")
+        (home / "data" / "keep").write_text("x")
+        ok, _ = mgr.remove("pg", purge=False)
+        assert ok
+        assert (home / "data" / "keep").exists()
+
+    def test_list_rows_carry_location(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        legacy = ServiceDefinition.from_dict(base_service(name="web"))
+        assert mgr.install_declaration(legacy, start=False)[0]
+        rows = {r["name"]: r for r in mgr.list()}
+        assert rows["pg"]["location"] == "/volume6"
+        assert rows["web"]["location"] == ""
+
+    def test_deployment_record_carries_location(self, tmp_path, monkeypatch):
+        # (viii) — additive v1-schema field at the record choke point.
+        import json
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr.install_declaration(self._pg(), start=False)[0]
+        record = json.loads(
+            (mgr.syrvis_home / "data" / "deployments" / "pg" / "0001.json").read_text()
+        )
+        assert record["location"] == "/volume6"
+        assert record["manifest"]["location"] == "/volume6"
+        legacy = ServiceDefinition.from_dict(base_service(name="web"))
+        assert mgr.install_declaration(legacy, start=False)[0]
+        record = json.loads(
+            (mgr.syrvis_home / "data" / "deployments" / "web" / "0001.json").read_text()
+        )
+        assert record["location"] == ""
+
+
+class TestLegacyLayoutGolden:
+    """(vii): a location-less service is byte-for-byte today's layout across
+    every path site — the 19 running services must not move."""
+
+    def test_legacy_paths_unchanged(self, tmp_path, monkeypatch):
+        import os
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)  # v2 plumbing present but unused
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                name="web",
+                volumes=["cfg:/etc/web:ro", "state:/var/lib/web"],
+                env_file="secrets.env",
+            )
+        )
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert ok, msg
+        home_root = mgr.syrvis_home
+
+        # _service_paths: exactly today's three keys, today's values
+        p = mgr._service_paths("web")
+        assert set(p) == {"service", "data", "compose"}
+        assert p["service"] == home_root / "services" / "web"
+        assert p["data"] == home_root / "data" / "web"
+        assert p["compose"] == home_root / "compose" / "web.yaml"
+
+        # compose emit: volumes + env_file under data/<name>
+        data_root = os.path.realpath(str(home_root / "data" / "web"))
+        compose = yaml.safe_load((mgr.compose_dir / "web.yaml").read_text())
+        emitted = compose["services"]["web"]
+        assert emitted["volumes"] == [
+            "{}/cfg:/etc/web:ro".format(data_root),
+            "{}/state:/var/lib/web:rw".format(data_root),
+        ]
+        assert emitted["env_file"] == ["{}/secrets.env".format(data_root)]
+
+        # write_secret targets data/<name>/secrets.env
+        ok, msg = mgr.write_secret("web", "K=v\n")
+        assert ok, msg
+        assert (home_root / "data" / "web" / "secrets.env").read_text() == "K=v\n"
+
+        # _place_config targets data/<name>/<dest>
+        ok, msg = mgr._place_config("web", "config/app.yml", "a: 1\n")
+        assert ok, msg
+        assert (home_root / "data" / "web" / "config" / "app.yml").read_text() == "a: 1\n"
+
+        # no app-home tree was ever created
+        assert not (tmp_path / "volumes").exists()
+
+
+class TestV2SlotMapping:
+    """design/26 (owner decision): the v2 standard layout is SEMANTIC — a
+    relative volume source named exactly `config` mounts home/config, exactly
+    `logs` mounts home/logs, `secrets` is refused (env_file is the secrets
+    mechanism), and everything else stays under home/data. Legacy services are
+    completely unchanged."""
+
+    def _svc(self, volumes, name="app", location="/volume6"):
+        data = base_service(name=name, volumes=volumes)
+        if location:
+            data["location"] = location
+        return ServiceDefinition.from_dict(data)
+
+    def test_config_volume_mounts_the_placed_config_tree(self, tmp_path, monkeypatch):
+        import os
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = self._svc(["config:/etc/app:ro"])
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert ok, msg
+        home = _resolved_home(tmp_path, "app")
+        compose = yaml.safe_load((mgr.compose_dir / "app.yaml").read_text())
+        src, dest, mode = compose["services"]["app"]["volumes"][0].rsplit(":", 2)
+        assert src == os.path.realpath(str(home / "config"))
+        assert (dest, mode) == ("/etc/app", "ro")
+        # what _place_config writes is exactly what the mount serves
+        ok, msg = mgr._place_config("app", "app.yml", "key: 1\n")
+        assert ok, msg
+        from pathlib import Path
+
+        assert (Path(src) / "app.yml").read_text() == "key: 1\n"
+        # the slot keeps its 0755 convention (never the 0777 data treatment)
+        import stat as stat_mod
+
+        assert stat_mod.S_IMODE((home / "config").stat().st_mode) == 0o755
+
+    def test_logs_volume_mounts_home_logs(self, tmp_path, monkeypatch):
+        import os
+        import stat as stat_mod
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = self._svc(["logs:/var/log/app"])
+        assert mgr.install_declaration(svc, start=False)[0]
+        home = _resolved_home(tmp_path, "app")
+        compose = yaml.safe_load((mgr.compose_dir / "app.yaml").read_text())
+        assert compose["services"]["app"]["volumes"] == [
+            "{}:/var/log/app:rw".format(os.path.realpath(str(home / "logs")))
+        ]
+        assert stat_mod.S_IMODE((home / "logs").stat().st_mode) == 0o777
+
+    def test_other_sources_stay_under_home_data(self, tmp_path, monkeypatch):
+        import os
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        # incl. near-miss names: only the EXACT slot names map
+        svc = self._svc(["pgdata:/var/lib/pg", "config/extra:/etc/extra:ro"])
+        assert mgr.install_declaration(svc, start=False)[0]
+        home = _resolved_home(tmp_path, "app")
+        data_root = os.path.realpath(str(home / "data"))
+        compose = yaml.safe_load((mgr.compose_dir / "app.yaml").read_text())
+        assert compose["services"]["app"]["volumes"] == [
+            "{}/pgdata:/var/lib/pg:rw".format(data_root),
+            "{}/config/extra:/etc/extra:ro".format(data_root),
+        ]
+
+    def test_secrets_volume_refused_for_v2(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = self._svc(["secrets:/run/secrets:ro"])
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert not ok and "secrets" in msg and "env_file" in msg
+        # direct emit raises the typed error
+        svc2 = self._svc(["secrets:/run/secrets:ro"], name="app2")
+        (mgr.services_dir / "app2").mkdir(parents=True, exist_ok=True)
+        mgr._write_manifest(svc2, mgr.services_dir / "app2")
+        with pytest.raises(ServiceValidationError, match="secrets"):
+            mgr._generate_compose_file(svc2)
+
+    def test_slot_names_are_plain_data_dirs_for_legacy(self, tmp_path, monkeypatch):
+        # (iii)+(iv): a location-less service treats config/logs/secrets as
+        # ordinary relative sources under data/<svc> — byte-identical to today.
+        import os
+
+        import yaml
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = self._svc(
+            ["config:/etc/app:ro", "logs:/var/log/app", "secrets:/run/secrets:ro"],
+            name="web",
+            location="",
+        )
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert ok, msg
+        data_root = os.path.realpath(str(mgr.syrvis_home / "data" / "web"))
+        compose = yaml.safe_load((mgr.compose_dir / "web.yaml").read_text())
+        assert compose["services"]["web"]["volumes"] == [
+            "{}/config:/etc/app:ro".format(data_root),
+            "{}/logs:/var/log/app:rw".format(data_root),
+            "{}/secrets:/run/secrets:ro".format(data_root),
+        ]
+        assert not (tmp_path / "volumes").exists()
+
+
+# ---------------------------------------------------------------------------
+# design/26 adversarial-review regression tests (probe scripts s3_*/s4_*)
+# ---------------------------------------------------------------------------
+
+
+class TestGateRefusalDataSafety:
+    """Review release-blocker #1: an authorship-gate refusal must NEVER
+    destroy pre-existing data — neither the legacy data/<name> a
+    remove-without-purge kept, nor a pre-populated v2 home."""
+
+    def _refused_install(self, mgr, svc):
+        svc.source_url = "https://github.com/evil/repo.git"
+        service_path = mgr.services_dir / svc.name
+        service_path.mkdir(parents=True, exist_ok=True)
+        mgr._write_manifest(svc, service_path)
+        return mgr._install_from_definition(svc, service_path, start=True)
+
+    def test_tier_gate_refusal_keeps_legacy_data(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        kept = mgr.data_dir / "foo"
+        kept.mkdir(parents=True)
+        (kept / "db.sqlite").write_text("precious kept data")
+        svc = ServiceDefinition.from_dict(base_service(name="foo", tier="infra"))
+        ok, msg = self._refused_install(mgr, svc)
+        assert not ok and "infra" in msg
+        assert (kept / "db.sqlite").exists()  # the release-blocking bug
+        assert not (mgr.services_dir / "foo").exists()  # refusal still cleans up
+
+    def test_tier_gate_refusal_keeps_v2_home(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        home = _resolved_home(tmp_path, "foo")
+        (home / "data" / "pgdata").mkdir(parents=True)
+        (home / "data" / "pgdata" / "PG_VERSION").write_text("16")
+        svc = ServiceDefinition.from_dict(
+            base_service(name="foo", tier="infra", location="/volume6")
+        )
+        ok, msg = self._refused_install(mgr, svc)
+        assert not ok and "infra" in msg
+        assert (home / "data" / "pgdata" / "PG_VERSION").exists()
+
+    def test_location_gate_refusal_keeps_v2_home(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        home = _resolved_home(tmp_path, "bar")
+        (home / "data").mkdir(parents=True)
+        (home / "data" / "keep").write_text("x")
+        svc = ServiceDefinition.from_dict(base_service(name="bar", location="/volume6"))
+        ok, msg = self._refused_install(mgr, svc)
+        assert not ok and "location" in msg
+        assert (home / "data" / "keep").exists()
+        assert not (mgr.services_dir / "bar").exists()
+
+
+class TestUnmountedLocationStart:
+    """Review release-blocker #2: the mount check is not install-time-only.
+    A start (boot resume / reconcile) while the declared volume is unmounted
+    must refuse and create NOTHING — never re-materialize an empty home on
+    the bare mountpoint for a DB to initdb into."""
+
+    def test_start_refuses_and_creates_nothing(self, tmp_path, monkeypatch):
+        import shutil
+
+        from syrviscore import paths as paths_mod
+
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                name="pg",
+                location="/volume6",
+                volumes=["pgdata:/var/lib/postgresql/data"],
+            )
+        )
+        assert mgr.install_declaration(svc, start=False)[0]
+        # the volume disappears (failed NVMe mount): the tree under it is gone
+        shutil.rmtree(tmp_path / "volumes")
+        monkeypatch.setattr(paths_mod, "is_mounted_volume", lambda loc: False)
+        compose_calls = []
+        mgr._compose = lambda name, cp, *args, timeout: (
+            compose_calls.append(args[0]) or (True, "")
+        )
+
+        ok, msg = mgr.start("pg", fire_hooks=False)
+        assert not ok
+        assert "not a mounted volume" in msg
+        assert not (tmp_path / "volumes").exists()  # nothing re-materialized
+        assert compose_calls == []  # up was never attempted
+
+    def test_install_paths_still_gate(self, tmp_path, monkeypatch):
+        # install-time behavior unchanged: gate message, nothing created
+        mgr = _v2_mgr(tmp_path, monkeypatch, mounted=False)
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert not ok and "not a mounted volume" in msg
+
+
+class TestCorruptManifestFailsClosed:
+    """Review #4: a corrupt central manifest must fail CLOSED — a v2 app must
+    never silently resolve to the legacy path (a purge would rmtree the wrong
+    tree while leaking the real home). Only a genuinely ABSENT manifest means
+    legacy."""
+
+    def test_remove_purge_refuses_on_corrupt_manifest(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        assert mgr.install_declaration(svc, start=False)[0]
+        home = _resolved_home(tmp_path, "pg")
+        (home / "data" / "pgdata").mkdir(parents=True, exist_ok=True)
+        (home / "data" / "pgdata" / "PG_VERSION").write_text("16")
+        # a legacy-path orphan that a fail-open resolution would purge instead
+        orphan = mgr.data_dir / "pg"
+        orphan.mkdir(parents=True)
+        (orphan / "dump.sql").write_text("legacy-path bytes")
+
+        (mgr.services_dir / "pg" / "syrvis-service.yaml").write_text("{[:::not yaml")
+
+        ok, msg = mgr.remove("pg", purge=True)
+        assert not ok and "unreadable" in msg
+        assert (home / "data" / "pgdata" / "PG_VERSION").exists()  # home leaked, not lost
+        assert (orphan / "dump.sql").exists()  # wrong tree NOT purged
+
+        ok, msg = mgr.stop("pg")
+        assert not ok and "unreadable" in msg
+
+    def test_absent_manifest_still_means_legacy(self, tmp_path, monkeypatch):
+        # a service dir with no manifest at all keeps today's behavior
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        assert mgr._manifest_location("ghost") == ""
+
+
+class TestAdoptionWholeHome:
+    """Review #6: the adoption predicate is the WHOLE home — a home
+    pre-staged with only config/ (no data yet) must survive a failed fresh
+    install's rollback."""
+
+    def test_config_only_home_survives_failed_fresh_install(self, tmp_path, monkeypatch):
+        mgr = _v2_mgr(tmp_path, monkeypatch, start_ok=False)
+        home = _resolved_home(tmp_path, "pg")
+        (home / "config").mkdir(parents=True)
+        (home / "config" / "precious.conf").write_text("staged-by-operator\n")
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        ok, msg = mgr.install_declaration(svc, start=True)
+        assert not ok
+        assert (home / "config" / "precious.conf").exists()
+
+    def test_untouched_home_still_rolled_back(self, tmp_path, monkeypatch):
+        # counter-edge: a home this call created from nothing is still dropped
+        mgr = _v2_mgr(tmp_path, monkeypatch, start_ok=False)
+        svc = ServiceDefinition.from_dict(base_service(name="pg", location="/volume6"))
+        ok, _ = mgr.install_declaration(svc, start=True)
+        assert not ok
+        assert not _resolved_home(tmp_path, "pg").exists()
+
+
+class TestUmaskIndependentPerms:
+    """Review #8: layout perms must not depend on the caller's umask — under
+    a hardened root shell (umask 077) a non-root container UID must still be
+    able to traverse to its data dir."""
+
+    def test_home_and_ancestors_traversable_under_umask_077(self, tmp_path, monkeypatch):
+        import os
+        import stat as stat_mod
+
+        old_umask = os.umask(0o077)
+        try:
+            mgr = _v2_mgr(tmp_path, monkeypatch)
+            svc = ServiceDefinition.from_dict(
+                base_service(
+                    name="pg",
+                    location="/volume6",
+                    volumes=["pgdata:/var/lib/postgresql/data"],
+                    env_file="secrets.env",
+                )
+            )
+            ok, msg = mgr.install_declaration(svc, start=False)
+            assert ok, msg
+        finally:
+            os.umask(old_umask)
+        home = _resolved_home(tmp_path, "pg")
+
+        def mode(p):
+            return stat_mod.S_IMODE(p.stat().st_mode)
+
+        # created ancestors: <vol>/syrviscore, <vol>/syrviscore/apps, home
+        assert mode(home.parent.parent) == 0o755
+        assert mode(home.parent) == 0o755
+        assert mode(home) == 0o755
+        assert mode(home / "data") == 0o777
+        assert mode(home / "config") == 0o755
+        assert mode(home / "secrets") == 0o700
+        assert mode(home / "logs") == 0o777
