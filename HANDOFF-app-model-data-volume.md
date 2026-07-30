@@ -143,6 +143,37 @@ Two viable shapes for the app home; **decide + record in design/26**:
   auto-resumes — add `reason: system`/`reboot`). Verify DSM's rc.d-stop timeout
   accommodates the ~70s ordered stop (stores get 120s grace). Unifies with design/25's
   UPS path (which already planned DSM/NUT → `syrvis shutdown --reason ups`).
+- **Boot-time auto-resume is UNRELIABLE — Docker-start race (confirmed live 2026-07-30).**
+  Distinct from the two items above (the seam-shell self-heal has SHIPPED and works —
+  seam SSH survived this reboot). `syrvis-startup.sh` runs, in order:
+  `docker-perms → self-heal → env → macvlan → wait-Docker(120s cap) → reconcile --boot || true`.
+  When Container Manager starts **>120s** after the hook (likely after a power-cycle),
+  two things break:
+  1. **Docker-perms run before the socket exists** (`chown root:docker /var/run/docker.sock`
+     + `synogroup --member docker`) → the fix misses → when Docker finally starts the
+     socket is `root:root` and the **seam user is locked out of Docker**
+     (`PermissionError(13)` on every `status`/`reconcile`/`monitoring` query via the seam).
+  2. **The wait caps at 120s then `break`s** (`privileged_ops.py:372`), so
+     `reconcile --boot || true` runs against a **not-ready Docker and silently no-ops**
+     (the `|| true` swallows the failure — exactly what the code comment warns about) →
+     **the estate never auto-resumes**: Traefik + all L2 stay down.
+  **Observed:** after a `--reason ups` graceful shutdown + power-cycle, the box booted,
+  seam SSH answered (self-heal ran), but Docker was `root:root` (seam denied) AND nothing
+  came up. A manual **`sudo -n syrvis resume`** (runs as root → Docker-capable) fully
+  recovered it — proving the estate config was fine; only the boot hook failed.
+  **Fix** (reorder + harden `ensure_startup_script`):
+  (a) move a **robust wait-for-Docker FIRST** — poll `docker info` until ready with a much
+      longer cap (~600s) and log progress; (b) apply **docker-perms AFTER** Docker is
+      confirmed up (so the chown sticks); (c) keep the self-heal early (needs no Docker);
+      (d) **reconcile with retry + visible logging**, not silent `|| true` — retry
+      `reconcile --boot` a few times on failure, log the outcome, and optionally verify
+      core (Traefik) is up post-reconcile and retry if not; **(e) notify-on-failure** —
+      if the estate is still down after retries, **direct-POST an ntfy alert** (reuse the
+      sops `NTFY_URL`) so a silent boot-resume failure becomes a page, not a surprise
+      (owner explicitly asked 2026-07-30: "notify me if we can't bring up the seam").
+  **Why it matters:** this is the **hard prerequisite for the UPS `--reason ups` auto-resume**
+  (home-tech design/28) — "power returns → estate self-recovers" only holds if the boot
+  hook reliably resumes. ⚠ Only provable via a reboot (coordinate with owner).
 
 ## 9. Current estate/NAS state (context)
 
