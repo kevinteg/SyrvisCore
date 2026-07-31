@@ -92,6 +92,21 @@ COMMANDS: List[Command] = [
         positional=Slot("service", KIND_NAME, optional=True),
     ),
     Command("stack_hostnames", "syrvis", ["stack", "hostnames"], read_only=True, flags=["--json"]),
+    # Same read-only `stack hostnames`, but UNDER SUDO so root can read the 0600
+    # instance config — the report then carries domain + traefik_ip + record
+    # targets. The non-sudo variant above runs as the operator, cannot read the
+    # config, and returns those as null (fine for a reach check, but useless for
+    # the LAN-DNS planner, which raises without traefik_ip). sudo + read_only
+    # mirrors `export`/`reconcile_plan`; the `sudo -n` prefix makes it a distinct
+    # argv shape, so both variants coexist on the shim.
+    Command(
+        "stack_hostnames_full",
+        "syrvis",
+        ["stack", "hostnames"],
+        sudo=True,
+        read_only=True,
+        flags=["--json"],
+    ),
     # dashboard generate projects the declared service set into a Grafana
     # dashboard JSON — read-only, no sudo (it reads the 0644 stack.yaml + public
     # manifests; a 0600 manifest just drops out, like service_list). The estate
