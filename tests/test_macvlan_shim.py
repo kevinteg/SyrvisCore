@@ -215,18 +215,21 @@ class TestStartupScriptReconcile:
         assert ok
 
         content = (install_dir / "bin" / "syrvis-startup.sh").read_text()
-        reconcile_line = f'"{install_dir}/bin/syrvis" reconcile --boot || true'
+        # The reconcile is invoked inside a retry loop (visible logging, no silent
+        # swallow) rather than a single `|| true` line, but is still strictly
+        # best-effort: the boot script always reaches `exit 0`.
+        reconcile_line = f'"{install_dir}/bin/syrvis" reconcile --boot'
         assert reconcile_line in content
-        # Best-effort: must not be able to fail the boot script.
-        assert "|| true" in content
-        # Placed at the very end, after the macvlan shim setup.
+        # Boot script never aborts (retries, logs, then falls through to exit 0).
+        assert content.rstrip().endswith("exit 0")
+        # Placed after the macvlan shim setup and before the final exit.
         assert content.index(reconcile_line) > content.index("SHIM_NAME")
         assert content.index(reconcile_line) < content.rindex("exit 0")
 
         # The rc.d hook can run before ContainerManager starts the Docker daemon
         # on DSM 7, so reconcile must be preceded by a bounded wait-for-docker
         # poll -- otherwise every compose call no-ops and --boot swallows it.
-        assert 'while ! "$DOCKER_BIN" info >/dev/null 2>&1; do' in content
+        assert 'until "$DOCKER_BIN" info >/dev/null 2>&1; do' in content
         assert "DOCKER_WAIT" in content
         assert content.index("DOCKER_WAIT") < content.index(reconcile_line)
 

@@ -241,6 +241,78 @@ class TestActivate:
             version_manager.activate_version(home, "0.1.0")
 
 
+class TestActivateRegeneratesBootHooks:
+    """design/28 #3a: activation must re-lay the boot hook from the
+    just-activated service version (via that version's own `syrvis
+    _regen-boot-hooks`), so the boot hook can't drift behind an upgrade/rollback.
+    """
+
+    def _recording_syrvis(self, monkeypatch, marker):
+        """Make the faked venv `syrvis` record its argv + SYRVIS_HOME to `marker`."""
+
+        def _pip_install_wheel(venv_path, wheel_path):
+            script = (
+                "#!/bin/sh\n"
+                '# venv: {venv}\n'
+                'printf "%s SYRVIS_HOME=%s\\n" "$*" "$SYRVIS_HOME" >> "{marker}"\n'
+                "echo fake-syrvis\n"
+            ).format(venv=venv_path, marker=marker)
+            syrvis = venv_path / "bin" / "syrvis"
+            syrvis.write_text(script)
+            syrvis.chmod(0o755)
+
+        monkeypatch.setattr(version_manager, "_create_venv", lambda p: (p / "bin").mkdir(
+            parents=True, exist_ok=True
+        ))
+        monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)
+
+    def test_activate_invokes_version_regen_hook(self, home, tmp_path, monkeypatch):
+        marker = tmp_path / "regen-calls.log"
+        self._recording_syrvis(monkeypatch, marker)
+        install(home, tmp_path, "0.1.0")  # install_from_wheel activates
+
+        assert marker.exists(), "boot-hook regen was never invoked on activate"
+        calls = marker.read_text()
+        assert "_regen-boot-hooks" in calls
+        # It must run with SYRVIS_HOME pointing at the install.
+        assert "SYRVIS_HOME={}".format(home) in calls
+
+    def test_regen_failure_does_not_abort_activation(self, home, tmp_path, monkeypatch):
+        # A boot-hook regen whose subprocess EXITS NON-ZERO must not fail the
+        # activation — the switch has already landed and the hook is separately
+        # fixable via `syrvis verify --fix`.
+        def _pip_install_wheel(venv_path, wheel_path):
+            # Succeed for the install-time `syrvis --version` check, but fail the
+            # `_regen-boot-hooks` verb so we exercise the failure path.
+            syrvis = venv_path / "bin" / "syrvis"
+            syrvis.write_text(
+                '#!/bin/sh\n'
+                'if [ "$1" = "_regen-boot-hooks" ]; then echo boom >&2; exit 7; fi\n'
+                "echo fake-syrvis\n"
+            )
+            syrvis.chmod(0o755)
+
+        monkeypatch.setattr(version_manager, "_create_venv", lambda p: (p / "bin").mkdir(
+            parents=True, exist_ok=True
+        ))
+        monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)
+
+        # install_from_wheel -> activate_version -> regen (subprocess exits 7);
+        # this must complete without raising.
+        install(home, tmp_path, "0.1.0")
+        assert paths.active_version(home) == "0.1.0"
+
+    def test_real_regen_helper_is_best_effort(self, home, tmp_path, fake_venv_backend):
+        # The REAL _regenerate_boot_hooks must never raise, even if the version's
+        # syrvis binary is missing entirely.
+        install(home, tmp_path, "0.1.0", activate=False)
+        # Remove the version's syrvis so the helper hits its missing-binary path.
+        (home / "versions" / "0.1.0" / "cli" / "venv" / "bin" / "syrvis").unlink()
+        logs = []
+        version_manager._regenerate_boot_hooks(home, "0.1.0", logs.append)  # must not raise
+        assert any("skipping boot-hook regen" in m for m in logs)
+
+
 class TestUninstall:
     def test_uninstall_active_refused(self, home, tmp_path, fake_venv_backend):
         install(home, tmp_path, "0.1.0")

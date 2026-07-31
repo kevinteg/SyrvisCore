@@ -143,9 +143,22 @@ Two viable shapes for the app home; **decide + record in design/26**:
   auto-resumes — add `reason: system`/`reboot`). Verify DSM's rc.d-stop timeout
   accommodates the ~70s ordered stop (stores get 120s grace). Unifies with design/25's
   UPS path (which already planned DSM/NUT → `syrvis shutdown --reason ups`).
-- **Boot-time auto-resume is UNRELIABLE — Docker-start race (confirmed live 2026-07-30).**
-  Distinct from the two items above (the seam-shell self-heal has SHIPPED and works —
-  seam SSH survived this reboot). `syrvis-startup.sh` runs, in order:
+- **Boot-time auto-resume — ✅ FIXED in 0.5.2 (+ manager 0.3.4).** Real root cause: the
+  DEPLOYED `syrvis-startup.sh` had drifted **years** behind the code (`docker-perms →
+  macvlan → exit 0` — NO self-heal, NO wait-for-Docker, NO `reconcile --boot` at ALL),
+  because **`activate` never regenerated it** and no validator caught the drift. The estate
+  never auto-resumed because the reconcile **wasn't present** — the "race" analysis below was
+  reasoning about the 0.5.1 *code*, not the ancient *deployed* script (and the seam surviving
+  some reboots was luck, never the self-heal, which also wasn't deployed). **Fixed in 0.5.2:**
+  the hardened hook (below, + docker-group adds `syrvis-operator`) + **#3a** activate
+  regenerates the boot artifacts on both deploy paths (service `syrvis update`; manager
+  `syrvisctl activate` → hidden `syrvis _regen-boot-hooks`) + **#3b** content-aware startup
+  validator (`verify --fix` heals drift) + **#4** rc.d `stop` runs bounded `syrvis shutdown
+  --reason reboot` on DSM shutdown (design/28 Option A). Bootstrapped via scp + PROVEN
+  2026-07-30 (self-recovery 33/33). Deploy = service 0.5.2 (`syrvisctl install/activate` +
+  `verify --fix`) + manager SPK 0.3.4 for auto-regen-on-activate.
+
+  _Original analysis (kept for context):_ `syrvis-startup.sh` ran, in order:
   `docker-perms → self-heal → env → macvlan → wait-Docker(120s cap) → reconcile --boot || true`.
   When Container Manager starts **>120s** after the hook (likely after a power-cycle),
   two things break:

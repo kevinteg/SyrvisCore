@@ -332,6 +332,13 @@ class TestRunstate:
         record = lifecycle.write_halted(home, "maintenance", [])
         assert record["resume_on_boot"] is False
 
+    def test_reboot_defaults_to_auto_resume(self, home):
+        # A DSM-initiated reboot (design/28 rc.d-stop hook) must auto-resume on
+        # the next boot, same as a ups power event.
+        record = lifecycle.write_halted(home, "reboot", [])
+        assert record["resume_on_boot"] is True
+        assert lifecycle.read_runstate(home)["reason"] == "reboot"
+
     def test_corrupt_runstate_reads_as_active(self, home):
         path = home / "data" / "state" / "runstate.json"
         path.parent.mkdir(parents=True)

@@ -12,6 +12,7 @@ v2 rules:
 - All mutations hold the installation lock.
 """
 
+import os
 import re
 import shutil
 import subprocess
@@ -91,6 +92,50 @@ def _verify_cli_executes(syrvis_bin: Path) -> None:
                 (result.stderr or result.stdout).strip()
             )
         )
+
+
+def _regenerate_boot_hooks(home: Path, version: str, log: LogCallback) -> None:
+    """Re-lay the boot artifacts from the just-activated service version.
+
+    Root cause of the years-long boot-hook drift: activation swapped the code +
+    symlink but never regenerated ``syrvis-startup.sh`` / the rc.d boot script,
+    so an old-version hook (missing the reconcile/self-heal section) stayed
+    frozen and the estate stopped auto-resuming at boot. The seam re-render
+    (``_sync_seam_after_switch``) had the same shape; this closes the same gap
+    for the boot hook.
+
+    The manager cannot import an arbitrary activated service version, so it runs
+    the version's OWN ``syrvis`` console script (built into that version's venv)
+    — the hidden ``syrvis _regen-boot-hooks`` verb, which renders both artifacts
+    for the current install. Mirrors seam_sync's "run the active version's code"
+    pattern. STRICTLY best-effort + logged: a boot-hook regen failure must never
+    fail an activation that already succeeded (the hook is separately fixable via
+    ``syrvis verify --fix``).
+    """
+    version_syrvis = paths.version_dir(home, version) / "cli" / "venv" / "bin" / "syrvis"
+    if not version_syrvis.exists():
+        log("Warning: skipping boot-hook regen (no syrvis at {})".format(version_syrvis))
+        return
+    try:
+        result = subprocess.run(
+            [str(version_syrvis), "_regen-boot-hooks"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "SYRVIS_HOME": str(home)},
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log("Warning: boot-hook regen failed ({}); run: syrvis verify --fix".format(e))
+        return
+    if result.returncode != 0:
+        stderr = (result.stderr or result.stdout or "").strip()
+        log(
+            "Warning: boot-hook regen exited {} ({}); run: syrvis verify --fix".format(
+                result.returncode, stderr or "no output"
+            )
+        )
+        return
+    log("Boot hooks regenerated from active version")
 
 
 def _fixup_relocated_venv(venv_dir: Path, old_prefix: str, new_prefix: str) -> None:
@@ -337,9 +382,13 @@ def check_manager_compatibility(home: Path, version: str) -> None:
         )
 
 
-def activate_version(home: Path, version: str) -> None:
+def activate_version(home: Path, version: str, log: LogCallback = _noop_log) -> None:
     """
     Activate a service version (atomic symlink switch + wrapper + manifest).
+
+    After the switch, the managed boot artifacts are regenerated from the
+    newly-active version (best-effort; see ``_regenerate_boot_hooks``) so the
+    boot hook can never drift behind an upgrade/rollback.
 
     Raises:
         VersionNotFoundError: If the version is not installed or incomplete.
@@ -363,6 +412,10 @@ def activate_version(home: Path, version: str) -> None:
         paths.create_syrvis_profile(home)
         manifest.set_active_version(home, version)
 
+        # Re-lay the boot hook from the just-activated code (best-effort; never
+        # aborts the activation, which has already fully succeeded above).
+        _regenerate_boot_hooks(home, version, log)
+
 
 def install_from_wheel(
     home: Path,
@@ -385,7 +438,7 @@ def install_from_wheel(
     log("Installing {} from local wheel {}".format(version, wheel_path))
     install_version(home, version, wheel_path, config_path, force=force, log=log)
     if activate:
-        activate_version(home, version)
+        activate_version(home, version, log=log)
         log("Activated: {}".format(version))
     return {"version": version}
 
@@ -507,7 +560,7 @@ def download_and_install(
         log("[5/5] Installing...")
         install_version(home, version, wheel_path, config_path, force=force, log=log)
 
-    activate_version(home, version)
+    activate_version(home, version, log=log)
     log("      Activated: {}".format(version))
 
     return {"version": version, "installed": True, "skipped": False}

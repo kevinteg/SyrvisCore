@@ -392,7 +392,7 @@ def activate(version):
     ensure_privileges(paths.current_symlink(home))
 
     click.echo("Activating version {}...".format(version))
-    version_manager.activate_version(home, version)
+    version_manager.activate_version(home, version, log=click.echo)
     click.echo("Activated: {}".format(version))
     _sync_seam_after_switch(home)
     click.echo()

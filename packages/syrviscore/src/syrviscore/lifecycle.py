@@ -291,7 +291,14 @@ def run_host_hook(
 # ---------------------------------------------------------------------------
 
 RUNSTATE_SCHEMA = "syrvis-runstate/v1"
-HALT_REASONS = ("ups", "maintenance")
+# ups     = a power event (UPS on battery): come back when power does.
+# reboot  = a DSM-initiated shutdown/reboot (home-tech design/28 rc.d-stop hook):
+#           auto-resume on the next boot, same as ups.
+# maintenance = an operator hold: stay down across reboots until 'syrvis resume'.
+HALT_REASONS = ("ups", "reboot", "maintenance")
+# Reasons whose default boot policy is to auto-resume when the machine comes back
+# up (overridable via the explicit resume_on_boot arg / --hold).
+AUTO_RESUME_REASONS = ("ups", "reboot")
 
 
 class InstanceHaltedError(SyrvisError):
@@ -351,9 +358,11 @@ def write_halted(
         "reason": reason,
         "at": _utc_now(),
         "by": by,
-        # ups = a power event: come back when power does. maintenance = stay
-        # down across reboots until an explicit resume.
-        "resume_on_boot": (reason == "ups") if resume_on_boot is None else bool(resume_on_boot),
+        # ups/reboot auto-resume when the machine comes back up; maintenance
+        # stays down across reboots until an explicit resume (see HALT_REASONS).
+        "resume_on_boot": (reason in AUTO_RESUME_REASONS)
+        if resume_on_boot is None
+        else bool(resume_on_boot),
         "workloads": workloads,
     }
     if result is not None:
@@ -603,7 +612,9 @@ def shutdown_instance(
     return {
         "action": "shutdown",
         "reason": reason,
-        "resume_on_boot": (reason == "ups") if resume_on_boot is None else bool(resume_on_boot),
+        "resume_on_boot": (reason in AUTO_RESUME_REASONS)
+        if resume_on_boot is None
+        else bool(resume_on_boot),
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_s": round(elapsed, 1),

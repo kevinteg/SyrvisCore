@@ -977,7 +977,16 @@ class SystemValidator:
         )
 
     def check_startup_script(self) -> CheckResult:
-        """Check if startup script exists."""
+        """Check that the boot hook exists AND matches the current code.
+
+        Existence alone is not enough: the deployed ``syrvis-startup.sh`` can
+        (and did) drift years behind the code — a stale hook missing the whole
+        reconcile/self-heal section still "exists", so the estate silently
+        stopped auto-resuming at boot. This renders what ``ensure_startup_script``
+        WOULD write today and compares it against the deployed file; any
+        difference (or a missing file) is UNHEALTHY + fixable, and
+        ``verify --fix`` regenerates it from the active code.
+        """
         if not self.install_dir:
             return CheckResult(
                 name="Startup script", passed=False, message="Cannot check - install dir unknown"
@@ -985,16 +994,78 @@ class SystemValidator:
 
         startup_script = self.install_dir / "bin" / "syrvis-startup.sh"
 
-        if startup_script.exists():
+        # The user baked into the hook is the setup user (get_target_user()),
+        # which may differ from whoever is running verify. Compare against the
+        # user the deployed file already carries so a benign user mismatch is
+        # not reported as drift (and the fix preserves it); fall back to the
+        # invoking user when the file is absent/unparseable.
+        fix_user = self.username
+
+        if not startup_script.exists():
+            return CheckResult(
+                name="Startup script",
+                passed=False,
+                message="Missing",
+                details="Boot hook absent — the estate will not auto-resume after reboot",
+                fixable=True,
+                fix_action=f"startup:{fix_user}",
+            )
+
+        try:
+            deployed = startup_script.read_text()
+        except OSError as e:
+            # Can't read it → can't confirm it's current; treat as fixable
+            # rather than crashing the validator.
+            return CheckResult(
+                name="Startup script",
+                passed=False,
+                message="Unreadable: {}".format(e),
+                fixable=True,
+                fix_action=f"startup:{fix_user}",
+            )
+
+        embedded_user = self._parse_startup_user(deployed)
+        if embedded_user:
+            fix_user = embedded_user
+
+        try:
+            expected = privileged_ops.render_startup_script(self.install_dir, fix_user)
+        except Exception as e:  # noqa: BLE001 - a render failure must not crash verify
+            return CheckResult(
+                name="Startup script",
+                passed=True,
+                message=str(startup_script),
+                details="Content check skipped (could not render expected script: {})".format(e),
+            )
+
+        if deployed == expected:
             return CheckResult(name="Startup script", passed=True, message=str(startup_script))
 
         return CheckResult(
             name="Startup script",
             passed=False,
-            message="Missing",
+            message="Stale — deployed boot hook differs from the current code",
+            details="verify --fix regenerates it so the estate auto-resumes at boot",
             fixable=True,
-            fix_action=f"startup:{self.username}",
+            fix_action=f"startup:{fix_user}",
         )
+
+    @staticmethod
+    def _parse_startup_user(content: str) -> Optional[str]:
+        """Extract the setup user baked into a deployed boot hook, if present.
+
+        The only user-dependent line is the docker-group self-heal:
+        ``/usr/syno/sbin/synogroup --member docker <user> syrvis-operator``.
+        Returns the ``<user>`` token so the expected script is rendered with the
+        same user the deployed file already carries (avoids a false drift when a
+        different account runs verify).
+        """
+        import re
+
+        m = re.search(
+            r"synogroup --member docker (\S+) syrvis-operator", content
+        )
+        return m.group(1) if m else None
 
     def check_boot_script(self) -> CheckResult:
         """Check if boot script exists in /usr/local/etc/rc.d/."""

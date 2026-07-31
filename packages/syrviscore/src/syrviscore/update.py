@@ -197,6 +197,43 @@ def install_version(version: str, spk_path: Path) -> bool:
         return False
 
 
+def _regenerate_boot_artifacts() -> None:
+    """Re-lay the managed boot artifacts from the now-active code (best-effort).
+
+    Root cause of the boot-hook drift: activating a version (upgrade OR rollback)
+    swaps the code + symlink but historically never regenerated the boot hook, so
+    a hook rendered by an old version stayed frozen for years (missing the whole
+    reconcile/self-heal/wait-for-Docker section — the estate never auto-resumed).
+    Re-rendering ``syrvis-startup.sh`` and the rc.d boot script on EVERY activate
+    guarantees the deployed hook always matches the active code and can't drift.
+
+    Best-effort by design: a failure here (e.g. not root, or not on DSM) must
+    never abort activation — the version is already switched. Warn and continue.
+
+    NOTE: this covers the direct-CLI path (``syrvis update install/activate/
+    rollback`` run on the box). The seam/MCP deploy path goes through the MANAGER
+    (``syrvisctl activate`` -> ``version_manager.activate_version``), which does
+    its OWN regen by invoking the newly-activated version's ``syrvis
+    _regen-boot-hooks``. Both paths therefore re-lay the hook.
+    """
+    from . import privileged_ops
+
+    try:
+        install_dir = paths.get_syrvis_home()
+        ops = privileged_ops.get_system_operations()
+        username = ops.get_target_user()
+
+        ok, msg = ops.ensure_startup_script(install_dir, username)
+        if not ok:
+            click.echo(f"      Warning: could not regenerate startup script: {msg}", err=True)
+
+        ok, msg = ops.ensure_boot_script(install_dir)
+        if not ok:
+            click.echo(f"      Warning: could not regenerate boot script: {msg}", err=True)
+    except Exception as e:  # noqa: BLE001 - never let boot-artifact regen abort activation
+        click.echo(f"      Warning: could not regenerate boot artifacts: {e}", err=True)
+
+
 def activate_version(version: str) -> bool:
     """Activate a version (update symlink and manifest)."""
     try:
@@ -210,6 +247,11 @@ def activate_version(version: str) -> bool:
 
         # Update manifest
         paths.set_active_version(version)
+
+        # Re-lay the managed boot artifacts from the newly-active code so the
+        # boot hook can never drift behind an upgrade/rollback (best-effort:
+        # a failure here must not abort an otherwise-successful activation).
+        _regenerate_boot_artifacts()
 
         return True
 

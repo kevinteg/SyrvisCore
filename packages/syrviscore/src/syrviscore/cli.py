@@ -1438,10 +1438,11 @@ def restart(graceful, as_json):
 @cli.command()
 @click.option(
     "--reason",
-    type=click.Choice(["ups", "maintenance"]),
+    type=click.Choice(["ups", "reboot", "maintenance"]),
     default="maintenance",
-    help="Why the instance is halting. 'ups' resumes automatically on the next "
-    "boot (power returned); 'maintenance' stays down until 'syrvis resume'.",
+    help="Why the instance is halting. 'ups' (power returned) and 'reboot' (a "
+    "DSM shutdown/reboot) both resume automatically on the next boot; "
+    "'maintenance' stays down until 'syrvis resume'.",
 )
 @click.option(
     "--timeout",
@@ -1540,6 +1541,61 @@ def resume(as_json):
         click.echo("Instance resumed ({}).".format("ok" if report.get("ok") else "degraded"))
     if report.get("exit"):
         raise SystemExit(report["exit"])
+
+
+@cli.command("_regen-boot-hooks", hidden=True)
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report")
+@handle_errors
+def regen_boot_hooks(as_json):
+    """Regenerate the managed boot artifacts from THIS (active) version.
+
+    Internal seam between the manager and the service: ``syrvisctl activate``
+    (the real deploy path) invokes ``<newly-activated>/bin/syrvis
+    _regen-boot-hooks`` after switching the ``current`` symlink, so the boot
+    hook (``syrvis-startup.sh`` + the rc.d ``S99syrviscore.sh``) is always
+    re-laid from the just-activated code and can never drift behind an
+    upgrade/rollback. The manager cannot import an arbitrary activated version,
+    so this runs in the version's own venv (mirroring the seam generator).
+
+    Best-effort by construction: renders both artifacts, reports per-artifact
+    outcome, and never raises for a render failure (a bad boot-hook regen must
+    not fail the activation that already succeeded).
+    """
+    from syrviscore import privileged_ops
+
+    privilege.ensure_elevated("Regenerating boot hooks requires elevated privileges.")
+
+    install_dir = get_syrvis_home()
+    ops = privileged_ops.get_system_operations()
+    results = {}
+    try:
+        username = ops.get_target_user()
+    except Exception as e:  # noqa: BLE001 - fall back rather than abort
+        username = None
+        results["target_user_error"] = str(e)
+
+    if username:
+        try:
+            ok, msg = ops.ensure_startup_script(install_dir, username)
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, "render failed: {}".format(e)
+        results["startup_script"] = {"ok": ok, "message": msg}
+
+        try:
+            ok, msg = ops.ensure_boot_script(install_dir)
+        except Exception as e:  # noqa: BLE001
+            ok, msg = False, "render failed: {}".format(e)
+        results["boot_script"] = {"ok": ok, "message": msg}
+
+    if as_json:
+        click.echo(jsonlib.dumps(results, indent=2, default=str))
+    else:
+        for name, r in results.items():
+            if isinstance(r, dict) and "ok" in r:
+                mark = "[+]" if r["ok"] else "[-]"
+                click.echo("  {} {}: {}".format(mark, name, r["message"]))
+            else:
+                click.echo("  [-] {}: {}".format(name, r))
 
 
 @cli.command()
