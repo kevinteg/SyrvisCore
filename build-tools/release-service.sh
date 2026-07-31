@@ -54,14 +54,24 @@ TAG="v${VERSION}"
 log_info "Version: $VERSION"
 log_info "Tag: $TAG"
 
-# Lockstep: keep the dashboard package version equal to the service version so the
-# GHCR image (tagged at the service version by CI) and the compose pin agree.
-# Bump only syrviscore/__version__.py; this syncs the dashboard automatically.
+# The dashboard version is INDEPENDENT of the service version (owner decision
+# 2026-07-31): it advances only on a real dashboard change, so a service-only
+# release must NOT touch it. The old force-sync here bumped the dashboard package
+# version to the service version even when the image stayed correctly pinned,
+# drifting the two apart. Instead, GUARD the invariant the core stack depends on:
+# the dashboard package __version__ == its pinned compose image tag (running ==
+# pinned). Bump the dashboard version + re-pin the image by hand on a real change.
 DASH_VERSION_FILE="$PROJECT_ROOT/packages/syrviscore-dashboard/src/syrviscore_dashboard/__version__.py"
 if [ -f "$DASH_VERSION_FILE" ]; then
-    sed -i.bak "s/^__version__ = \".*\"/__version__ = \"${VERSION}\"/" "$DASH_VERSION_FILE"
-    rm -f "${DASH_VERSION_FILE}.bak"
-    log_info "Synced dashboard __version__ -> ${VERSION}"
+    DASH_VERSION=$(grep '^__version__' "$DASH_VERSION_FILE" | cut -d'"' -f2)
+    PIN_TAG=$(grep -oE 'syrviscore-dashboard:[0-9]+\.[0-9]+\.[0-9]+' \
+        "$SERVICE_DIR/src/syrviscore/compose.py" | head -1 | cut -d: -f2)
+    if [ "$DASH_VERSION" != "$PIN_TAG" ]; then
+        log_error "dashboard __version__ (${DASH_VERSION}) != pinned image tag (${PIN_TAG})"
+        log_error "re-pin the dashboard image in compose.py, or bump the dashboard __version__ — they must match"
+        exit 1
+    fi
+    log_info "dashboard ${DASH_VERSION} matches its pinned image (independent of service ${VERSION})"
 fi
 
 # The wheel MUST match THIS release's version. Never reuse whatever wheel happens

@@ -47,11 +47,14 @@ DEFAULT_DOCKER_IMAGES = {
         "full_image": "cloudflare/cloudflared:2026.7.3@sha256:e39ee8da81ad5e05d77f38d2f51c60ca51bf2a8450ac3abab50c17fdb91d91bf",
         "description": "",
     },
-    # The dashboard image is built in LOCKSTEP with the service version: its tag
-    # equals syrviscore.__version__, CI publishes ghcr .../syrviscore-dashboard:
-    # <service-version> on release, and the pin here tracks it. Because the pin
-    # therefore changes every release, `apply-instance --converge` recreates the
-    # dashboard container each upgrade — so it never serves a stale snapshot.
+    # The dashboard image is versioned INDEPENDENTLY of the service (owner decision
+    # 2026-07-31): its tag advances only on a real dashboard change, NOT every
+    # service release. This pin tag MUST equal the dashboard package __version__
+    # (running == pinned; asserted by test_compose + release-service.sh). A
+    # service-only release leaves this pin untouched, so `apply-instance --converge`
+    # recreates the dashboard container only when the dashboard actually changed.
+    # (Whether CI rebuilds the image on a service-only release — the baked
+    # syrviscore-lib freshness tradeoff — is a separate, still-open decision.)
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.5.1",
