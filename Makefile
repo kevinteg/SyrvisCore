@@ -1,7 +1,7 @@
 # Makefile for SyrvisCore
 # Compatible with local development and GitHub Actions
 
-.PHONY: all help clean test lint format build-manager build-service build-spk build-dashboard test-dashboard validate install dev-install check version
+.PHONY: all help clean test lint format build-manager build-service build-spk build-dashboard test-dashboard validate install dev-install check version env
 
 # Colors for output (disabled in CI)
 ifdef CI
@@ -42,6 +42,15 @@ PYTEST := $(PYTHON) -m pytest
 BLACK := $(PYTHON) -m black
 RUFF := $(PYTHON) -m ruff
 
+# Pinned interpreter. `.python-version` (committed) selects the pyenv virtualenv,
+# so the pyenv shims resolve $(PYTHON) to it from this directory even in a
+# non-interactive shell (CI / agents / make) — no manual `pyenv activate`.
+# `make env` bootstraps the virtualenv if it doesn't exist yet.
+PY_ENV := $(shell cat .python-version 2>/dev/null || echo syrviscore)
+# 3.8.12 matches Synology DSM's Python (see CLAUDE.md). Keep on its own line —
+# a trailing `# comment` after `:=` would fold whitespace into the value.
+PY_VERSION := 3.8.12
+
 # SSH deployment (for install target)
 SSH_HOST ?=
 SSH_USER ?= admin
@@ -61,6 +70,14 @@ version: ## Show current versions
 	@echo "service: $(GREEN)$(VERSION)$(NC)  manager: $(GREEN)$(MANAGER_VERSION)$(NC)"
 
 ##@ Development
+
+env: ## Bootstrap the pyenv virtualenv (creates it if missing) then dev-install
+	@command -v pyenv >/dev/null 2>&1 || { printf "$(RED)[ERROR]$(NC) pyenv not found — run: brew install pyenv pyenv-virtualenv\n"; exit 1; }
+	@pyenv virtualenv --version >/dev/null 2>&1 || { printf "$(RED)[ERROR]$(NC) pyenv-virtualenv not found — run: brew install pyenv-virtualenv\n"; exit 1; }
+	@pyenv versions --bare | grep -qx "$(PY_VERSION)" || { printf "$(BLUE)[INFO]$(NC) Installing Python $(PY_VERSION) (matches DSM)...\n"; pyenv install -s "$(PY_VERSION)"; }
+	@pyenv versions --bare | grep -qx "$(PY_ENV)" || { printf "$(BLUE)[INFO]$(NC) Creating virtualenv $(PY_ENV)...\n"; pyenv virtualenv "$(PY_VERSION)" "$(PY_ENV)"; }
+	@$(MAKE) dev-install
+	@printf "$(GREEN)[SUCCESS]$(NC) Env '$(PY_ENV)' ready. .python-version pins it — 'make test' / 'make check' work without activation.\n"
 
 dev-install: ## Install both packages in editable mode with dev dependencies
 	@echo "$(BLUE)[INFO]$(NC) Installing syrviscore-manager and syrviscore in development mode..."

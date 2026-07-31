@@ -98,40 +98,37 @@ SyrvisCore/
 
 ### Environment Setup
 
+The interpreter is pinned by the committed **`.python-version`** (the `syrviscore`
+pyenv virtualenv, Python 3.8.12 — matches Synology DSM). Because that file selects
+the env, pyenv's shims resolve `python3` / `pytest` / `make` targets to it
+**automatically from this directory** — no manual `pyenv activate`, and it works in
+non-interactive shells (CI, agents, `make`). That single file is what makes the
+interpreter deterministic; without it, a bare `python3` falls through to the pyenv
+*global* (e.g. a Homebrew Python with no dev deps).
+
+One command bootstraps everything — it creates the pyenv virtualenv only if it's
+missing, then installs both packages editable with dev deps:
+
 ```bash
-# Install Python 3.8.12 via pyenv (matches Synology NAS)
-pyenv install 3.8.12
-
-# Create a virtual environment for this project
-pyenv virtualenv 3.8.12 syrviscore
-
-# Activate the virtual environment
-pyenv activate syrviscore
-
-# Install both packages in editable mode
-pip install -e "packages/syrviscore-manager[dev]"
-pip install -e "packages/syrviscore[dev]"
-
-# Verify installation
-syrvisctl --version
-syrvis --version
+make env
 ```
+
+Prereq: `pyenv` + `pyenv-virtualenv` (`brew install pyenv pyenv-virtualenv`).
+`make env` is idempotent — re-running it on an existing env just refreshes the
+editable install. Verify with `syrvisctl --version` and `syrvis --version`.
 
 ### Running Tests
 
+No activation step — `.python-version` selects the interpreter:
+
 ```bash
-# Activate virtualenv first
-pyenv activate syrviscore
-
-# Run all tests
-make test
-
-# Run tests with verbose output
-pytest -v
-
-# Run a specific test file
-pytest tests/test_cli.py -v
+make test                                       # full suite (python3 -m pytest via the pinned env)
+make check                                      # lint + test
+python3 -m pytest tests/test_seam_sync.py -q    # a single file
 ```
+
+If `python3 --version` from the repo root isn't `3.8.12`, either you're not in the
+repo root (`.python-version` is per-directory) or the env is missing — run `make env`.
 
 ### Building Packages
 
