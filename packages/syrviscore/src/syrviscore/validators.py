@@ -1068,22 +1068,72 @@ class SystemValidator:
         return m.group(1) if m else None
 
     def check_boot_script(self) -> CheckResult:
-        """Check if boot script exists in /usr/local/etc/rc.d/."""
+        """Check that the rc.d S99 hook exists AND matches the current code.
+
+        Existence alone is not enough: the deployed ``S99syrviscore.sh`` can
+        drift behind the code — e.g. an older render missing the design/28
+        ``stop)`` graceful-flush case (``syrvis shutdown --reason reboot``), so a
+        DSM-initiated shutdown/reboot tears the estate down un-gracefully. This
+        renders what ``ensure_boot_script`` WOULD write today and compares it
+        against the deployed file; any difference (or a missing file) is
+        UNHEALTHY + fixable, and ``verify --fix`` regenerates it.
+        """
         boot_script = Path("/usr/local/etc/rc.d/S99syrviscore.sh")
 
-        if boot_script.exists():
+        if not boot_script.exists():
+            return CheckResult(
+                name="Boot script",
+                passed=False,
+                message="Missing - services won't auto-start after reboot",
+                details="Run: sudo syrvis setup",
+                fixable=True,
+                fix_action="boot_script",
+            )
+
+        # Need the install dir to render the expected content. Without it we can
+        # only confirm presence (existence alone), so report that and move on.
+        if not self.install_dir:
             return CheckResult(
                 name="Boot script",
                 passed=True,
                 message=str(boot_script),
-                details="Ensures macvlan shim is created on reboot",
+                details="Content check skipped (install dir unknown)",
+            )
+
+        try:
+            deployed = boot_script.read_text()
+        except OSError as e:
+            return CheckResult(
+                name="Boot script",
+                passed=False,
+                message="Unreadable: {}".format(e),
+                fixable=True,
+                fix_action="boot_script",
+            )
+
+        try:
+            expected = privileged_ops.render_boot_script(self.install_dir)
+        except Exception as e:  # noqa: BLE001 - a render failure must not crash verify
+            return CheckResult(
+                name="Boot script",
+                passed=True,
+                message=str(boot_script),
+                details="Content check skipped (could not render expected script: {})".format(e),
+            )
+
+        if deployed == expected:
+            return CheckResult(
+                name="Boot script",
+                passed=True,
+                message=str(boot_script),
+                details="Ensures macvlan shim + graceful shutdown flush on reboot",
             )
 
         return CheckResult(
             name="Boot script",
             passed=False,
-            message="Missing - services won't auto-start after reboot",
-            details="Run: sudo syrvis setup",
+            message="Stale — deployed rc.d hook differs from the current code",
+            details="Missing the design/28 graceful-shutdown flush? verify --fix regenerates it",
             fixable=True,
             fix_action="boot_script",
         )

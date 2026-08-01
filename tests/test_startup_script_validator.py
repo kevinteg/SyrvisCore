@@ -75,3 +75,38 @@ class TestStartupScriptContentCheck:
         result = SystemValidator(None, username="cerebrate").check_startup_script()
         assert not result.passed
         assert not result.fixable
+
+
+class TestStartupScriptInstallerIsContentAware:
+    """The DSM installer must rewrite on content drift, not only when absent.
+
+    The missing-only installer is exactly how a stale hook rotted on the NAS.
+    """
+
+    def test_first_write_reports_created(self, tmp_path):
+        install_dir = tmp_path / "install"
+        ok, msg = privileged_ops.DsmOperations().ensure_startup_script(install_dir, "cerebrate")
+        assert ok
+        assert "created" in msg
+
+    def test_unchanged_second_write_is_noop(self, tmp_path):
+        install_dir = tmp_path / "install"
+        ops = privileged_ops.DsmOperations()
+        ops.ensure_startup_script(install_dir, "cerebrate")
+        ok, msg = ops.ensure_startup_script(install_dir, "cerebrate")
+        assert ok
+        assert "already current" in msg
+
+    def test_content_drift_triggers_rewrite(self, tmp_path):
+        install_dir = tmp_path / "install"
+        ops = privileged_ops.DsmOperations()
+        ops.ensure_startup_script(install_dir, "cerebrate")
+        script = install_dir / "bin" / "syrvis-startup.sh"
+        # Simulate the historical drift: a hook missing the reconcile section.
+        script.write_text("#!/bin/bash\n# stale hook\nexit 0\n")
+
+        ok, msg = ops.ensure_startup_script(install_dir, "cerebrate")
+        assert ok
+        assert "content drift" in msg
+        # Rewritten from the current render; drift gone.
+        assert script.read_text() == privileged_ops.render_startup_script(install_dir, "cerebrate")
