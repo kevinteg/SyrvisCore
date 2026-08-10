@@ -67,6 +67,20 @@ flowchart LR
     shim --> dsm["DSM / Photos / Drive<br/>bound on 0.0.0.0"]
 ```
 
+#### The shim's ifcfg file
+
+Whenever the shim exists, SyrvisCore also writes
+`/etc/sysconfig/network-scripts/ifcfg-syrvis-shim` (`DEVICE` / `BOOTPROTO=static` / `ONBOOT=no` /
+`IPADDR=<SHIM_IP>` / `NETMASK=255.255.255.255`). DSM's health poller reads that file for every
+interface it sees; meeting an interface it did not create, it auto-stubs the file with a lone
+`BOOTPROTO=static` line and then logs a read failure every ~60s
+(`SystemHealth.cpp:87 Failed to get interface: [syrvis-shim] information`). Writing the full key set
+keeps the poller quiet. `ONBOOT=no` is deliberate: SyrvisCore owns the shim's lifecycle (CLI at
+start, rc.d hook at boot), so DSM must never bring it up from this file. The file is **generated,
+declared state** — rewritten in full on any drift, so hand-added keys do not survive; both the CLI
+and the boot hook render it from the same key set. It is left in place when the shim is torn down at
+shutdown (`ONBOOT=no` makes a stale file inert).
+
 ### Traefik's entrypoints
 
 ```mermaid

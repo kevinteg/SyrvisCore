@@ -23,6 +23,14 @@ class PrivilegedOpsError(SyrvisError):
     code = "privileged_op_failed"
 
 
+# Name of the host-side macvlan shim interface (see ``ensure_macvlan_shim``).
+SHIM_NAME = "syrvis-shim"
+
+# Where DSM keeps its per-interface network config. Module-level (not inlined)
+# so tests can point it at a temp directory — the real path exists only on DSM.
+NETWORK_SCRIPTS_DIR = Path("/etc/sysconfig/network-scripts")
+
+
 # =============================================================================
 # System Operations Interface
 # =============================================================================
@@ -145,6 +153,9 @@ def render_startup_script(install_dir: Path, username: str) -> str:
     string, no I/O.
     """
     env_path = install_dir / "config" / ".env"
+    # Same key set the CLI writes — rendered from the one source of truth with
+    # shell variables in place of the concrete name/IP (see step 3 below).
+    ifcfg_body = render_shim_ifcfg("$SHIM_NAME", "$SHIM_IP").rstrip("\n")
 
     return f"""#!/bin/bash
 # SyrvisCore startup script (runs at boot via the rc.d hook / Task Scheduler).
@@ -178,7 +189,7 @@ fi
 
 # 3. Create the macvlan shim (host-to-container path; needs no Docker).
 if [ -n "$NETWORK_INTERFACE" ] && [ -n "$TRAEFIK_IP" ]; then
-    SHIM_NAME="syrvis-shim"
+    SHIM_NAME="{SHIM_NAME}"
     # Honor a configured SHIM_IP from .env; only compute (traefik_ip + 1) as a
     # fallback so the shim IP matches what `syrvis start` uses (no boot drift).
     SHIM_IP="${{SHIM_IP:-$(echo "$TRAEFIK_IP" | awk -F. '{{print $1"."$2"."$3"."$4+1}}')}}"
@@ -188,6 +199,22 @@ if [ -n "$NETWORK_INTERFACE" ] && [ -n "$TRAEFIK_IP" ]; then
         ip link set "$SHIM_NAME" up
         ip route add "$TRAEFIK_IP/32" dev "$SHIM_NAME"
         echo "Created macvlan shim: $SHIM_NAME ($SHIM_IP) -> $TRAEFIK_IP"
+    fi
+
+    # Keep DSM's health poller quiet (incident 2026-08-10). DSM auto-stubs
+    # ifcfg-<iface> for an interface it did not create with only
+    # BOOTPROTO=static, then logs a read failure every ~60s
+    # (SystemHealth.cpp:87 ... file_get_key_value.c:80). Write the full key set.
+    # Deliberately OUTSIDE the create guard: an already-present shim whose file
+    # DSM re-stubbed gets healed too. Check-then-write, so no churn per boot.
+    # Boot writes it early; `syrvis start` re-asserts the same content via
+    # privileged_ops.render_shim_ifcfg (one source of truth for the keys).
+    if [ -d "{NETWORK_SCRIPTS_DIR}" ]; then
+        IFCFG_PATH="{NETWORK_SCRIPTS_DIR}/ifcfg-$SHIM_NAME"
+        IFCFG_WANT="{ifcfg_body}"
+        if [ "$(cat "$IFCFG_PATH" 2>/dev/null)" != "$IFCFG_WANT" ]; then
+            printf '%s\\n' "$IFCFG_WANT" > "$IFCFG_PATH" && chmod 644 "$IFCFG_PATH"
+        fi
     fi
 fi
 
@@ -297,7 +324,7 @@ case "$1" in
             timeout 150s "{install_dir}/bin/syrvis" shutdown --reason reboot --json >/dev/null 2>&1 || true
         fi
         # Cleanup macvlan shim on shutdown (optional; always runs)
-        ip link del syrvis-shim 2>/dev/null || true
+        ip link del {SHIM_NAME} 2>/dev/null || true
         ;;
     *)
         echo "Usage: $0 {{start|stop}}"
@@ -307,6 +334,38 @@ esac
 
 exit 0
 """
+
+
+def render_shim_ifcfg(shim_name: str, shim_ip: str) -> str:
+    """Render the DSM ``ifcfg-<shim>`` content for the macvlan shim. Pure.
+
+    WHY THIS FILE EXISTS (incident 2026-08-10): DSM's health poller reads
+    ``/etc/sysconfig/network-scripts/ifcfg-<iface>`` for every interface it sees.
+    When it notices an interface it did not create — our macvlan shim — it
+    auto-stubs that file with a single ``BOOTPROTO=static`` line, then fails to
+    read the keys it actually wants and logs, every ~60 seconds:
+
+        SystemHealth.cpp:87 Failed to get interface: [syrvis-shim] information
+        [0x2000 file_get_key_value.c:80]
+
+    Writing the full key set ourselves at shim-ensure time keeps the poller
+    quiet. ``ONBOOT=no`` is load-bearing: the shim is created by SyrvisCore (CLI
+    at start, rc.d hook at boot), so DSM must never try to bring it up itself
+    from this file — the file is documentation for the poller, not a directive.
+    ``NETMASK=255.255.255.255`` matches the /32 the shim is actually assigned.
+
+    Single source of truth for the key set: the Python writer
+    (``DsmOperations._ensure_shim_ifcfg``) and the boot hook's shell equivalent
+    (``render_startup_script``) both render from here, so the two paths cannot
+    disagree.
+    """
+    return (
+        f"DEVICE={shim_name}\n"
+        "BOOTPROTO=static\n"
+        "ONBOOT=no\n"
+        f"IPADDR={shim_ip}\n"
+        "NETMASK=255.255.255.255\n"
+    )
 
 
 def _write_script_if_changed(
@@ -592,6 +651,45 @@ class DsmOperations(SystemOperations):
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             return False, f"Cannot test Docker access: {e}"
 
+    def _ensure_shim_ifcfg(self, shim_name: str, shim_ip: str) -> str:
+        """Reconcile ``ifcfg-<shim>`` so DSM's health poller can read the shim.
+
+        See :func:`render_shim_ifcfg` for what DSM does without this file (the
+        2026-08-10 ``SystemHealth.cpp:87`` log flood). Runs on EVERY ensure pass,
+        not just at creation: DSM re-stubs the file whenever it re-notices the
+        interface (and a DSM update can revert it), so a one-shot write at
+        creation would silently rot.
+
+        Two deliberate choices for the awkward cases:
+
+        * **Directory absent** (a DSM that doesn't keep ifcfg files): skip, don't
+          create it. Nothing polls a tree DSM doesn't maintain, and inventing
+          system network-config directories we don't own is the riskier move.
+        * **File carries EXTRA keys**: replaced wholesale, not merged. This file
+          is declared state rendered in full from code — same philosophy as the
+          boot hook (render → compare → rewrite on any drift). Keys that must
+          persist belong in :func:`render_shim_ifcfg`, not in a hand edit.
+
+        Never fails the shim: the interface, route, and reachability all work
+        without this file — only DSM's logging is at stake. Returns a suffix to
+        append to the caller's message (``""`` when the file was already
+        correct, so an idempotent pass stays quiet).
+        """
+        if not NETWORK_SCRIPTS_DIR.is_dir():
+            return f" (ifcfg skipped: no {NETWORK_SCRIPTS_DIR})"
+
+        path = NETWORK_SCRIPTS_DIR / f"ifcfg-{shim_name}"
+        content = render_shim_ifcfg(shim_name, shim_ip)
+
+        try:
+            # Reuses the atomic content-aware writer: compares first, so a
+            # correct file is never rewritten (no churn, no inode change).
+            _, state = _write_script_if_changed(path, content, 0o644)
+        except (OSError, PermissionError) as e:
+            return f" (ifcfg not written: {e})"
+
+        return "" if state == "unchanged" else f" (ifcfg {state})"
+
     def ensure_macvlan_shim(
         self, interface: str, traefik_ip: str, shim_ip: str
     ) -> Tuple[bool, str]:
@@ -600,8 +698,12 @@ class DsmOperations(SystemOperations):
 
         This is required because macvlan containers cannot communicate with
         their host directly. The shim interface bridges this gap.
+
+        Every successful path also reconciles the shim's DSM ifcfg file (see
+        :meth:`_ensure_shim_ifcfg`) — that write is what keeps DSM's SystemHealth
+        poller from logging a read failure every ~60s.
         """
-        shim_name = "syrvis-shim"
+        shim_name = SHIM_NAME
 
         try:
             # Check if shim interface already exists
@@ -633,7 +735,8 @@ class DsmOperations(SystemOperations):
                 route_matches = f"dev {shim_name}" in route_result.stdout
 
                 if addr_matches and route_matches:
-                    return True, f"Macvlan shim already configured ({shim_name})"
+                    ifcfg = self._ensure_shim_ifcfg(shim_name, shim_ip)
+                    return True, f"Macvlan shim already configured ({shim_name}){ifcfg}"
 
                 if not addr_matches:
                     # The shim's IP drifted (TRAEFIK_IP/SHIM_IP changed). Tear it
@@ -654,7 +757,8 @@ class DsmOperations(SystemOperations):
                         capture_output=True,
                         timeout=5,
                     )
-                    return True, f"Macvlan shim route reconciled for {traefik_ip}"
+                    ifcfg = self._ensure_shim_ifcfg(shim_name, shim_ip)
+                    return True, f"Macvlan shim route reconciled for {traefik_ip}{ifcfg}"
 
             # Create the shim interface
             # Step 1: Create macvlan interface
@@ -709,7 +813,8 @@ class DsmOperations(SystemOperations):
                 # Route might already exist, not a fatal error
                 pass
 
-            return True, f"Macvlan shim created: {shim_name} ({shim_ip}) -> {traefik_ip}"
+            ifcfg = self._ensure_shim_ifcfg(shim_name, shim_ip)
+            return True, f"Macvlan shim created: {shim_name} ({shim_ip}) -> {traefik_ip}{ifcfg}"
 
         except subprocess.TimeoutExpired:
             return False, "Timeout while configuring macvlan shim"

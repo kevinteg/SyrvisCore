@@ -9,8 +9,13 @@ reachability stays broken until a reboot.
 
 These tests fake `subprocess.run` (the real thing needs root + `ip`), dispatching
 on the `ip ...` argv so each scenario returns realistic output.
+
+They also cover the shim's DSM ifcfg file (`TestShimIfcfgFile`): DSM auto-stubs
+`/etc/sysconfig/network-scripts/ifcfg-syrvis-shim` with a lone BOOTPROTO line and
+then log-floods every ~60s, so every ensure pass rewrites the full key set.
 """
 
+import os
 from unittest.mock import Mock
 
 import pytest
@@ -106,6 +111,15 @@ class _FakeIp:
         return any(call[: len(prefix)] == list(prefix) for call in self.calls)
 
 
+EXPECTED_IFCFG = (
+    "DEVICE=syrvis-shim\n"
+    "BOOTPROTO=static\n"
+    "ONBOOT=no\n"
+    "IPADDR=192.168.1.51\n"
+    "NETMASK=255.255.255.255\n"
+)
+
+
 @pytest.fixture
 def patch_ip(monkeypatch):
     def _install(fake):
@@ -113,6 +127,27 @@ def patch_ip(monkeypatch):
         return fake
 
     return _install
+
+
+@pytest.fixture(autouse=True)
+def ifcfg_dir(tmp_path, monkeypatch):
+    """Redirect DSM's ifcfg directory into tmp for EVERY test in this module.
+
+    Autouse, and deliberately NOT created: the default state is "this host has
+    no ifcfg tree" (the skip path), which keeps the reconcile tests focused and
+    makes it impossible for any test here to write to the real /etc. Tests that
+    exercise the file call ``ifcfg_dir.mkdir()`` first.
+    """
+    d = tmp_path / "network-scripts"
+    monkeypatch.setattr("syrviscore.privileged_ops.NETWORK_SCRIPTS_DIR", d)
+    return d
+
+
+@pytest.fixture
+def ifcfg_path(ifcfg_dir):
+    """An existing ifcfg directory + the path the shim's file should land at."""
+    ifcfg_dir.mkdir()
+    return ifcfg_dir / f"ifcfg-{SHIM}"
 
 
 class TestEnsureMacvlanShimReconcile:
@@ -199,6 +234,191 @@ class TestEnsureMacvlanShimReconcile:
         assert fake.did("ip", "route", "add", f"{traefik_ip}/32", "dev", SHIM)
         # Never tears anything down on a clean create.
         assert not fake.did("ip", "link", "del")
+
+
+class TestShimIfcfgFile:
+    """The shim's DSM ifcfg file (incident 2026-08-10).
+
+    DSM's health poller reads `/etc/sysconfig/network-scripts/ifcfg-<iface>` for
+    every interface it sees. Meeting our macvlan shim, it writes a stub holding
+    only `BOOTPROTO=static`, then fails to read the keys it wants and logs
+    `SystemHealth.cpp:87 Failed to get interface: [syrvis-shim] information`
+    every ~60s. `ensure_macvlan_shim` therefore writes the full key set on every
+    pass -- a one-shot write at creation would be reverted by the next DSM update.
+    """
+
+    def test_fresh_write_when_shim_is_created(self, patch_ip, ifcfg_path):
+        """No shim, no file: the create path lays down the full key set."""
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        patch_ip(_FakeIp(exists=False))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        assert ok
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
+        assert "ifcfg created" in msg
+
+    def test_dsm_stub_is_enriched(self, patch_ip, ifcfg_path):
+        """DSM's one-line auto-stub is replaced with the full key set."""
+        ifcfg_path.write_text("BOOTPROTO=static\n")  # exactly what DSM leaves
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        fake = patch_ip(_FakeIp(exists=True, current_shim_ip=shim_ip, route_dev=SHIM))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        assert ok
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
+        assert "ifcfg updated" in msg
+        # Enriching the file must not disturb the (already correct) interface.
+        assert not fake.did("ip", "link", "del")
+        assert not fake.did("ip", "addr", "add")
+
+    def test_matching_file_is_not_rewritten(self, patch_ip, ifcfg_path):
+        """Idempotent: a correct file is left byte- and inode-identical."""
+        ifcfg_path.write_text(EXPECTED_IFCFG)
+        before = os.stat(str(ifcfg_path))
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        patch_ip(_FakeIp(exists=True, current_shim_ip=shim_ip, route_dev=SHIM))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        after = os.stat(str(ifcfg_path))
+        assert ok
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
+        # No churn: the atomic writer would have replaced the inode.
+        assert after.st_ino == before.st_ino
+        assert after.st_mtime_ns == before.st_mtime_ns
+        # A no-op pass says nothing about the file.
+        assert "ifcfg" not in msg
+
+    def test_extra_keys_are_replaced_not_merged(self, patch_ip, ifcfg_path):
+        """Documented choice: the file is declared state, rendered in full.
+
+        Hand-added keys are dropped rather than merged -- same philosophy as the
+        boot hook (render -> compare -> rewrite on any drift). Keys that must
+        survive belong in `render_shim_ifcfg`, not in a hand edit.
+        """
+        ifcfg_path.write_text(EXPECTED_IFCFG + "MTU=1500\nUSERCTL=no\n")
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        patch_ip(_FakeIp(exists=True, current_shim_ip=shim_ip, route_dev=SHIM))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        assert ok
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
+        assert "MTU" not in ifcfg_path.read_text()
+        assert "ifcfg updated" in msg
+
+    def test_ip_drift_rewrites_ipaddr(self, patch_ip, ifcfg_path):
+        """A recreated shim (new SHIM_IP) carries the new IPADDR into the file."""
+        ifcfg_path.write_text(EXPECTED_IFCFG)  # holds the OLD 192.168.1.51
+        traefik_ip, shim_ip = "192.168.1.80", "192.168.1.81"
+        patch_ip(_FakeIp(exists=True, current_shim_ip="192.168.1.51", route_dev=SHIM))
+
+        ok, _ = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        assert ok
+        assert "IPADDR=192.168.1.81\n" in ifcfg_path.read_text()
+        assert "192.168.1.51" not in ifcfg_path.read_text()
+
+    def test_route_only_reconcile_still_writes_the_file(self, patch_ip, ifcfg_path):
+        """The route-reconcile path returns early -- it must write too."""
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        patch_ip(_FakeIp(exists=True, current_shim_ip=shim_ip, route_dev=None))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        assert ok
+        assert "route reconciled" in msg
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
+
+    def test_missing_directory_skips_without_creating_it(self, patch_ip, ifcfg_dir):
+        """Degenerate case: no ifcfg tree -> skip, never mkdir system config."""
+        traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+        patch_ip(_FakeIp(exists=False))
+
+        ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+        # The shim itself still succeeds -- the file is only about DSM's logging.
+        assert ok
+        assert "created" in msg
+        assert "ifcfg skipped" in msg
+        assert not ifcfg_dir.exists()
+
+    @pytest.mark.skipif(os.getuid() == 0, reason="root ignores directory permissions")
+    def test_unwritable_directory_never_fails_the_shim(self, patch_ip, ifcfg_path):
+        """A write error is reported in the message, not raised, and never fatal."""
+        ifcfg_path.parent.chmod(0o500)
+        try:
+            traefik_ip, shim_ip = "192.168.1.50", "192.168.1.51"
+            patch_ip(_FakeIp(exists=False))
+
+            ok, msg = DsmOperations().ensure_macvlan_shim(INTERFACE, traefik_ip, shim_ip)
+
+            assert ok  # interface + route are up; only DSM's log noise remains
+            assert "ifcfg not written" in msg
+        finally:
+            ifcfg_path.parent.chmod(0o755)
+
+
+class TestStartupScriptShimIfcfg:
+    """The boot hook creates the shim in shell before any Python runs, so it
+    writes the same file itself -- otherwise a halted instance (whose
+    `reconcile --boot` starts nothing) log-floods for the whole window."""
+
+    def _content(self, tmp_path):
+        ok, _ = DsmOperations().ensure_startup_script(tmp_path / "install", "syrvisuser")
+        assert ok
+        return (tmp_path / "install" / "bin" / "syrvis-startup.sh").read_text()
+
+    def test_boot_hook_writes_the_full_key_set(self, tmp_path, ifcfg_dir):
+        content = self._content(tmp_path)
+        # Rendered from the module constant (monkeypatched here -> proves it).
+        assert f'[ -d "{ifcfg_dir}" ]' in content
+        assert f'IFCFG_PATH="{ifcfg_dir}/ifcfg-$SHIM_NAME"' in content
+        for key in ("DEVICE=$SHIM_NAME", "BOOTPROTO=static", "ONBOOT=no", "IPADDR=$SHIM_IP"):
+            assert key in content
+        assert "NETMASK=255.255.255.255" in content
+
+    def test_boot_hook_checks_before_writing(self, tmp_path):
+        content = self._content(tmp_path)
+        # Check-then-write: no churn on a boot where the file is already right.
+        assert '"$(cat "$IFCFG_PATH" 2>/dev/null)" != "$IFCFG_WANT"' in content
+
+    def test_boot_hook_heals_an_existing_shim(self, tmp_path):
+        """Placed OUTSIDE the create-if-missing guard, before the Docker wait."""
+        content = self._content(tmp_path)
+        assert content.index("IFCFG_PATH") > content.index("Created macvlan shim")
+        assert content.index("IFCFG_PATH") < content.index("DOCKER_WAIT")
+
+    def test_rendered_boot_hook_is_valid_shell(self, tmp_path):
+        import subprocess
+
+        script = tmp_path / "install" / "bin" / "syrvis-startup.sh"
+        self._content(tmp_path)
+        out = subprocess.run(
+            ["bash", "-n", str(script)], capture_output=True, text=True, timeout=10
+        )
+        assert out.returncode == 0, out.stderr
+
+    def test_render_matches_the_python_writer(self, tmp_path, ifcfg_path):
+        """The shell block and the CLI writer must agree key-for-key.
+
+        Runs the rendered shell fragment with SHIM_NAME/SHIM_IP bound, then
+        compares the file it produces to EXPECTED_IFCFG -- the exact bytes the
+        Python writer is asserted to produce above.
+        """
+        import subprocess
+
+        content = self._content(tmp_path)
+        # Up to (not including) the `fi` closing the NETWORK_INTERFACE guard, so
+        # the extracted fragment is balanced on its own.
+        head, _, _ = content.partition("\nfi\n\n# 4. Wait for Docker")
+        block = head[head.index('if [ -d "') :]
+        script = f'SHIM_NAME="{SHIM}"; SHIM_IP="192.168.1.51"\n{block}'
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+        assert out.returncode == 0, out.stderr
+        assert ifcfg_path.read_text() == EXPECTED_IFCFG
 
 
 class TestStartupScriptReconcile:
