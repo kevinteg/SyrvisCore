@@ -37,8 +37,8 @@ DEFAULT_DOCKER_IMAGES = {
     },
     "portainer": {
         "image": "portainer/portainer-ce",
-        "tag": "2.43.0-alpine",
-        "full_image": "portainer/portainer-ce:2.43.0-alpine@sha256:b39d73976b94d945f6e62ac727ca65d1cf9b46dc9d2c3c0e833ef0422469f09e",
+        "tag": "2.44.0-alpine",
+        "full_image": "portainer/portainer-ce:2.44.0-alpine@sha256:5376fd96f0bae14be7285ceb24c5cf9470dc23f19cdde74ff4c65d11cbe96eb2",
         "description": "",
     },
     "cloudflared": {
@@ -58,6 +58,10 @@ DEFAULT_DOCKER_IMAGES = {
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
         "tag": "0.5.1",
+        # NOT bumped to the ghcr 0.5.2-0.5.4 tags: those are relics of the
+        # pre-2026-07-31 force-sync era. The invariant (test_compose
+        # TestImagePinLockstep) is pin == the DASHBOARD package __version__,
+        # which advances only on a real dashboard change.
         "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.1@sha256:f6a3545b4ed1accbdda08098d89cd5c5e537cc515126f3591f5686cf02fbfc71",
         "description": "SyrvisCore web dashboard",
     },
