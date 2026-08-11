@@ -13,7 +13,7 @@
 #  karugaru/docker_state_exporter@sha256:99d984a57dd11d0d3b53d56481dec51be7a0ad7c2a7aa80a95db2facd294c60a)
 name: docker-health-exporter
 version: "1.0.0"
-image: ghcr.io/kevinteg/docker-state-exporter@sha256:a8af92185465704bb67893e39019a5dec9cd5091c3df7344c62f150a5053d511
+image: ghcr.io/kevinteg/docker-state-exporter@sha256:228a476d8d14e9f6447409921d4e8a65501e445cd6b492a5e7bcc853c6c465aa
 description: "Container state metrics (docker_state_exporter) via docker-socket-proxy"
 homepage: "https://github.com/karugaru/docker_state_exporter"
 
