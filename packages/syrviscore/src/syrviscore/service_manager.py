@@ -814,7 +814,7 @@ class ServiceManager:
 
             try:
                 domain = get_domain_from_env()
-                self.traefik_config.write_config(service, domain)
+                _, traefik_changed = self.traefik_config.write_config(service, domain)
             except ValueError as e:
                 raise RuntimeError(f"Failed to configure Traefik: {e}")
 
@@ -823,10 +823,12 @@ class ServiceManager:
                 success, msg = self._start_service(service.name, compose_path)
                 if not success:
                     raise RuntimeError(f"failed to start: {msg}")
-                self._reload_traefik()
+                if traefik_changed:
+                    self._reload_traefik()
                 message = f"Service '{service.name}' added and started{route_note}"
             else:
-                self._reload_traefik()
+                if traefik_changed:
+                    self._reload_traefik()
                 message = f"Service '{service.name}' added (not started){route_note}"
         except Exception as e:
             self._rollback_add(service.name, keep_data=preserve_data_on_rollback or adopted)
@@ -899,15 +901,23 @@ class ServiceManager:
         Traefik's file-provider watch does not reliably fire for files added to a
         subdirectory on Synology bind mounts, so a new route can sit unloaded
         until Traefik re-reads ``/config``. Restarting the container forces that.
+
+        Call this ONLY when write_config/remove_config reported a real change —
+        an unconditional call at the end of every deploy turned multi-service
+        stack sweeps into an edge-proxy restart storm (39 restarts/day). The 30s
+        timeout must stay ABOVE the static config's graceTimeOut (20s) so the
+        drain finishes and Traefik exits cleanly instead of panicking.
         Best-effort: a failure here never fails the service operation (the manual
         fallback is ``docker restart traefik``).
         """
         try:
             import docker
 
-            docker.from_env().containers.get("traefik").restart(timeout=10)
-        except Exception:  # noqa: BLE001 - best-effort; never fail the op
-            pass
+            docker.from_env().containers.get("traefik").restart(timeout=30)
+        except Exception as e:  # noqa: BLE001 - best-effort; never fail the op
+            import logging
+
+            logging.getLogger(__name__).warning("traefik reload failed: %s", e)
 
     def _rollback_add(self, name: str, keep_data: bool = False) -> None:
         """Remove every artifact created for a service (best-effort).
@@ -925,7 +935,8 @@ class ServiceManager:
         if p["compose"].exists():
             self._stop_service(name, p["compose"])
             p["compose"].unlink()
-        self.traefik_config.remove_config(name)
+        if self.traefik_config.remove_config(name):
+            self._reload_traefik()
         # A v2 app's data-bearing artifact is its whole HOME (self-contained
         # unit): dropping only home/data would leave config/secrets orphaned
         # at the location root. Legacy keeps today's data/<name> target.
@@ -1374,9 +1385,10 @@ class ServiceManager:
                 self._fire_hooks(removed_svc or name, "post-stop", force=True)
             compose_path.unlink()
 
-        # Remove Traefik config + reload so the route is dropped
-        self.traefik_config.remove_config(name)
-        self._reload_traefik()
+        # Remove Traefik config + reload so the route is dropped (no reload
+        # needed for a service that never had one)
+        if self.traefik_config.remove_config(name):
+            self._reload_traefik()
 
         # Remove service definition
         if service_dir.exists():
@@ -1756,13 +1768,17 @@ class ServiceManager:
         if not hooks_ok:
             return False, "update aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
 
-        # Regenerate compose and traefik config
+        # Regenerate compose and traefik config. Reload on a real route change —
+        # previously an update NEVER reloaded, so a changed traefik: block kept
+        # serving the old route until something else bounced the proxy.
         self._generate_compose_file(updated)
         try:
             domain = get_domain_from_env()
-            self.traefik_config.write_config(updated, domain)
+            _, traefik_changed = self.traefik_config.write_config(updated, domain)
         except ValueError as e:
             return False, f"Failed to update Traefik config: {e}"
+        if traefik_changed:
+            self._reload_traefik()
 
         # Keep the services.d declaration in step with the updated manifest
         # (content only; the operator's orchestration keys are preserved) —
@@ -1884,9 +1900,11 @@ class ServiceManager:
         self._generate_compose_file(updated)
         try:
             domain = get_domain_from_env()
-            self.traefik_config.write_config(updated, domain)
+            _, traefik_changed = self.traefik_config.write_config(updated, domain)
         except ValueError as e:
             return False, f"Failed to update Traefik config: {e}"
+        if traefik_changed:
+            self._reload_traefik()
         try:
             services_d.write_declaration_from_install(self.syrvis_home, updated)
         except Exception:  # noqa: BLE001 - best-effort; the re-pin stands
@@ -2058,17 +2076,15 @@ class ServiceManager:
 
         self._write_manifest(restored, service_dir)
         self._generate_compose_file(restored)
-        if restored.traefik.enabled and restored.traefik.subdomain:
-            try:
-                domain = get_domain_from_env()
-                self.traefik_config.write_config(restored, domain)
-            except ValueError as e:
-                return False, f"Failed to update Traefik config: {e}"
-        else:
-            # Rolling back to an unrouted revision must drop the newer route —
-            # write_config writes nothing for an unrouted service, so an
-            # explicit remove is required or the stale router lingers.
-            self.traefik_config.remove_config(name)
+        # write_config is change-aware and drops a stale route itself when the
+        # restored revision is unrouted — one call covers both directions.
+        try:
+            domain = get_domain_from_env()
+            _, traefik_changed = self.traefik_config.write_config(restored, domain)
+        except ValueError as e:
+            return False, f"Failed to update Traefik config: {e}"
+        if traefik_changed:
+            self._reload_traefik()
         try:
             # Restores CONTENT only; the operator's current enabled/critical is
             # preserved (a rollback never resurrects old orchestration).
@@ -2440,6 +2456,12 @@ class ServiceManager:
         # 1. Declaration + install/manifest. The declaration is written in BOTH
         #    branches OUTSIDE the rollback boundary (a failed deploy keeps the
         #    declared intent for a retry — the install rollback never removes it).
+        # Traefik reload is CONDITIONAL on a real route change: the fresh branch
+        # handles its own (install_declaration reloads iff write_config reported
+        # a change); the update branch sets this flag for the tail. The old
+        # unconditional reload restarted the edge proxy once per deployed
+        # service — a 12-service stack sweep meant 12 Traefik restarts.
+        traefik_changed = False
         old_image: Optional[str] = None
         if fresh:
             # install_declaration writes the declaration + creates services/<name>/
@@ -2487,6 +2509,14 @@ class ServiceManager:
             except Exception as e:  # noqa: BLE001
                 return False, f"could not write declaration for {name!r}: {e}"
             self._write_manifest(service, service_path)
+            # Keep the route in step with the updated manifest — this path never
+            # rewrote the dynamic config, so a changed traefik: block kept
+            # serving the OLD route until the next fresh install.
+            try:
+                domain = get_domain_from_env()
+                _, traefik_changed = self.traefik_config.write_config(service, domain)
+            except ValueError as e:
+                return False, f"Failed to configure Traefik: {e}"
             # Make the app home exist for the config/secret writes below —
             # exist_ok/adopting semantics (an update repairs missing slots, a
             # legacy->v2 transition over an EMPTY data root materializes them).
@@ -2527,7 +2557,8 @@ class ServiceManager:
             # services like victoria-metrics need no restart).
             if not fresh and (bundle.configs or bundle.secrets):
                 self._compose(name, compose_path, "restart", timeout=90)
-            self._reload_traefik()
+            if traefik_changed:
+                self._reload_traefik()
         except Exception as e:  # noqa: BLE001
             # Fresh: drop everything (incl. the just-created data dir) — unless
             # a pre-populated v2 home was ADOPTED (it predates this call).

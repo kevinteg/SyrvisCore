@@ -279,6 +279,10 @@ class ComposeGenerator:
             "image": image,
             "container_name": "traefik",
             "restart": "unless-stopped",
+            # Must exceed the static config's lifeCycle.graceTimeOut (20s) or
+            # every stop ends in panic("Timeout while stopping traefik") instead
+            # of a clean drain + exit 0.
+            "stop_grace_period": "30s",
             "security_opt": ["no-new-privileges:true"],
             "networks": {
                 "syrvis-macvlan": {

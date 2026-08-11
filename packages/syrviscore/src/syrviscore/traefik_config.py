@@ -203,11 +203,20 @@ api:
 # Liveness endpoint served on the API entrypoint (:8080) so health checks pass.
 ping: {{}}
 {metrics_block}
+# graceTimeOut must stay BELOW every caller's stop timeout (30s: _reload_traefik,
+# compose stop_grace_period) — equal deadlines make the drain lose the race and
+# Traefik dies in panic("Timeout while stopping traefik") instead of exiting 0.
 entryPoints:
   web:
     address: ":80"
+    transport:
+      lifeCycle:
+        graceTimeOut: "20s"
   websecure:
     address: ":443"
+    transport:
+      lifeCycle:
+        graceTimeOut: "20s"
 
 providers:
   file:
@@ -588,28 +597,48 @@ class ServiceTraefikConfig:
 
         return config
 
-    def write_config(self, service: "ServiceDefinition", domain: str) -> Optional[Path]:
-        """Write Traefik configuration file for a service.
+    def write_config(
+        self, service: "ServiceDefinition", domain: str
+    ) -> Tuple[Optional[Path], bool]:
+        """Write Traefik configuration file for a service — change-aware.
+
+        The file is only written when its rendered content differs from what is
+        on disk, and an unrouted service's stale config is removed. The returned
+        flag is the "Traefik must reload" signal: callers gate _reload_traefik()
+        on it, so a content-identical redeploy never bounces the edge proxy.
 
         Args:
             service: Service definition
             domain: Base domain
 
         Returns:
-            Path to written config file, or None if no config needed
+            (path, changed): path to the config file (None if the service is
+            unrouted), and whether the routing state Traefik sees changed
+            (file written, rewritten, or a stale one removed).
         """
         self.ensure_directory()
 
         config = self.generate_config(service, domain)
-        if not config:
-            # No Traefik config needed for this service
-            return None
-
         config_path = self.config_dir / f"{service.name}.yaml"
-        with open(config_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        if not config:
+            # No Traefik config needed — drop a stale route left by a
+            # previously routed revision, or the router lingers forever.
+            if config_path.exists():
+                config_path.unlink()
+                return None, True
+            return None, False
 
-        return config_path
+        rendered = yaml.dump(config, default_flow_style=False, sort_keys=False)
+        if config_path.exists():
+            try:
+                if config_path.read_text() == rendered:
+                    return config_path, False
+            except OSError:
+                pass  # unreadable existing file: rewrite it
+        with open(config_path, "w") as f:
+            f.write(rendered)
+
+        return config_path, True
 
     def remove_config(self, service_name: str) -> bool:
         """Remove Traefik configuration file for a service.

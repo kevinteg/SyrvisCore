@@ -151,6 +151,8 @@ class TestComposeGenerator:
         assert service["image"] == "library/traefik:v3.0.0"
         assert service["container_name"] == "traefik"
         assert service["restart"] == "unless-stopped"
+        # must exceed the static config's 20s graceTimeOut (clean drain, no panic)
+        assert service["stop_grace_period"] == "30s"
         # No port bindings - traefik has its own IP via macvlan
         assert "ports" not in service
         # Check macvlan network with static IP
