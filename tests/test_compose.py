@@ -532,6 +532,93 @@ class TestDashboard:
     def test_cloudflared_exposes_metrics(self, network_env_vars):
         svc = self._gen()._generate_cloudflared_service()
         assert "TUNNEL_METRICS=0.0.0.0:20241" in svc["environment"]
+        # 0.0.0.0 is only safe because the port is never published to the host/LAN.
+        assert "ports" not in svc
+
+
+class TestCloudflaredMetricsPort:
+    """The metrics listener is a CONTRACT: two out-of-band readers (the dashboard's
+    /ready probe and a deployment repo's Prometheus scrape of /metrics) dial it by
+    container name over `proxy`. It must be declarable, and the listener and the
+    probe must move together."""
+
+    def _gen(self):
+        gen = ComposeGenerator("nonexistent.yaml")
+        gen.load_config()
+        return gen
+
+    def _stack(self, **cloudflared_settings):
+        from syrviscore import stack as stack_mod
+
+        st = stack_mod.default_stack()
+        st.services["cloudflared"].enabled = True
+        st.services["dashboard"].enabled = True
+        st.services["cloudflared"].settings.update(cloudflared_settings)
+        return st
+
+    def test_default_port_is_the_documented_contract(self, network_env_vars):
+        from syrviscore.compose import CLOUDFLARED_METRICS_PORT
+
+        assert CLOUDFLARED_METRICS_PORT == 20241  # cloudflared's own default range
+        services = self._gen().generate_compose(stack=self._stack())["services"]
+        assert "TUNNEL_METRICS=0.0.0.0:20241" in services["cloudflared"]["environment"]
+
+    def test_metrics_port_declarable_in_stack(self, network_env_vars):
+        """A deployment repo whose scrape config targets another port declares it
+        in stack.yaml instead of forking the platform pin."""
+        services = self._gen().generate_compose(stack=self._stack(metrics_port=2000))["services"]
+        assert "TUNNEL_METRICS=0.0.0.0:2000" in services["cloudflared"]["environment"]
+        assert (
+            "CLOUDFLARED_URL=http://cloudflared:2000"
+            in services["syrviscore-dashboard"]["environment"]
+        )
+
+    def test_listener_and_probe_never_drift(self, network_env_vars):
+        """The dashboard's probe URL is rendered from the SAME declared port as the
+        listener — a drifted probe would report a healthy tunnel as down."""
+        for port in (20241, 2000, 9999):
+            services = self._gen().generate_compose(stack=self._stack(metrics_port=port))[
+                "services"
+            ]
+            listener = [
+                e for e in services["cloudflared"]["environment"] if e.startswith("TUNNEL_METRICS=")
+            ][0]
+            probe = [
+                e
+                for e in services["syrviscore-dashboard"]["environment"]
+                if e.startswith("CLOUDFLARED_URL=")
+            ][0]
+            assert listener.rsplit(":", 1)[1] == probe.rsplit(":", 1)[1] == str(port)
+
+    @pytest.mark.parametrize("bad", ["", "http", 0, 70000, -1, None])
+    def test_invalid_port_falls_back_to_the_default(self, network_env_vars, bad):
+        """A typo in stack.yaml must not render a compose file the tunnel can't
+        start on — the default is always a working listener."""
+        services = self._gen().generate_compose(stack=self._stack(metrics_port=bad))["services"]
+        assert "TUNNEL_METRICS=0.0.0.0:20241" in services["cloudflared"]["environment"]
+
+    def test_matches_dashboard_package_default(self):
+        """Cross-package lockstep: the dashboard image's compiled-in
+        `cloudflared_url` default must equal the port compose binds, so an instance
+        that never declares `metrics_port` still probes the right listener."""
+        import re
+
+        from syrviscore.compose import CLOUDFLARED_METRICS_PORT
+
+        settings_file = (
+            Path(__file__).resolve().parent.parent
+            / "packages"
+            / "syrviscore-dashboard"
+            / "src"
+            / "syrviscore_dashboard"
+            / "settings.py"
+        )
+        assert settings_file.exists(), "dashboard settings.py missing"
+        match = re.search(
+            r'cloudflared_url:\s*str\s*=\s*"http://cloudflared:(\d+)"', settings_file.read_text()
+        )
+        assert match, "dashboard cloudflared_url default not found / not in the expected form"
+        assert int(match.group(1)) == CLOUDFLARED_METRICS_PORT
 
 
 class TestImagePinLockstep:

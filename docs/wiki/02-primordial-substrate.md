@@ -28,7 +28,8 @@ services:
 
 - **Primordial** (`traefik`, `portainer`) are always on; the API refuses to disable them.
 - **Optional** (`cloudflared`, `dashboard`, `cloudflare_ddns`) are opt-in and may carry
-  generation-time settings (e.g. the dashboard's `subdomain`, per-service `exposure`).
+  generation-time settings (e.g. the dashboard's `subdomain`, per-service `exposure`,
+  cloudflared's `metrics_port`).
 
 `syrvis stack list` shows what's declared vs what's running; `syrvis stack enable/disable` edit the
 file; `syrvis stack apply` regenerates compose (and Traefik config) from it.
@@ -93,8 +94,13 @@ management. It dials **outbound** to the Cloudflare edge using `CLOUDFLARE_TUNNE
 inbound ports are opened** on your router.
 
 - Runs on the `proxy` network so the tunnel's ingress can reach Traefik.
-- Exposes its metrics/`/ready` server on `:20241` so the dashboard can report *real* tunnel
-  connectivity (edge connections), not just "container up".
+- Exposes its metrics/`/ready` server on `:20241` (`TUNNEL_METRICS=0.0.0.0:20241`) so the
+  dashboard can report *real* tunnel connectivity (edge connections), not just "container up",
+  and so a deployment repo's Prometheus/vmagent can scrape `/metrics` over `proxy` by container
+  name (`cloudflared_tunnel_ha_connections` and friends). `0.0.0.0` is safe because the port is
+  never published to the host or LAN — only containers on the internal `proxy` bridge can dial
+  it. Declare `metrics_port:` on cloudflared in `stack.yaml` to move it; the dashboard's probe
+  URL is rendered from the same value, so the listener and the probe cannot drift.
 - The tunnel's **ingress rules and Access policies are managed by home-tech**, not SyrvisCore —
   SyrvisCore only reports which hostnames want a tunnel (`stack hostnames`).
 

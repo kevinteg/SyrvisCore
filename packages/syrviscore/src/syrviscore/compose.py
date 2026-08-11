@@ -67,6 +67,35 @@ DEFAULT_DOCKER_IMAGES = {
     },
 }
 
+# The cloudflared metrics/`/ready` listener (`TUNNEL_METRICS`, the env-var form of
+# the `--metrics` flag — no argv surgery, so the `tunnel run` command stays intact).
+#
+# WHY 0.0.0.0 IS SAFE HERE: cloudflared's own default is a localhost-only listener
+# on the first free port in 20241-20245, which is reachable from inside its own
+# netns and nowhere else — useless to a sibling container, and non-deterministic to
+# boot. Binding 0.0.0.0 widens it to this container's networks, which is exactly one
+# network: the internal `proxy` bridge. The port is NEVER published (no `ports:` key
+# on the cloudflared service — see _generate_cloudflared_service), so it is not bound
+# on the NAS host and not reachable from the LAN or the internet; only containers
+# attached to `proxy` can dial it, by container name. That is the same posture
+# traefik's :8080 api/internal entrypoint already runs in.
+#
+# WHO CONSUMES IT (two out-of-band readers, which is why the port is a contract and
+# not an implementation detail):
+#   1. the SyrvisCore dashboard's tunnel probe — GET /ready, so the UI can report
+#      REAL edge connectivity rather than "container up" (see dashboard.md). Its
+#      `CLOUDFLARED_URL` is rendered from this same value, so the two cannot drift.
+#   2. a deployment repo's scraper — home-tech's vmagent scrapes /metrics over
+#      `proxy` (job_name: cloudflared) to arm the svc-edge board's tunnel row
+#      (cloudflared_tunnel_ha_connections / _total_requests / _request_errors).
+#      ha_connections == 0 while the container is UP is the tunnel failure that a
+#      container-lifecycle alert structurally cannot see.
+# Overridable per instance with the `metrics_port` setting on cloudflared in
+# config/stack.yaml (declared config, not product code) — a deployment repo whose
+# scrape config already targets another port declares it there instead of forking
+# this pin. Both consumers above follow the declared value.
+CLOUDFLARED_METRICS_PORT = 20241
+
 
 class ComposeGenerator:
     """Generate docker-compose.yaml from build configuration and environment variables."""
@@ -300,6 +329,24 @@ class ComposeGenerator:
 
         return service
 
+    def _cloudflared_metrics_port(self) -> int:
+        """The declared cloudflared metrics port (stack setting, else the default pin).
+
+        A bad value (non-integer, out of range) falls back to
+        :data:`CLOUDFLARED_METRICS_PORT` rather than rendering a compose file that
+        cloudflared would refuse to start on — a typo in stack.yaml must not take
+        the tunnel down, and the default is always a working listener.
+        """
+        stack = getattr(self, "_stack", None)
+        raw = stack.setting("cloudflared", "metrics_port", None) if stack else None
+        if raw is None:
+            return CLOUDFLARED_METRICS_PORT
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            return CLOUDFLARED_METRICS_PORT
+        return port if 1 <= port <= 65535 else CLOUDFLARED_METRICS_PORT
+
     def _generate_cloudflared_service(self) -> Optional[Dict[str, Any]]:
         """Generate Cloudflared service configuration on bridge network."""
         if "cloudflared" not in self.build_config["docker_images"]:
@@ -311,12 +358,14 @@ class ComposeGenerator:
             "image": image,
             "container_name": "cloudflared",
             "restart": "unless-stopped",
+            # No `ports:` — the metrics listener below stays inside `proxy`.
             "networks": ["proxy"],
             "environment": [
                 "TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}",
-                # Expose the metrics/`/ready` server on the proxy network so the
-                # dashboard can report real tunnel connectivity (not just container up).
-                "TUNNEL_METRICS=0.0.0.0:20241",
+                # Metrics/`/ready` on the proxy network for the dashboard's tunnel
+                # probe and a deployment repo's scraper — see CLOUDFLARED_METRICS_PORT
+                # for why 0.0.0.0 is safe and who reads it.
+                "TUNNEL_METRICS=0.0.0.0:{}".format(self._cloudflared_metrics_port()),
             ],
             "command": "tunnel --no-autoupdate run",
         }
@@ -325,7 +374,8 @@ class ComposeGenerator:
         """Generate the SyrvisCore dashboard service (web observability + management).
 
         Emitted whenever a ``dashboard`` image is configured. Runs on the ``proxy``
-        network so it can reach traefik:8080 / portainer:9000 / cloudflared:20241,
+        network so it can reach traefik:8080 / portainer:9000 / cloudflared's metrics
+        port (:20241 by default — see :data:`CLOUDFLARED_METRICS_PORT`),
         holds the docker socket for container-safe management, and mounts the
         config/data/manifest so the in-process ``syrviscore`` library resolves
         ``SYRVIS_HOME``.
@@ -355,6 +405,13 @@ class ComposeGenerator:
             "networks": ["proxy"],
             "environment": [
                 "SYRVIS_HOME=/syrvis",
+                # The tunnel probe target, rendered from the SAME declared port as
+                # cloudflared's TUNNEL_METRICS listener — pinned explicitly rather
+                # than left to the image's compiled-in default so that changing
+                # `metrics_port` moves the listener and the probe together (a
+                # silently-drifted probe would report the tunnel down while it is
+                # healthy). Harmless when cloudflared is not enabled.
+                "CLOUDFLARED_URL=http://cloudflared:{}".format(self._cloudflared_metrics_port()),
                 "DASHBOARD_AUTH_MODE=${DASHBOARD_AUTH_MODE:-none}",
                 "DASHBOARD_SESSION_SECRET=${DASHBOARD_SESSION_SECRET:-}",
                 "ENABLE_L2_MUTATIONS=${ENABLE_L2_MUTATIONS:-false}",
