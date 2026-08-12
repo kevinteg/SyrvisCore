@@ -360,9 +360,9 @@ def write_halted(
         "by": by,
         # ups/reboot auto-resume when the machine comes back up; maintenance
         # stays down across reboots until an explicit resume (see HALT_REASONS).
-        "resume_on_boot": (reason in AUTO_RESUME_REASONS)
-        if resume_on_boot is None
-        else bool(resume_on_boot),
+        "resume_on_boot": (
+            (reason in AUTO_RESUME_REASONS) if resume_on_boot is None else bool(resume_on_boot)
+        ),
         "workloads": workloads,
     }
     if result is not None:
@@ -612,9 +612,9 @@ def shutdown_instance(
     return {
         "action": "shutdown",
         "reason": reason,
-        "resume_on_boot": (reason in AUTO_RESUME_REASONS)
-        if resume_on_boot is None
-        else bool(resume_on_boot),
+        "resume_on_boot": (
+            (reason in AUTO_RESUME_REASONS) if resume_on_boot is None else bool(resume_on_boot)
+        ),
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_s": round(elapsed, 1),

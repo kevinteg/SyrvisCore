@@ -368,9 +368,7 @@ def render_shim_ifcfg(shim_name: str, shim_ip: str) -> str:
     )
 
 
-def _write_script_if_changed(
-    path: Path, content: str, mode: int
-) -> Tuple[bool, str]:
+def _write_script_if_changed(path: Path, content: str, mode: int) -> Tuple[bool, str]:
     """Write ``content`` to ``path`` (mode ``mode``) only when it differs.
 
     Content-aware: reads the current on-disk file (if any) and compares it to the
@@ -394,7 +392,9 @@ def _write_script_if_changed(
             pass
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix="." + path.name + "-", suffix=".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix="." + path.name + "-", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "w") as f:
             f.write(content)

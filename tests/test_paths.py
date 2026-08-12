@@ -405,7 +405,9 @@ class TestIsMountedVolume:
         from syrviscore import paths as paths_mod
 
         self._no_sim(monkeypatch)
-        monkeypatch.setattr(paths_mod, "resolve_volume_root", lambda loc: __import__("pathlib").Path("/"))
+        monkeypatch.setattr(
+            paths_mod, "resolve_volume_root", lambda loc: __import__("pathlib").Path("/")
+        )
         assert paths_mod.is_mounted_volume("/volume1") is True
 
     def test_sim_mode_accepts_existing_dir_under_sim_root(self, monkeypatch, tmp_path):

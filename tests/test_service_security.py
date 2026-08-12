@@ -901,9 +901,7 @@ class TestUpdateGate:
         assert field not in data
 
     @pytest.mark.parametrize("field,value", [("tier", "infra"), ("location", "/volume6")])
-    def test_two_step_update_cannot_launder_the_change(
-        self, tmp_path, monkeypatch, field, value
-    ):
+    def test_two_step_update_cannot_launder_the_change(self, tmp_path, monkeypatch, field, value):
         # probe_two_step.py: with the revert silently failing, update #2 used
         # to load the polluted manifest as its baseline, see "no change", and
         # pass the gate — regenerating compose + services.d with the smuggled
@@ -981,9 +979,7 @@ class TestAppHomeLayout:
         # manifest + dual-written declaration both carry the location
         manifest = yaml.safe_load((mgr.services_dir / "pg" / "syrvis-service.yaml").read_text())
         assert manifest["location"] == "/volume6"
-        decl = yaml.safe_load(
-            (mgr.syrvis_home / "config" / "services.d" / "pg.yaml").read_text()
-        )
+        decl = yaml.safe_load((mgr.syrvis_home / "config" / "services.d" / "pg.yaml").read_text())
         assert decl["location"] == "/volume6"
 
     def test_name_only_resolution_reads_manifest(self, tmp_path, monkeypatch):

@@ -1062,9 +1062,7 @@ class SystemValidator:
         """
         import re
 
-        m = re.search(
-            r"synogroup --member docker (\S+) syrvis-operator", content
-        )
+        m = re.search(r"synogroup --member docker (\S+) syrvis-operator", content)
         return m.group(1) if m else None
 
     def check_boot_script(self) -> CheckResult:

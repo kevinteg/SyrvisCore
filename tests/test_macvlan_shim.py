@@ -471,8 +471,7 @@ class TestStartupScriptSeamSelfHeal:
         # guarded: only touches /etc/passwd when the account exists
         assert 'grep -q "^$SEAM_USER:" /etc/passwd' in content
         assert (
-            'sed -i "s#^\\($SEAM_USER:.*\\):/sbin/nologin\\$#\\1:/bin/sh#" /etc/passwd'
-            in content
+            'sed -i "s#^\\($SEAM_USER:.*\\):/sbin/nologin\\$#\\1:/bin/sh#" /etc/passwd' in content
         )
         # strictly in the boot path, before the reconcile step
         assert content.index("SEAM_USER") < content.index("reconcile --boot")
@@ -490,7 +489,7 @@ class TestStartupScriptSeamSelfHeal:
         broken = "syrvis-operator:x:1027:100::/var/services/homes/o:/sbin/nologin"
         healthy = "syrvis-operator:x:1027:100::/var/services/homes/o:/bin/sh"
         other = "root:x:0:0::/root:/sbin/nologin"
-        script = 'SEAM_USER=syrvis-operator; printf \'%s\\n\' "$1" | {}'.format(piped)
+        script = "SEAM_USER=syrvis-operator; printf '%s\\n' \"$1\" | {}".format(piped)
         for line_in, expected in ((broken, healthy), (healthy, healthy), (other, other)):
             out = subprocess.run(
                 ["sh", "-c", script, "sh", line_in],

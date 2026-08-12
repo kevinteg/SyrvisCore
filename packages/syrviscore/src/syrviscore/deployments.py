@@ -155,7 +155,11 @@ def _config_checksums(home: Path, service, configs=None) -> Dict[str, str]:
         from . import paths as paths_mod
 
         data_dir = (
-            paths_mod.resolve_volume_root(location) / "syrviscore" / "apps" / service.name / "config"
+            paths_mod.resolve_volume_root(location)
+            / "syrviscore"
+            / "apps"
+            / service.name
+            / "config"
         )
     else:
         data_dir = Path(home) / "data" / service.name

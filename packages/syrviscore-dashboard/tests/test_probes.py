@@ -83,7 +83,7 @@ async def test_traefik_degraded_when_ping_absent_but_api_up(settings):
 
 async def test_portainer_ok(settings):
     with respx.mock:
-        respx.get("http://portainer:9000/api/status").mock(
+        respx.get("http://portainer:9000/api/system/status").mock(
             return_value=httpx.Response(200, json={"Version": "2.33.6", "InstanceID": "abc"})
         )
         async with httpx.AsyncClient() as http:
@@ -94,7 +94,9 @@ async def test_portainer_ok(settings):
 
 async def test_portainer_down(settings):
     with respx.mock:
-        respx.get("http://portainer:9000/api/status").mock(side_effect=httpx.ConnectError("x"))
+        respx.get("http://portainer:9000/api/system/status").mock(
+            side_effect=httpx.ConnectError("x")
+        )
         async with httpx.AsyncClient() as http:
             result = await probe_portainer(settings, http)
     assert result.status == Status.DOWN

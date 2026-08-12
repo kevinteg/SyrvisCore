@@ -61,6 +61,9 @@ fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "stack" ] && [ "${3}" = "hostnames" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "hostnames" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "dashboard" ] && [ "${3}" = "generate" ] && [ "${4}" = "--json" ]; then
   set -f; exec "$@"
 fi

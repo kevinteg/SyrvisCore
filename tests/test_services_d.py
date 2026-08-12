@@ -625,9 +625,7 @@ class TestLocationReplaceRefusal:
         assert row["ok"] is True, row["message"]
         new_home = home.parent / "volumes" / "volume6" / "syrviscore" / "apps" / "app"
         assert (new_home / "data").is_dir()
-        manifest = yaml.safe_load(
-            (home / "services" / "app" / "syrvis-service.yaml").read_text()
-        )
+        manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
         assert manifest["location"] == "/volume6"
 
     def test_refusal_isolates_other_services(self, home, monkeypatch):

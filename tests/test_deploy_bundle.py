@@ -505,9 +505,7 @@ class TestDeployBundleLocation:
         assert "location" not in manifest
         assert (tmp_path / "data" / "snmp-exporter" / "state.db").exists()
 
-    def test_update_location_change_proceeds_after_old_root_cleared(
-        self, tmp_path, monkeypatch
-    ):
+    def test_update_location_change_proceeds_after_old_root_cleared(self, tmp_path, monkeypatch):
         # The documented app-move bypass: clear the old data root, then the
         # re-declare/deploy with the new location goes through.
         import shutil
@@ -584,7 +582,9 @@ class TestPrePull:
     def test_pull_runs_before_up_with_900s_budget(self, tmp_path):
         mgr = self._mgr(tmp_path)
         calls = []
-        mgr._compose = lambda name, cp, *args, timeout: (calls.append((args, timeout)) or (True, ""))
+        mgr._compose = lambda name, cp, *args, timeout: (
+            calls.append((args, timeout)) or (True, "")
+        )
         ok, msg = mgr._start_service("svc", tmp_path / "c.yaml")
         assert ok and msg == "Started"
         assert calls == [(("pull",), 900), (("up", "-d"), 120)]
@@ -653,9 +653,7 @@ class TestPrePullLocalShortCircuit:
 
         mgr = ServiceManager(syrvis_home=tmp_path)
         compose_path = tmp_path / "c.yaml"
-        compose_path.write_text(
-            yaml.safe_dump({"services": {"svc": {"image": image}}})
-        )
+        compose_path.write_text(yaml.safe_dump({"services": {"svc": {"image": image}}}))
         calls = []
         mgr._compose = lambda name, cp, *args, timeout: (
             calls.append((args, timeout)) or (True, "")

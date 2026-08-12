@@ -35,6 +35,11 @@ const (
 	// tunable by env — there is no TIMEOUT_SERVER, only the API-section flags,
 	// SOCKET_PATH and LOG_LEVEL). So a single unanswerable inspect cost this
 	// process TEN MINUTES of wall clock before the proxy synthesised a 504.
+	// STILL TRUE FOR INSPECTS after home-tech forked that config on 2026-08-11: the
+	// fork widens ONE routing regex so /containers/{id}/logs reaches the streaming
+	// backend, and deliberately leaves /containers/json + /containers/{id}/json on
+	// the 10m backend — unbounding an inspect would restore exactly the hang these
+	// budgets exist to bound.
 	//
 	// THE INCIDENT: onyx-background's container wedged at the daemon (its
 	// /containers/<id>/json never returned — `docker logs` for it hung too, so the
@@ -69,10 +74,25 @@ type dockerHealthCollector struct {
 	containerInfoCache []types.ContainerJSON
 	lastseen           time.Time
 	// collectErrors is the number of containers skipped by the LAST sweep because
-	// their inspect failed, or -1 when the container list itself failed. Exported
-	// as container_state_collect_errors so a partial collection is VISIBLE rather
-	// than silently short — the whole point of the fix is that we now degrade
-	// instead of dying, and a degradation nobody can see is its own trap.
+	// their inspect did not answer within inspectTimeout, or -1 when the container
+	// list itself failed. Exported as container_state_collect_errors so a partial
+	// collection is VISIBLE rather than silently short — the whole point of the fix
+	// is that we now degrade instead of dying, and a degradation nobody can see is
+	// its own trap.
+	//
+	// ⚠ IT COUNTS OUR GIVING UP, NOT A DAEMON FAULT — measured 2026-08-11 against
+	// the homebase's proxy access log. EVERY deadline breach in a 12h window was
+	// answered HTTP 200 by dockerd, after we had already abandoned the call: a 5s
+	// deadline against inspects that took 6.2s / 10.7s / 17.1s / 21.1s. The
+	// container's state was fully retrievable; it is dropped from that scrape's
+	// series set anyway. So a non-zero value means "this container was slower than
+	// our budget", and the escalation test is the RATE, not the value — ~1/hr with
+	// never more than 1 per sweep is a SLOW container (in the homebase, traefik: see
+	// home-tech services.d/docker-socket-proxy.yaml), while a failure on every
+	// consecutive minute is a WEDGED one, the shape that caused the incident above.
+	// Knock-on worth knowing when reading a sweep's timings: the inspects share a
+	// keep-alive connection and run serially, so one slow container also delays the
+	// rest of that sweep by seconds.
 	collectErrors int
 }
 
@@ -106,9 +126,14 @@ var (
 		"container_restartcount",
 		"Number of times the container has been restarted"}
 	// Added 2026-08-10 with the non-fatal collector. 0 = a clean full sweep,
-	// N > 0 = N containers were unreadable and are MISSING from this scrape,
+	// N > 0 = N containers did not answer their inspect within inspectTimeout and
+	// are MISSING from this scrape — NOT "unreadable": the daemon answers those
+	// calls 200, just later than we wait (see the collectErrors field comment),
 	// -1 = the container list call itself failed (no container series at all).
 	// Deliberately NOT in the drop regex of home-tech's docker-health scrape job.
+	// ⚠ The HELP string below still says "their inspect failed" and is what the
+	// SHIPPED image emits into Grafana; it is left alone here because changing it
+	// only takes effect on a rebuild. Correct it with the next image rebuild.
 	collectErrorsDesc = descSource{
 		namespace + "collect_errors",
 		"Containers skipped in the last collection because their inspect failed (-1 = list failed)."}

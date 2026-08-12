@@ -1,7 +1,7 @@
 # Makefile for SyrvisCore
 # Compatible with local development and GitHub Actions
 
-.PHONY: all help clean test lint format build-manager build-service build-spk build-dashboard test-dashboard validate install dev-install check version env
+.PHONY: all help clean test lint format format-check build-manager build-service build-spk build-dashboard test-dashboard test-mcp validate install dev-install dev-install-modern check check-modern version env env-modern
 
 # Colors for output (disabled in CI)
 ifdef CI
@@ -22,8 +22,17 @@ endif
 PROJECT_ROOT := $(shell pwd)
 MANAGER_DIR := packages/syrviscore-manager
 SERVICE_DIR := packages/syrviscore
+MCP_DIR := packages/syrviscore-mcp
+DASHBOARD_DIR := packages/syrviscore-dashboard
 SRC_DIRS := $(MANAGER_DIR)/src $(SERVICE_DIR)/src
 TESTS_DIR := tests
+# Black + Ruff are static analyzers (they parse, never import), so they cover
+# every package from the pinned 3.8 env even though mcp/dashboard target 3.10+.
+# This is the union of what CI's per-job black/ruff steps check across the repo;
+# keeping lint/format-check this wide is what stops `make check` going green while
+# the mcp/dashboard CI jobs go red on formatting or lint.
+LINT_DIRS := $(SRC_DIRS) $(MCP_DIR)/src $(DASHBOARD_DIR)/src \
+             $(TESTS_DIR) $(MCP_DIR)/tests $(DASHBOARD_DIR)/tests
 DIST_DIR := dist
 BUILD_DIR := build
 BUILD_TOOLS := build-tools
@@ -50,6 +59,18 @@ PY_ENV := $(shell cat .python-version 2>/dev/null || echo syrviscore)
 # 3.8.12 matches Synology DSM's Python (see CLAUDE.md). Keep on its own line —
 # a trailing `# comment` after `:=` would fold whitespace into the value.
 PY_VERSION := 3.8.12
+
+# mcp + dashboard target modern Python (>=3.10; fastmcp/fastapi ship no 3.8
+# wheels) and run as their own CI jobs on 3.12 — never in the 3.8 SPK matrix. A
+# parallel pyenv virtualenv hosts them so their pytest suites and the mcp
+# seam-drift gen check are runnable locally without the 3.8 env fighting deps it
+# can't resolve. `make env-modern` bootstraps it; PYENV_VERSION overrides
+# .python-version for just these recipes (a version or virtualenv name wins over
+# the committed pin without an activate step).
+PY_VERSION_MODERN := 3.12.7
+PY_ENV_MODERN := syrviscore-modern
+MODERN_PYTHON := PYENV_VERSION=$(PY_ENV_MODERN) $(PYTHON)
+MODERN_PYTEST := $(MODERN_PYTHON) -m pytest
 
 # SSH deployment (for install target)
 SSH_HOST ?=
@@ -79,31 +100,51 @@ env: ## Bootstrap the pyenv virtualenv (creates it if missing) then dev-install
 	@$(MAKE) dev-install
 	@printf "$(GREEN)[SUCCESS]$(NC) Env '$(PY_ENV)' ready. .python-version pins it — 'make test' / 'make check' work without activation.\n"
 
-dev-install: ## Install both packages in editable mode with dev dependencies
+# mcp + dashboard are NOT installed here — they need Python 3.10+ (fastmcp/fastapi
+# have no 3.8 wheels), so `pip install -e` refuses in this env. `make env-modern`
+# builds their parallel 3.12 env; the 3.8 install stays manager + service only,
+# matching the CI `test`/`dev-loop` jobs that also run on 3.8.
+dev-install: ## Install manager + service in editable mode with dev dependencies (3.8)
 	@echo "$(BLUE)[INFO]$(NC) Installing syrviscore-manager and syrviscore in development mode..."
 	$(PIP) install -e "$(MANAGER_DIR)[dev]"
 	$(PIP) install -e "$(SERVICE_DIR)[dev]"
 	@echo "$(GREEN)[SUCCESS]$(NC) Development environment ready"
 	@echo "Run 'syrvisctl --version' and 'syrvis --version' to verify installation"
 
-check: lint test ## Run all checks (lint + test)
+env-modern: ## Bootstrap the 3.12 pyenv virtualenv for mcp + dashboard, then dev-install-modern
+	@command -v pyenv >/dev/null 2>&1 || { printf "$(RED)[ERROR]$(NC) pyenv not found — run: brew install pyenv pyenv-virtualenv\n"; exit 1; }
+	@pyenv virtualenv --version >/dev/null 2>&1 || { printf "$(RED)[ERROR]$(NC) pyenv-virtualenv not found — run: brew install pyenv-virtualenv\n"; exit 1; }
+	@pyenv versions --bare | grep -qx "$(PY_VERSION_MODERN)" || { printf "$(BLUE)[INFO]$(NC) Installing Python $(PY_VERSION_MODERN) (matches the mcp/dashboard CI jobs)...\n"; pyenv install -s "$(PY_VERSION_MODERN)"; }
+	@pyenv versions --bare | grep -qx "$(PY_ENV_MODERN)" || { printf "$(BLUE)[INFO]$(NC) Creating virtualenv $(PY_ENV_MODERN)...\n"; pyenv virtualenv "$(PY_VERSION_MODERN)" "$(PY_ENV_MODERN)"; }
+	@$(MAKE) dev-install-modern
+	@printf "$(GREEN)[SUCCESS]$(NC) Env '$(PY_ENV_MODERN)' ready — 'make test-mcp' / 'make test-dashboard' / 'make check-modern' run the modern-Python CI jobs locally.\n"
+
+dev-install-modern: ## Editable-install mcp + dashboard (+ the service lib they import) into the 3.12 env
+	@echo "$(BLUE)[INFO]$(NC) Installing syrviscore-mcp and syrviscore-dashboard (with the service lib) in development mode..."
+	$(MODERN_PYTHON) -m pip install -e "$(SERVICE_DIR)" -e "$(MCP_DIR)[dev]" -e "$(DASHBOARD_DIR)[dev]"
+	@echo "$(GREEN)[SUCCESS]$(NC) Modern-Python development environment ready"
+
+check: lint format-check test ## Run all pinned-3.8 checks (lint + format-check + test). Add 'make check-modern' for the mcp/dashboard jobs.
 	@echo "$(GREEN)[SUCCESS]$(NC) All checks passed!"
+
+check-modern: test-mcp test-dashboard ## Run the modern-Python CI jobs (mcp + dashboard); needs 'make env-modern' first
+	@echo "$(GREEN)[SUCCESS]$(NC) Modern-Python checks passed!"
 
 ##@ Code Quality
 
-lint: ## Run ruff linter
+lint: ## Run ruff linter over every package (static; matches the CI ruff steps)
 	@echo "$(BLUE)[INFO]$(NC) Running ruff linter..."
-	$(RUFF) check $(SRC_DIRS) $(TESTS_DIR)
+	$(RUFF) check $(LINT_DIRS)
 	@echo "$(GREEN)[SUCCESS]$(NC) Linting passed"
 
-format: ## Format code with black
+format: ## Format code with black over every package
 	@echo "$(BLUE)[INFO]$(NC) Formatting code with black..."
-	$(BLACK) $(SRC_DIRS) $(TESTS_DIR)
+	$(BLACK) $(LINT_DIRS)
 	@echo "$(GREEN)[SUCCESS]$(NC) Code formatted"
 
-format-check: ## Check code formatting without making changes
+format-check: ## Check formatting over every package without changes (matches the CI black --check steps)
 	@echo "$(BLUE)[INFO]$(NC) Checking code formatting..."
-	$(BLACK) --check $(SRC_DIRS) $(TESTS_DIR)
+	$(BLACK) --check $(LINT_DIRS)
 
 ##@ Testing
 
@@ -148,9 +189,16 @@ build-dashboard: ## Build the dashboard container image (docker; PUSH=1 to push,
 	chmod +x $(BUILD_TOOLS)/build-dashboard.sh
 	./$(BUILD_TOOLS)/build-dashboard.sh
 
-test-dashboard: ## Run the dashboard package tests (Python 3.10+)
+test-dashboard: ## Run the dashboard package tests (Python 3.10+; mirrors the CI dashboard job — needs env-modern)
 	@echo "$(BLUE)[INFO]$(NC) Running dashboard tests..."
-	$(PYTEST) packages/syrviscore-dashboard/tests -v
+	$(MODERN_PYTEST) $(DASHBOARD_DIR)/tests -v --tb=short
+
+test-mcp: ## Run the mcp package tests + seam-drift gen check (Python 3.10+; mirrors the CI mcp job — needs env-modern)
+	@echo "$(BLUE)[INFO]$(NC) Running mcp tests..."
+	$(MODERN_PYTEST) $(MCP_DIR)/tests -v --tb=short
+	@echo "$(BLUE)[INFO]$(NC) Checking generated deploy artifacts are in sync..."
+	$(MODERN_PYTHON) -m syrviscore_mcp.deploy.gen check $(MCP_DIR)/deploy
+	@echo "$(GREEN)[SUCCESS]$(NC) MCP checks passed"
 
 build-spk: build-manager ## Build SPK package (manager only)
 	@echo "$(BLUE)[INFO]$(NC) Building SPK package..."

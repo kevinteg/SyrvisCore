@@ -57,12 +57,19 @@ DEFAULT_DOCKER_IMAGES = {
     # syrviscore-lib freshness tradeoff — is a separate, still-open decision.)
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.5.1",
-        # NOT bumped to the ghcr 0.5.2-0.5.4 tags: those are relics of the
-        # pre-2026-07-31 force-sync era. The invariant (test_compose
-        # TestImagePinLockstep) is pin == the DASHBOARD package __version__,
-        # which advances only on a real dashboard change.
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.1@sha256:f6a3545b4ed1accbdda08098d89cd5c5e537cc515126f3591f5686cf02fbfc71",
+        "tag": "0.5.7",
+        # 0.5.7 and not 0.5.2: ghcr already holds 0.5.2-0.5.6, relics of the
+        # pre-2026-07-31 force-sync era when every service release pushed a
+        # dashboard image, so a real dashboard bump lands on the first free tag.
+        # The invariant (test_compose TestImagePinLockstep) is pin == the
+        # DASHBOARD package __version__, which advances only on a real dashboard
+        # change.
+        # TAG-ONLY while 0.5.7 is unbuilt: a digest exists only for a published
+        # image, and carrying 0.5.1's would pull the OLD content under the new
+        # tag. `syrvis images` reads a tag-only core pin as needs-attention —
+        # the right signal until release-service.sh publishes 0.5.7 and the
+        # repo:tag@sha256:… form is restored here.
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.7",
         "description": "SyrvisCore web dashboard",
     },
 }

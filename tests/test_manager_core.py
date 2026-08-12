@@ -253,7 +253,7 @@ class TestActivateRegeneratesBootHooks:
         def _pip_install_wheel(venv_path, wheel_path):
             script = (
                 "#!/bin/sh\n"
-                '# venv: {venv}\n'
+                "# venv: {venv}\n"
                 'printf "%s SYRVIS_HOME=%s\\n" "$*" "$SYRVIS_HOME" >> "{marker}"\n'
                 "echo fake-syrvis\n"
             ).format(venv=venv_path, marker=marker)
@@ -261,9 +261,11 @@ class TestActivateRegeneratesBootHooks:
             syrvis.write_text(script)
             syrvis.chmod(0o755)
 
-        monkeypatch.setattr(version_manager, "_create_venv", lambda p: (p / "bin").mkdir(
-            parents=True, exist_ok=True
-        ))
+        monkeypatch.setattr(
+            version_manager,
+            "_create_venv",
+            lambda p: (p / "bin").mkdir(parents=True, exist_ok=True),
+        )
         monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)
 
     def test_activate_invokes_version_regen_hook(self, home, tmp_path, monkeypatch):
@@ -286,15 +288,17 @@ class TestActivateRegeneratesBootHooks:
             # `_regen-boot-hooks` verb so we exercise the failure path.
             syrvis = venv_path / "bin" / "syrvis"
             syrvis.write_text(
-                '#!/bin/sh\n'
+                "#!/bin/sh\n"
                 'if [ "$1" = "_regen-boot-hooks" ]; then echo boom >&2; exit 7; fi\n'
                 "echo fake-syrvis\n"
             )
             syrvis.chmod(0o755)
 
-        monkeypatch.setattr(version_manager, "_create_venv", lambda p: (p / "bin").mkdir(
-            parents=True, exist_ok=True
-        ))
+        monkeypatch.setattr(
+            version_manager,
+            "_create_venv",
+            lambda p: (p / "bin").mkdir(parents=True, exist_ok=True),
+        )
         monkeypatch.setattr(version_manager, "_pip_install_wheel", _pip_install_wheel)
 
         # install_from_wheel -> activate_version -> regen (subprocess exits 7);

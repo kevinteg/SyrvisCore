@@ -1,0 +1,3444 @@
+diff --git a/docs/cli-syrvis.md b/docs/cli-syrvis.md
+index 2579b9b..8782b94 100644
+--- a/docs/cli-syrvis.md
++++ b/docs/cli-syrvis.md
+@@ -313,6 +313,73 @@ syrvis compose generate
+ 
+ ---
+ 
++### syrvis share declare / list
++
++Converge DSM shared folders to a declared payload; dump current share state.
++Full spec: [share-user-declare-spec.md](share-user-declare-spec.md).
++
++```bash
++<shares.json> | sudo syrvis share declare --json      # converge (create/assert/ACL)
++<shares.json> | sudo syrvis share declare --dry-run --json  # plan only
++sudo syrvis share list --json                          # current state (read-only)
++```
++
++**What declare does:**
++1. Validates a `syrvis-shares/v1` JSON payload from STDIN (frozen schema)
++2. Compares only the payload-named shares against DSM (blast-radius scoped)
++3. Creates missing plaintext shares, asserts hide-unauthorized/recycle-bin
++   posture, applies the principal→rw|ro ACL matrix (`"none"` = named removal)
++4. Re-reads and reports residual drift as JSON (`ok: false` + exit 1 if any)
++
++**Notes:**
++- Never deletes/renames/moves a share; unnamed ACL grants are reported, kept
++- Refuses to create encrypted shares (create-time human ceremony) and refuses
++  declared/actual encryption or volume contradictions
++- Root-only (DSM share API); over the seam it runs under `sudo -n`
++
++---
++
++### syrvis user declare / list
++
++Converge DSM local-user posture to a declared payload; dump the user database.
++Full spec: [share-user-declare-spec.md](share-user-declare-spec.md).
++
++```bash
++<users.json> | sudo syrvis user declare --json        # converge (create/shell/groups)
++<users.json> | sudo syrvis user declare --dry-run --json  # plan only
++sudo syrvis user list --json                          # current state (read-only)
++```
++
++**What declare does:**
++1. Validates a `syrvis-users/v1` JSON payload from STDIN (frozen schema)
++2. Creates missing users (`synouser --add` with a random, never-recorded
++   throwaway password — the credential ceremony stays human), asserts login
++   shells surgically, adds group memberships additively
++3. Re-asserts the seam accounts' `/bin/sh` shells in the SAME invocation
++   (any DSM user write regenerates `/etc/passwd` and would sever the seam)
++4. Re-reads and reports residual drift as JSON
++
++**Notes:**
++- NEVER touches passwords, never deletes/disables, never removes memberships
++- Refuses `administrators`/`docker` membership (root-equivalent — owner-only)
++
++---
++
++### syrvis seam verbs
++
++Emit the registered-verb catalog (the machine-readable seam contract).
++
++```bash
++syrvis seam verbs --json
++```
++
++**Notes:**
++- Read-only, no sudo; identical output to `python -m syrviscore.seam.gen verbs`
++- External tooling diffs this against its pinned expectation instead of
++  hardcoding call shapes; includes the stdin payload schemas
++
++---
++
+ ### syrvis --version
+ 
+ Display version information.
+diff --git a/docs/seam-contract.md b/docs/seam-contract.md
+index 8a2b67a..e5b9d1a 100644
+--- a/docs/seam-contract.md
++++ b/docs/seam-contract.md
+@@ -48,11 +48,11 @@ drift test asserts it).
+ 
+ | Class | Examples | Notes |
+ |---|---|---|
+-| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs`, `history` | All support `--json`; `updates` queries registries (report-only); `history` is always env-redacted |
+-| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export` | sudo only to read 0600 config; `export` is always redacted over the seam |
++| Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs`, `history`, `seam verbs` | All support `--json`; `updates` queries registries (report-only); `history` is always env-redacted; `seam verbs` emits the registry catalog (§2.5) |
++| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export`, `share declare --dry-run`, `user declare --dry-run`, `share list`, `user list` | sudo only to read 0600 config / root-only DSM state; `export` is always redacted over the seam |
+ | Converge (sudo) | `start/stop/restart`, `shutdown`, `resume`, `restart --graceful`, `stack apply`, `reconcile`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle. `shutdown`/`resume` are deliberately token-free (reversible; an unattended NUT low-battery hook must be able to fire `shutdown --reason ups`) |
+ | Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `service rollback --to N`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake; `service rollback` requires an EXPLICIT `--to` over the seam |
+-| Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context |
++| Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set`, `share declare`, `user declare` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context. The declares are converge-tier (payload-scoped, structurally non-destructive — §2.4) |
+ 
+ ### Deliberately NOT on the seam
+ 
+@@ -165,6 +165,36 @@ The argv service name is authoritative — a bundle claiming a different
+ `service.name` is rejected. Related single-file verbs: `secret set <name>`
+ (just the env_file) and `config set <name>` (a declared scheduled-job's conf).
+ 
++### 2.4 `syrvis share declare` / `syrvis user declare` — the NAS data plane
++
++The DSM shared-folder + local-user planes, converged from resolved JSON
++payloads on stdin (`syrvis-shares/v1`, `syrvis-users/v1` — frozen schemas
++exported as `syrviscore.shares.SHARES_PAYLOAD_SCHEMA` /
++`syrviscore.users.USERS_PAYLOAD_SCHEMA` and embedded in the catalog). The
++deployment renders its share registry / account posture into the payload
++client-side; SyrvisCore validates, converges only the payload-named items,
++re-reads, and reports residual drift (`--dry-run` plans without mutating;
++`share list` / `user list` are the read companions).
++
++Structural guarantees a deployment may rely on: no share is ever deleted,
++renamed, or moved; no user is ever deleted, disabled, or password-touched
++(creation installs a random throwaway; credentials stay a human ceremony);
++ACL/membership removal only for payload-named principals; encrypted-share
++creation is refused (create-time human ceremony); `administrators`/`docker`
++membership is refused; `user declare` re-asserts the seam accounts' shells in
++the same invocation (DSM regenerates `/etc/passwd` on any user write).
++Full spec: `docs/share-user-declare-spec.md`.
++
++### 2.5 `syrvis seam verbs --json` — the verb catalog (version 1)
++
++The machine-readable form of §1: every registered command (id, argv shape,
++sudo/read-only/destructive tier, stdin wire format, timeout) plus the payload
++schemas above. `python -m syrviscore.seam.gen verbs` emits the identical
++document from a bare source tree, so a deployment's CI asserts its call
++shapes against the pinned platform version and its runtime checks diff the
++deployed instance — a drift check, never codegen. `catalog_version` bumps
++only on a breaking shape change; additive fields do not.
++
+ ---
+ 
+ ## 3. Division of labor
+@@ -182,8 +212,10 @@ Verification loop for a deployment: `verify --json` (health + drift),
+ `reconcile --dry-run --json` (L2 plan), `apply --dry-run --json` (core plan),
+ `schedule list --json` (jobs + per-script sha256), `stack hostnames --json`
+ (external-state diff), `updates --json` (available container-image updates),
+-`export --json` (a redacted snapshot of the whole declared instance) — all
+-seam-readable without a break-glass login.
++`export --json` (a redacted snapshot of the whole declared instance),
++`share list --json` / `user list --json` (data-plane drift: undeclared
++shares, ACL audit, account posture), `seam verbs --json` (the deployed
++contract itself) — all seam-readable without a break-glass login.
+ 
+ ## 4. Keeping current
+ 
+diff --git a/docs/share-user-declare-spec.md b/docs/share-user-declare-spec.md
+new file mode 100644
+index 0000000..241be69
+--- /dev/null
++++ b/docs/share-user-declare-spec.md
+@@ -0,0 +1,374 @@
++# `syrvis share declare|list` + `syrvis user declare|list` — the NAS data-plane seam verbs
++
++Status: implemented (this tree). Ratified 2026-08-10. Lineage: home-tech
++design/42 D6 ("runbook-first, never blocked on the feature — the verbs
++RE-DECLARE what the runbook built"), design/45 §4/§8 (the share registry + ACL
++matrix; §11 lists these verbs as deferred-never-gating), design/51 D5 (the
++platform track owns this — *not* a tofu provider; also ratifies the additive
++`python -m syrviscore.seam.gen verbs --json` registry dump).
++
++This document is the feature spec: the decisions, the frozen payload schemas,
++the registered argv shapes, the blast-radius guards, and what is deliberately
++out of scope. The deployment-repo context it serves (share registry yaml,
++principal model, verify checks) stays in the deployment repo; nothing here
++names a concrete estate.
++
++---
++
++## 1. What these verbs are
++
++A deployment repo keeps a share registry (declared shared folders + a
++principal→`rw|ro` access matrix) and a human-account posture (local DSM users,
++`nologin` shells, `users`-only group membership). Until now the only
++reconciler was a hand runbook driven through the DSM web UI. These verbs make
++the platform the reconciler, on the platform's own converge philosophy:
++
++- `syrvis share declare` / `syrvis user declare` — read a **resolved JSON
++  payload on STDIN**, validate it against a frozen schema, and idempotently
++  converge the DSM state to it (create if missing, assert flags/ACLs/posture),
++  reporting what changed as JSON. `--dry-run` plans without mutating.
++- `syrvis share list` / `syrvis user list` — read-only JSON dumps of current
++  DSM share/user state, for drift comparison by deployment-side checks (the
++  registry's "no undeclared shares" check, ACL audits, account-posture checks).
++- `syrvis seam verbs` (+ `python -m syrviscore.seam.gen verbs`) — the
++  registered-verb catalog as JSON, so external tooling can verify a deployed
++  seam's contract instead of hardcoding call shapes (§7).
++
++Like `apply`/`deploy`, the declares are **stdin verbs**: the payload travels
++sops→memory→ssh-stdin and never touches argv/ps/logs. The seam argv is fixed
++(`share declare --json`), so nothing estate-specific ever crosses the shim.
++
++## 2. Input model — resolved payloads, not registry files
++
++The seam accepts registered argv only, and the payload follows the
++`syrvis apply` pattern: the deployment repo renders its registry
++(`shares.d/*.yaml` + its principal model) into ONE resolved, self-contained
++JSON document client-side and streams it:
++
++    <shares.json> | ssh <operator> -- sudo -n .../syrvis share declare --json
++
++**Resolved, not raw**: the registry yaml carries estate-level concepts the
++platform must not learn (dataset links, GC classes, sensitivity taxonomy,
++protocol policy, lint rules 11–15). The client-side wrapper flattens those to
++the DSM-level intent below; SyrvisCore validates and converges exactly that.
++This mirrors how `apply` receives a rendered instance bundle, not
++deployment.yaml.
++
++### 2.1 `syrvis-shares/v1`
++
++```json
++{
++  "apiVersion": "syrvis-shares/v1",
++  "shares": {
++    "Books": {
++      "volume": "/volume5",
++      "description": "Book-content resting share",
++      "hide_unauthorized": true,
++      "recycle_bin": false,
++      "encrypted": false,
++      "acl": {"kevin": "rw", "lisa": "rw", "syrvis-reader": "ro"}
++    }
++  }
++}
++```
++
++- The mapping key is the DSM share name (1–32 chars, no control chars, no
++  `/` or `\`, no leading/trailing space — DSM's own naming envelope; spaces
++  are legal, e.g. `Secure Documents`).
++- `volume`: `^/volume[0-9]{1,2}$`. The share path is derived as
++  `<volume>/<name>` — the payload never carries a free path.
++- `description`: optional, single-line, ≤ 128 chars.
++- `hide_unauthorized`: DSM's "hide sub-folders and files from users without
++  permissions" (adv. permission `hide_unreadable`). Required — the registry's
++  default-deny posture wants it explicit, not defaulted.
++- `recycle_bin`: required, same reasoning.
++- `encrypted`: required. **Assert-only** — see the encryption guard (§5.3).
++- `acl`: principal-slug → `rw | ro | none`. Principals match the platform
++  name charset (`[a-z0-9][a-z0-9_-]{0,63}`). `none` is the *named* removal
++  form: to revoke a principal you must name it — the verb never removes a
++  grant it wasn't told about (§5.2). Absent principals are reported as
++  unmanaged drift, untouched.
++
++### 2.2 `syrvis-users/v1`
++
++```json
++{
++  "apiVersion": "syrvis-users/v1",
++  "users": {
++    "kevin": {
++      "full_name": "Kevin",
++      "shell": "/sbin/nologin",
++      "groups": ["users"]
++    }
++  }
++}
++```
++
++- The mapping key is the local DSM username (platform name charset).
++- `full_name`: optional; used at create time (synouser's gecos field) and
++  reported as drift afterwards — never converged (a gecos rewrite is not
++  worth a user-database regeneration, see §6.1).
++- `shell`: `/sbin/nologin | /bin/sh` — the two postures the estate uses
++  (daily humans are nologin; seam accounts are /bin/sh). Converged by a
++  surgical, count-checked `/etc/passwd` rewrite (the provision script's
++  proven pattern), never a whole-file template.
++- `groups`: asserted memberships, **additive-only** (membership in a group
++  not listed is reported, never removed). `administrators` and `docker` are
++  refused outright — DSM's docker group is root-equivalent, and admin
++  membership is exactly what the human-identity design forbids; both stay
++  OWNER-DECISION through the DSM UI.
++
++### 2.3 Frozen schemas
++
++Both payload schemas are exported as importable constants
++(`syrviscore.shares.SHARES_PAYLOAD_SCHEMA`,
++`syrviscore.users.USERS_PAYLOAD_SCHEMA` — JSON-Schema-shaped documents) and
++the validators derive their allowed keys and enums *from* those constants, so
++code and schema cannot diverge. `tests/test_payload_schemas.py` pins the
++sha256 of each schema's canonical JSON: an accidental edit fails the test;
++a deliberate contract change updates the digest **and bumps the apiVersion**.
++Validation itself stays hand-rolled (import-light, Python 3.8, no jsonschema
++dependency on the DSM CLI) — the constant is the contract artifact, the
++validator is the enforcement.
++
++## 3. Idempotence + drift reporting
++
++`declare` is compare-then-converge, safe to re-run:
++
++1. **Plan**: read current DSM state for *only the payload-named* shares/users;
++   compute per-item actions (`create | update | unchanged`) and per-field
++   changes.
++2. **Guard**: any blast-radius violation (§5) aborts the whole payload
++   *before any mutation* — a payload is applied all-or-not-at-all at the
++   validation/guard layer (mirrors `apply`).
++3. **Converge**: execute only the differing steps, per item.
++4. **Re-read**: after mutating, read the state back and report **residual**
++   drift honestly (`converged: false` + the still-different fields). This is
++   deliberate: the DSM backend argv forms are asserted against DSM's API, and
++   a form that silently no-ops must surface as residual drift, never as a
++   false "changed" report.
++
++Report shape (both planes; `--json` contract):
++
++```json
++{
++  "dry_run": false,
++  "shares": {
++    "Books": {
++      "action": "update",
++      "changes": {"recycle_bin": {"from": true, "to": false}},
++      "acl_changes": {"lisa": {"from": null, "to": "rw"}},
++      "unmanaged_acl": ["cerebrate"],
++      "converged": true,
++      "errors": []
++    }
++  },
++  "ok": true
++}
++```
++
++Per-item backend failures land in that item's `errors` and flip top-level
++`ok` to false (exit 1); other items still converge — the reconcile-style
++aggregation, and a re-run picks up where it failed. `--dry-run` performs
++steps 1–2 only and reports the same shape with `"dry_run": true`.
++
++`list` verbs return the raw current state (shares: name, path, description,
++flag posture, encryption + mount state, permission matrix; users: name, uid,
++shell, full name, groups, expiry state) — no registry knowledge, no
++filtering: the deployment side owns the comparison.
++
++## 4. Registered argv shapes (seam registry entries)
++
++Following the `apply`/`apply_plan` precedent — the shim matches exact argv
++shapes, so dry-run is its own registered form:
++
++| id | argv (after the binary) | tier |
++|---|---|---|
++| `share_declare_plan` | `share declare --dry-run --json` | sudo + read-only |
++| `share_declare` | `share declare --json` | sudo, converge (non-destructive) |
++| `share_list` | `share list --json` | sudo + read-only |
++| `user_declare_plan` | `user declare --dry-run --json` | sudo + read-only |
++| `user_declare` | `user declare --json` | sudo, converge (non-destructive) |
++| `user_list` | `user list --json` | sudo + read-only |
++| `seam_verbs` | `seam verbs --json` | read-only, no sudo |
++
++- No slots, no positionals: the payload names its targets, so nothing
++  user-chosen crosses the argv (the strongest possible shim shape — literal
++  tokens only). No new slot kinds, no shim predicate changes.
++- **sudo on the lists** mirrors `vm_list`/`export`: the DSM backends
++  (`synowebapi`, `/etc/passwd` posture reads under the operator account,
++  synouser-owned state) are root-only; the CLI performs no privileged
++  *mutation* on those paths.
++- **Converge tier, no confirmation token**: the declares are idempotent
++  intent, structurally unable to delete or disable (§5) — the same class as
++  `apply`/`service_declare`, not `reconcile --prune`.
++- The declares are **stdin writers → script-only, never MCP tools** (seam
++  contract §1). The lists and `seam verbs` are safe candidates for future MCP
++  tools; deliberately not added in this change.
++- `Command` gains an additive `stdin` field naming the wire format a verb
++  reads (`"syrvis-shares/v1"`, `"text"`, …, default `None`) so the catalog
++  (§7) documents the stdin contract. It does not affect sudoers/shim
++  rendering.
++
++**Deployment pickup**: nothing on a live NAS changes until a release carrying
++these verbs is installed and `syrvisctl activate` runs — its seam re-sync
++(auto_seam_update) re-renders the sudoers allowlist + forced-command shim from
++this registry, at which point the seven shapes above become invocable. A
++rollback narrows the seam back. The committed
++`packages/syrviscore-mcp/deploy/` sudoers/shim artifacts are regenerated in
++this change so the G18 drift test holds.
++
++## 5. Blast-radius guards (invariants, each with tests)
++
++1. **Payload scope**: the verb reads and mutates only shares/users *named in
++   the payload*. It never enumerates-and-converges, never prunes. (The
++   read-only `list` verbs enumerate — that is their job.)
++2. **No destructive transitions, structurally**: there is no delete/disable
++   code path. A share is never deleted, renamed, or moved; a user is never
++   deleted, disabled, or expired; a group membership is never removed; an ACL
++   grant is only removed for a principal the payload explicitly names with
++   `"none"`. Deletion/disable stay OWNER-DECISION (DSM UI / break-glass),
++   per the house rule that tools print evidence, never destroy.
++3. **Encryption is create-time and human**: DSM share encryption (eCryptfs +
++   Key Manager) is a create-time property, and headless creation would put
++   key material on a process argv and Key Manager enrolment out of reach —
++   so `share declare` **refuses to create** a share declared
++   `"encrypted": true` (error `share_encrypted_create_unsupported`, pointing
++   at the deployment's runbook). For an *existing* encrypted share it
++   asserts posture only (flags + ACL) and reports mount state; it never
++   touches keys, never mounts/unmounts (`synoshare --enc_mount` stays a
++   runbook/secure-share concern). Declaring `"encrypted": false` against an
++   encrypted share (or vice versa on an existing plain share) is a
++   contradiction, not drift to fix: guard error, nothing mutated.
++4. **Privileged groups refused**: `groups` containing `administrators` or
++   `docker` fails validation (docker == root-equivalent on DSM; the seam must
++   not be able to mint an escalation).
++5. **Password boundary**: no password field exists in the schema; no code
++   path reads, sets, or changes a password of an existing user. Creating a
++   missing user requires *some* password for `synouser --add`, so create
++   installs a cryptographically random throwaway (the provision script's
++   proven pattern for the operator account), reports
++   `"password": "unset (owner ceremony required)"`, and the real credential
++   ceremony stays human (DSM UI + household password manager).
++6. **Seam self-preservation** (the design/39 §5 trap): any DSM user-database
++   write regenerates `/etc/passwd` and reverts the seam accounts
++   (`syrvis-operator`, `syrvis-reader`) to `/sbin/nologin` — which would
++   sever the very seam this verb arrived on. After its converge phase,
++   `user declare` (and, as cheap insurance, `share declare`) re-asserts
++   `/bin/sh` on both seam accounts *in the same invocation* — idempotent,
++   guarded, the boot hook's exact self-heal — and reports it under
++   `"seam_selfheal"`. The in-flight SSH session survives regardless (the
++   shell change affects new logins); the self-heal keeps the *next* call
++   alive.
++
++## 6. Backend choices (and why they diverge from the original sketch)
++
++The sketch proposed `synoshare` for shares and `synoacltool` for the ACL
++matrix. The evidence went the other way:
++
++### 6.1 User plane — proven low-level primitives
++
++Every mutation form is one the estate has already executed successfully:
++
++- **Reads**: `/etc/passwd` + `/etc/group` parsing (exactly what the
++  deployment's account checks do today). No parsing of `synouser --get`
++  bracket-text.
++- **Create**: `synouser --add <name> <random-pw> <fullname> 0 "" ""` — the
++  provision script's live-verified form.
++- **Groups**: `synogroup --memberadd <group> <member>` (additive; the
++  provision script's form, with its known caveat that very old DSMs lack
++  `--memberadd` — surfaced as a per-item error, not silently swallowed).
++- **Shell**: surgical awk-equivalent rewrite of the one passwd field, atomic
++  rename, record-count + edit-took safety checks — the provision script's
++  pattern reimplemented in Python.
++
++`synouser --modify` (unreliable across DSM versions) is not used; full-name
++drift is report-only.
++
++### 6.2 Share plane — structured `synowebapi`, not `synoshare` text
++
++There is no proven `synoshare --add`/flag-set form anywhere in the estate
++(the hand ceremony was the DSM **web UI**), `synoshare`'s text output has no
++stable parse contract, and `synoacltool` has zero prior art — while the ACL
++matrix the design actually ratified is DSM **share permissions** (the UI's
++Permissions tab), not filesystem ACEs. So the share backend drives the same
++API the UI drives, on-box as root, exactly like the VMM adapter precedent:
++
++- `synowebapi --exec api=SYNO.Core.Share method=list|get|create|set ...`
++- `synowebapi --exec api=SYNO.Core.Share.Permission method=list|set ...`
++
++JSON in/out, `success`/`error` envelope, one narrow adapter class
++(`DsmShareBackend`) holding every argv form. This is *inside* the audited
++seam (design/51 D8 forbids laptop-side DSM web-API credentials; on-box
++synowebapi under the enumerated sudoers boundary is the D5-sanctioned path).
++
++**Honesty clause**: the exact `SYNO.Core.Share*` parameter shapes are
++asserted from DSM API documentation and community usage, not yet executed
++against a live DSM 7.2 (this change ships with the NAS untouched). They are
++isolated in `DsmShareBackend` (every method carries a `VERIFY-ON-NAS` note),
++and the §3 re-read step means a wrong assumption reports as residual drift —
++loudly — instead of a false convergence. First production use is gated on
++the deployment side: run `share list` (read-only), then
++`share declare --dry-run`, and eyeball both against the registry before the
++first mutating run.
++
++### 6.3 Failure surface
++
++Backend errors raise typed `ShareError`/`UserError` (SyrvisError subclasses,
++stable `code`s) inside the per-item aggregation; the CLI boundary renders the
++`{"error": ...}` envelope for whole-payload failures (bad JSON, schema
++violation, guard refusal) exactly like `apply`.
++
++## 7. The verb catalog — `seam verbs` / `gen verbs`
++
++Contract-polish item (design/51 D5 carries it explicitly): external tooling
++must be able to *read* the seam contract instead of hardcoding it.
++
++- `registry.catalog()` — pure function serializing every `Command` (id, cli,
++  subcommand, tiers, flags/slots, positional, stdin wire format, timeout)
++  plus the payload schemas (§2.3) under `"payloads"`:
++
++```json
++{
++  "catalog_version": 1,
++  "service_version": "<__version__ or null>",
++  "commands": [ {"id": "share_declare", "cli": "syrvis",
++                 "subcommand": ["share", "declare"], "sudo": true,
++                 "read_only": false, "destructive": false,
++                 "stdin": "syrvis-shares/v1", "expect_json": true,
++                 "flags": [{"literal": "--json"}], "positional": null,
++                 "timeout_s": 240}, ... ],
++  "payloads": {"syrvis-shares/v1": {…schema…}, "syrvis-users/v1": {…schema…}}
++}
++```
++
++- **Both binocular ends emit the identical document**:
++  - `python -m syrviscore.seam.gen verbs` — build/CI-side, runnable straight
++    from a source tree with no venv (the generator's existing stdlib-only
++    promise; the ratified drift-check surface for consumers' CI).
++  - `syrvis seam verbs --json` — a registered **read-only, no-sudo** verb, so
++    a deployment can ask the *deployed* instance for its live contract over
++    the seam and diff it against the pinned expectation.
++- `catalog_version` bumps only on a breaking shape change (additive fields do
++  not), mirroring the hostnames-report convention.
++
++## 8. Deliberately out of scope
++
++- **Share/user deletion, user disable/enable, renames, volume moves** —
++  OWNER-DECISION, DSM UI / break-glass only (§5.2).
++- **Passwords, 2FA enrolment, DSM application privileges** (File Station /
++  Photos / WebDAV app grants): human ceremony and UI; the schema has no
++  fields for them, `user list` does not report app privileges.
++- **Encrypted share creation, key custody, mount/unmount** (§5.3).
++- **Filesystem ACEs (`synoacltool`) and per-principal subdirectories** inside
++  shares: the ratified matrix is share-level; subdir conventions belong to
++  the deployment's runbooks.
++- **NFS/AFP/FTP protocol toggles**: service-level DSM settings, asserted by
++  deployment-side checks, not per-share seam state.
++- **MCP tools for the new verbs** (lists are future candidates; declares are
++  stdin writers and stay script-only, per the seam contract).
++- **Client-side rendering** (`shares.d/*.yaml` → payload) and the
++  deployment's share-drift verify check: deployment-repo follow-ups; this
++  spec fixes the wire format they render to.
++- **Release/version bump**: none in this change — packaging is decided at
++  review.
+diff --git a/packages/syrviscore-mcp/deploy/ssh/syrvis-mcp-shim b/packages/syrviscore-mcp/deploy/ssh/syrvis-mcp-shim
+index 341b1a1..8e9306c 100755
+--- a/packages/syrviscore-mcp/deploy/ssh/syrvis-mcp-shim
++++ b/packages/syrviscore-mcp/deploy/ssh/syrvis-mcp-shim
+@@ -61,6 +61,9 @@ fi
+ if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "stack" ] && [ "${3}" = "hostnames" ] && [ "${4}" = "--json" ]; then
+   set -f; exec "$@"
+ fi
++if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "stack" ] && [ "${5}" = "hostnames" ] && [ "${6}" = "--json" ]; then
++  set -f; exec "$@"
++fi
+ if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "dashboard" ] && [ "${3}" = "generate" ] && [ "${4}" = "--json" ]; then
+   set -f; exec "$@"
+ fi
+@@ -70,6 +73,9 @@ fi
+ if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "service" ] && [ "${3}" = "catalog" ] && [ "${4}" = "--json" ]; then
+   set -f; exec "$@"
+ fi
++if [ $# -eq 4 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "seam" ] && [ "${3}" = "verbs" ] && [ "${4}" = "--json" ]; then
++  set -f; exec "$@"
++fi
+ if [ $# -eq 5 ] && [ "${1}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${2}" = "history" ] && [ "${3}" = "--json" ] && [ "${4}" = "--" ] && is_name "${5}"; then
+   set -f; exec "$@"
+ fi
+@@ -250,5 +256,23 @@ fi
+ if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--allow-secret-change" ] && [ "${6}" = "--json" ]; then
+   set -f; exec "$@"
+ fi
++if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "share" ] && [ "${5}" = "declare" ] && [ "${6}" = "--dry-run" ] && [ "${7}" = "--json" ]; then
++  set -f; exec "$@"
++fi
++if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "share" ] && [ "${5}" = "declare" ] && [ "${6}" = "--json" ]; then
++  set -f; exec "$@"
++fi
++if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "share" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
++  set -f; exec "$@"
++fi
++if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "user" ] && [ "${5}" = "declare" ] && [ "${6}" = "--dry-run" ] && [ "${7}" = "--json" ]; then
++  set -f; exec "$@"
++fi
++if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "user" ] && [ "${5}" = "declare" ] && [ "${6}" = "--json" ]; then
++  set -f; exec "$@"
++fi
++if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "user" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
++  set -f; exec "$@"
++fi
+ echo "syrvis-mcp-shim: command not on allowlist" >&2
+ exit 1
+diff --git a/packages/syrviscore-mcp/deploy/sudoers.d/syrviscore-mcp b/packages/syrviscore-mcp/deploy/sudoers.d/syrviscore-mcp
+index 113fb5f..676c95f 100644
+--- a/packages/syrviscore-mcp/deploy/sudoers.d/syrviscore-mcp
++++ b/packages/syrviscore-mcp/deploy/sudoers.d/syrviscore-mcp
+@@ -6,6 +6,7 @@
+ Defaults:syrvis-operator  !requiretty, env_reset, secure_path="/usr/bin:/bin:/usr/local/bin"
+ 
+ syrvis-operator ALL=(root) NOPASSWD: \
++    /volume1/syrviscore/bin/syrvis stack hostnames --json, \
+     /volume1/syrviscore/bin/syrvis export --json, \
+     /volume1/syrviscore/bin/syrvis updates --json, \
+     /volume1/syrviscore/bin/syrvis schedule list --json, \
+@@ -56,4 +57,10 @@ syrvis-operator ALL=(root) NOPASSWD: \
+     /volume1/syrviscore/bin/syrvis deploy -- *, \
+     /volume1/syrviscore/bin/syrvis apply --dry-run --json, \
+     /volume1/syrviscore/bin/syrvis apply --json, \
+-    /volume1/syrviscore/bin/syrvis apply --allow-secret-change --json
++    /volume1/syrviscore/bin/syrvis apply --allow-secret-change --json, \
++    /volume1/syrviscore/bin/syrvis share declare --dry-run --json, \
++    /volume1/syrviscore/bin/syrvis share declare --json, \
++    /volume1/syrviscore/bin/syrvis share list --json, \
++    /volume1/syrviscore/bin/syrvis user declare --dry-run --json, \
++    /volume1/syrviscore/bin/syrvis user declare --json, \
++    /volume1/syrviscore/bin/syrvis user list --json
+diff --git a/packages/syrviscore/src/syrviscore/cli.py b/packages/syrviscore/src/syrviscore/cli.py
+index dd0a199..4bb8991 100644
+--- a/packages/syrviscore/src/syrviscore/cli.py
++++ b/packages/syrviscore/src/syrviscore/cli.py
+@@ -2600,6 +2600,227 @@ def vm_adopt(guest_name, decl_name):
+     click.echo("Wrote {} — review it, set `critical`/`autostart`, then `vm list`.".format(path))
+ 
+ 
++# =============================================================================
++# NAS data plane: shared folders + local users (share/user declare|list)
++# =============================================================================
++
++
++@cli.group()
++def share():
++    """Manage DSM shared folders as declared state (docs/share-user-declare-spec.md).
++
++    `declare` converges shares to a resolved syrvis-shares/v1 payload on STDIN
++    (create if missing, assert flags + the principal ACL matrix); `list` dumps
++    the current DSM share state for deployment-side drift checks. Payload-scoped
++    and structurally non-destructive: shares are never deleted, and encrypted
++    shares are never created here (create-time human ceremony).
++    """
++    pass
++
++
++def _echo_plane_report(report, plane):
++    """Human rendering for a declare report (the --json path is the contract)."""
++    for name, entry in sorted(report[plane].items()):
++        line = "{}: {}".format(name, entry["action"])
++        if not entry.get("converged", True):
++            line += "  [NOT CONVERGED]"
++        click.echo(line)
++        for err in entry.get("errors", []):
++            click.echo("  error: {}".format(err))
++    if report.get("dry_run"):
++        click.echo("(dry run — nothing changed)")
++
++
++@share.command("declare")
++@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (operator seam)")
++@click.option("--dry-run", is_flag=True, help="Plan and report; mutate nothing")
++@handle_errors
++def share_declare(as_json, dry_run):
++    """Converge DSM shared folders to a syrvis-shares/v1 payload on STDIN (root-only).
++
++    Compare, then change only what differs (create via the DSM share API,
++    assert hide-unauthorized/recycle-bin posture, apply the principal->rw|ro
++    ACL matrix), then RE-READ and report residual drift honestly. Only shares
++    NAMED in the payload are touched; ACL removal requires naming the principal
++    with "none". Refuses encrypted-share creation and declared/actual
++    encryption or volume contradictions — those stay with the owner runbook.
++
++        <shares.json> | sudo syrvis share declare --json
++    """
++    privilege.ensure_elevated("Declaring shares requires elevated privileges.")
++    from syrviscore.shares import SharesBundle, declare_shares
++
++    try:
++        doc = read_json_stdin("shares payload")
++        bundle = SharesBundle.from_dict(doc)
++        report = declare_shares(bundle, dry_run=dry_run)
++    except SyrvisError as e:
++        if as_json:
++            json_error(e, indent=2)
++        raise
++
++    if as_json:
++        click.echo(jsonlib.dumps(report, indent=2))
++    else:
++        _echo_plane_report(report, "shares")
++    if not report["ok"]:
++        raise SystemExit(1)
++
++
++@share.command("list")
++@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
++@handle_errors
++def share_list(as_json):
++    """List ALL DSM shared folders with posture + permission matrix (read-only).
++
++    The drift-comparison read for a deployment's checks (undeclared-share
++    detection, ACL audit). Requires root (the DSM share API is root-only) —
++    run over the operator seam or with sudo.
++    """
++    from syrviscore.shares import list_shares
++
++    try:
++        report = list_shares()
++    except SyrvisError as e:
++        if as_json:
++            json_error(e, indent=2)
++        raise
++
++    if as_json:
++        click.echo(jsonlib.dumps(report, indent=2))
++        return
++    if not report["shares"]:
++        click.echo("No shared folders found.")
++        return
++    for s in report["shares"]:
++        flags = []
++        if s.get("encrypted"):
++            flags.append("encrypted")
++        if s.get("hide_unauthorized"):
++            flags.append("hide-unauthorized")
++        if s.get("recycle_bin"):
++            flags.append("recycle-bin")
++        acl = s.get("acl") or {}
++        acl_txt = ", ".join("{}:{}".format(p, lvl) for p, lvl in sorted(acl.items()))
++        click.echo(
++            "  {:<20} {:<20} [{}]  {}".format(
++                s.get("name") or "?", s.get("path") or "?", ", ".join(flags), acl_txt
++            )
++        )
++
++
++@cli.group()
++def user():
++    """Manage DSM local users as declared state (docs/share-user-declare-spec.md).
++
++    `declare` converges account posture (create if missing, login shell,
++    additive group membership) from a syrvis-users/v1 payload on STDIN; `list`
++    dumps the local user database for deployment-side checks. NEVER touches
++    passwords (creation installs a random throwaway; the credential ceremony
++    stays human), never deletes or disables, refuses privileged groups.
++    """
++    pass
++
++
++@user.command("declare")
++@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (operator seam)")
++@click.option("--dry-run", is_flag=True, help="Plan and report; mutate nothing")
++@handle_errors
++def user_declare(as_json, dry_run):
++    """Converge DSM local users to a syrvis-users/v1 payload on STDIN (root-only).
++
++    Compare, then change only what differs (synouser create with a random
++    never-recorded password, surgical login-shell assert, synogroup additive
++    membership), then RE-READ and report residual drift. Ends by re-asserting
++    the seam accounts' /bin/sh shells in the SAME invocation — any DSM user
++    write regenerates /etc/passwd and would otherwise sever the operator seam
++    (reported under "seam_selfheal").
++
++        <users.json> | sudo syrvis user declare --json
++    """
++    privilege.ensure_elevated("Declaring users requires elevated privileges.")
++    from syrviscore.users import UsersBundle, declare_users
++
++    try:
++        doc = read_json_stdin("users payload")
++        bundle = UsersBundle.from_dict(doc)
++        report = declare_users(bundle, dry_run=dry_run)
++    except SyrvisError as e:
++        if as_json:
++            json_error(e, indent=2)
++        raise
++
++    if as_json:
++        click.echo(jsonlib.dumps(report, indent=2))
++    else:
++        _echo_plane_report(report, "users")
++        for seam_user, state in sorted((report.get("seam_selfheal") or {}).items()):
++            click.echo("seam shell {}: {}".format(seam_user, state))
++    if not report["ok"]:
++        raise SystemExit(1)
++
++
++@user.command("list")
++@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
++@handle_errors
++def user_list(as_json):
++    """List DSM local users with shell + group memberships (read-only).
++
++    Reads the user database (what the deployment's account checks parse);
++    never reports passwords, shadow state, or DSM app privileges. Run over the
++    operator seam or with sudo (the user database posture is root-readable).
++    """
++    from syrviscore.users import list_users
++
++    try:
++        report = list_users()
++    except SyrvisError as e:
++        if as_json:
++            json_error(e, indent=2)
++        raise
++
++    if as_json:
++        click.echo(jsonlib.dumps(report, indent=2))
++        return
++    for u in report["users"]:
++        groups = u.get("groups")
++        click.echo(
++            "  {:<20} uid={:<6} {:<16} {}".format(
++                u["name"], u.get("uid"), u.get("shell") or "?", ",".join(groups or [])
++            )
++        )
++
++
++# =============================================================================
++# Seam introspection
++# =============================================================================
++
++
++@cli.group()
++def seam():
++    """Inspect the operator-seam contract of this instance."""
++    pass
++
++
++@seam.command("verbs")
++@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
++@handle_errors
++def seam_verbs(as_json):
++    """Emit the registered-verb catalog as JSON (the machine-readable contract).
++
++    The deployed twin of `python -m syrviscore.seam.gen verbs`: external
++    tooling diffs this against its pinned expectation instead of hardcoding
++    call shapes. Read-only, no sudo — renders from the in-process registry.
++    """
++    from syrviscore.seam.registry import catalog
++
++    doc = catalog(service_version=__version__)
++    # The catalog IS the JSON contract; the flag is accepted for seam-argv
++    # uniformity (every read verb carries --json) but both paths emit JSON.
++    del as_json
++    click.echo(jsonlib.dumps(doc, indent=2))
++
++
+ # =============================================================================
+ # Core command group (kept for backwards compatibility)
+ # =============================================================================
+diff --git a/packages/syrviscore/src/syrviscore/seam/gen.py b/packages/syrviscore/src/syrviscore/seam/gen.py
+index b875f92..7b22d72 100644
+--- a/packages/syrviscore/src/syrviscore/seam/gen.py
++++ b/packages/syrviscore/src/syrviscore/seam/gen.py
+@@ -10,6 +10,7 @@ Usage:
+     python -m syrviscore.seam.gen sudoers   > deploy/sudoers.d/syrviscore-mcp
+     python -m syrviscore.seam.gen shim      > deploy/ssh/syrvis-mcp-shim
+     python -m syrviscore.seam.gen check <dir>   # verify committed == generated
++    python -m syrviscore.seam.gen verbs         # registry catalog as JSON
+ """
+ 
+ import argparse
+@@ -24,10 +25,10 @@ from pathlib import Path
+ # so this makes the sudoers/shim/provision artifacts reproducible from any
+ # Python 3.8+ without setting up a venv. parents[2] is the package's src/ dir.
+ try:
+-    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue
++    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue, catalog
+ except ImportError:  # pragma: no cover
+     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+-    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue
++    from syrviscore.seam.registry import COMMANDS, STACK_SERVICES, Command, FlagValue, catalog
+ 
+ 
+ @dataclass(frozen=True)
+@@ -660,8 +661,23 @@ def main(argv) -> int:
+     p_check = sub.add_parser("check", help="verify committed artifacts match the defaults")
+     p_check.add_argument("dir", help="the deploy/ directory to check")
+ 
++    # The machine-readable seam contract (design lineage: consumers' CI asserts
++    # its call shapes against this dump instead of hardcoding them). The
++    # deployed twin is `syrvis seam verbs --json` — identical document. No path
++    # options: the catalog is deployment-path-independent by construction.
++    sub.add_parser("verbs", help="emit the registry catalog as JSON")
++
+     args = parser.parse_args(argv[1:])
+ 
++    if args.cmd == "verbs":
++        try:
++            from syrviscore.__version__ import __version__ as service_version
++        except ImportError:  # pragma: no cover - bare checkout without the package
++            service_version = None
++        json.dump(catalog(service_version=service_version), sys.stdout, indent=2)
++        sys.stdout.write("\n")
++        return 0
++
+     if args.cmd == "check":
+         base = Path(args.dir)
+         sud = (base / "sudoers.d" / "syrviscore-mcp").read_text()
+diff --git a/packages/syrviscore/src/syrviscore/seam/registry.py b/packages/syrviscore/src/syrviscore/seam/registry.py
+index 4d38aa8..b386e12 100644
+--- a/packages/syrviscore/src/syrviscore/seam/registry.py
++++ b/packages/syrviscore/src/syrviscore/seam/registry.py
+@@ -67,6 +67,12 @@ class Command:
+     install_path: bool = False  # append --path <home> (only 'install' supports it)
+     positional: Optional[Slot] = None  # user value placed after '--'
+     timeout_s: int = 120
++    # The wire format this verb reads on STDIN (None for argv-only verbs).
++    # Metadata for the catalog (`seam verbs` / `gen verbs`) so external tooling
++    # can see the stdin contract; it does not affect sudoers/shim rendering.
++    # Values: an apiVersion string ("syrvis-instance/v1", ...) or "text" for the
++    # raw-body writers (secret set / config set).
++    stdin: Optional[str] = None
+ 
+ 
+ # FlagValue: a Slot that supplies the value of a preceding literal flag
+@@ -128,6 +134,13 @@ COMMANDS: List[Command] = [
+         flags=["--all", "--json"],
+     ),
+     Command("service_catalog", "syrvis", ["service", "catalog"], read_only=True, flags=["--json"]),
++    # seam verbs emits this registry as a JSON catalog (see catalog() below) so
++    # a deployment can read the DEPLOYED instance's contract over the seam and
++    # diff it against its pinned expectation, instead of hardcoding call shapes.
++    # Read-only, no sudo: it renders from the in-process registry, touches
++    # nothing on disk. The build/CI-side twin is `python -m syrviscore.seam.gen
++    # verbs` (same document, runnable from a bare source tree).
++    Command("seam_verbs", "syrvis", ["seam", "verbs"], read_only=True, flags=["--json"]),
+     # history reads the deployment-revision records (data/deployments/) — always
+     # redacted (env NAMES only), 0640/0644 files, so no sudo like service_list.
+     Command(
+@@ -572,6 +585,7 @@ COMMANDS: List[Command] = [
+         destructive=False,
+         expect_json=False,
+         positional=Slot("name", KIND_NAME),
++        stdin="text",
+     ),
+     # config set writes a scheduled job's config/<name>.conf atomically as
+     # root:root 0600 — the jobs analog of secret_set (which writes a service's
+@@ -590,6 +604,7 @@ COMMANDS: List[Command] = [
+         destructive=False,
+         expect_json=False,
+         positional=Slot("name", KIND_NAME),
++        stdin="text",
+     ),
+     # deploy applies a resolved syrvis-bundle (manifest + non-secret configs +
+     # secret values) to ONE service atomically — the encapsulated services-plane
+@@ -610,6 +625,7 @@ COMMANDS: List[Command] = [
+         expect_json=False,
+         positional=Slot("name", KIND_NAME),
+         timeout_s=600,
++        stdin="syrvis-bundle/v1",
+     ),
+     # apply writes the core-tier configuration from a syrvis-instance bundle
+     # (.env + stack.yaml + the services.d declaration set) atomically — the
+@@ -626,15 +642,69 @@ COMMANDS: List[Command] = [
+         sudo=True,
+         read_only=True,
+         flags=["--dry-run", "--json"],
++        stdin="syrvis-instance/v1",
+     ),
+-    Command("apply", "syrvis", ["apply"], sudo=True, flags=["--json"]),
++    Command("apply", "syrvis", ["apply"], sudo=True, flags=["--json"], stdin="syrvis-instance/v1"),
+     Command(
+         "apply_secrets",
+         "syrvis",
+         ["apply"],
+         sudo=True,
+         flags=["--allow-secret-change", "--json"],
++        stdin="syrvis-instance/v1",
+     ),
++    # ---- NAS data plane: shared folders + local users (share/user declare) ----
++    # The declares converge DSM shares/users to a resolved JSON payload on stdin
++    # (docs/share-user-declare-spec.md). Payload-scoped and structurally
++    # non-destructive (no delete/disable code path; ACL removal only for a
++    # payload-NAMED principal), so they sit in the converge tier like apply —
++    # no confirmation token. Like apply, the dry-run plan is its own registered
++    # argv shape (the shim matches exact shapes). No slots at all: the payload
++    # names its targets, nothing user-chosen crosses the argv. Stdin writers are
++    # script-only, never MCP tools (seam contract).
++    Command(
++        "share_declare_plan",
++        "syrvis",
++        ["share", "declare"],
++        sudo=True,
++        read_only=True,
++        flags=["--dry-run", "--json"],
++        stdin="syrvis-shares/v1",
++        timeout_s=240,
++    ),
++    Command(
++        "share_declare",
++        "syrvis",
++        ["share", "declare"],
++        sudo=True,
++        flags=["--json"],
++        stdin="syrvis-shares/v1",
++        timeout_s=240,
++    ),
++    # share/user list read the CURRENT DSM state for drift comparison by the
++    # deployment's checks. sudo like vm_list/export: the backends (synowebapi,
++    # the user database) are root-only, but the CLI mutates nothing.
++    Command("share_list", "syrvis", ["share", "list"], sudo=True, read_only=True, flags=["--json"]),
++    Command(
++        "user_declare_plan",
++        "syrvis",
++        ["user", "declare"],
++        sudo=True,
++        read_only=True,
++        flags=["--dry-run", "--json"],
++        stdin="syrvis-users/v1",
++        timeout_s=240,
++    ),
++    Command(
++        "user_declare",
++        "syrvis",
++        ["user", "declare"],
++        sudo=True,
++        flags=["--json"],
++        stdin="syrvis-users/v1",
++        timeout_s=240,
++    ),
++    Command("user_list", "syrvis", ["user", "list"], sudo=True, read_only=True, flags=["--json"]),
+ ]
+ 
+ COMMANDS_BY_ID = {c.id: c for c in COMMANDS}
+@@ -646,3 +716,75 @@ def get_command(cmd_id: str) -> Command:
+     if cmd_id not in COMMANDS_BY_ID:
+         raise KeyError(f"unknown command id: {cmd_id}")
+     return COMMANDS_BY_ID[cmd_id]
++
++
++# =============================================================================
++# The verb catalog — the machine-readable seam contract
++# =============================================================================
++
++# Bumped only on a BREAKING shape change of the catalog document; additive
++# fields do not bump it (the hostnames-report convention).
++CATALOG_VERSION = 1
++
++
++def catalog(service_version: Optional[str] = None) -> dict:
++    """Serialize the registry as the seam-contract catalog (a JSON-able dict).
++
++    The one document external tooling verifies call shapes against instead of
++    hardcoding them (design lineage: the deployment repo's CI drift check).
++    Emitted identically by two consumers:
++
++    - ``python -m syrviscore.seam.gen verbs``  (build/CI-side, bare source tree)
++    - ``syrvis seam verbs --json``             (the deployed instance, over the seam)
++
++    Slots serialize as ``{"slot": {"name", "kind", "optional"}}`` and literal
++    flags as ``{"literal": "--json"}``, so a consumer can reconstruct the exact
++    accepted argv shapes. ``payloads`` carries the frozen stdin schemas for the
++    declare verbs (imported lazily; omitted if the modules are unavailable so
++    this function keeps the generator's run-anywhere property).
++    """
++
++    def _slot(slot: Slot) -> dict:
++        return {"name": slot.name, "kind": slot.kind, "optional": slot.optional}
++
++    commands = []
++    for cmd in COMMANDS:
++        flags = []
++        for flag in cmd.flags:
++            if isinstance(flag, FlagValue):
++                flags.append({"slot": _slot(flag.slot)})
++            else:
++                flags.append({"literal": flag})
++        commands.append(
++            {
++                "id": cmd.id,
++                "cli": cmd.cli,
++                "subcommand": list(cmd.subcommand),
++                "sudo": cmd.sudo,
++                "read_only": cmd.read_only,
++                "destructive": cmd.destructive,
++                "expect_json": cmd.expect_json,
++                "flags": flags,
++                "install_path": cmd.install_path,
++                "positional": _slot(cmd.positional) if cmd.positional else None,
++                "timeout_s": cmd.timeout_s,
++                "stdin": cmd.stdin,
++            }
++        )
++
++    payloads = {}
++    try:  # lazy + guarded: keeps the module import-light and gen run-anywhere
++        from syrviscore.shares import SHARES_API_VERSION, SHARES_PAYLOAD_SCHEMA
++        from syrviscore.users import USERS_API_VERSION, USERS_PAYLOAD_SCHEMA
++
++        payloads[SHARES_API_VERSION] = SHARES_PAYLOAD_SCHEMA
++        payloads[USERS_API_VERSION] = USERS_PAYLOAD_SCHEMA
++    except ImportError:  # pragma: no cover - only a partial/foreign install
++        pass
++
++    return {
++        "catalog_version": CATALOG_VERSION,
++        "service_version": service_version,
++        "commands": commands,
++        "payloads": payloads,
++    }
+diff --git a/packages/syrviscore/src/syrviscore/shares.py b/packages/syrviscore/src/syrviscore/shares.py
+new file mode 100644
+index 0000000..913de9e
+--- /dev/null
++++ b/packages/syrviscore/src/syrviscore/shares.py
+@@ -0,0 +1,633 @@
++"""
++DSM shared folders as declared state — the ``syrvis share declare|list`` plane.
++
++A deployment repo keeps a share registry (declared shared folders + a
++principal->rw|ro access matrix); these verbs make the platform its reconciler
++(docs/share-user-declare-spec.md). The payload is the RESOLVED DSM-level
++intent, rendered client-side from the registry and streamed over the operator
++seam on stdin (the ``apply`` pattern — nothing estate-specific crosses argv):
++
++    <shares.json> | sudo syrvis share declare --json
++
++Converge philosophy: compare, then change only what differs, then RE-READ and
++report residual drift honestly. The backend drives DSM's own web API on-box
++(``synowebapi --exec api=SYNO.Core.Share*`` — the API the DSM UI drives,
++root-only, JSON in/out; the same adapter precedent as vms.py). Every API call
++shape is isolated in :class:`DsmShareBackend` with a VERIFY-ON-NAS note: the
++shapes are asserted from DSM documentation, not yet executed against a live
++DSM, and the post-apply re-read turns a wrong assumption into loud residual
++drift instead of a false convergence.
++
++Blast-radius invariants (each has a test):
++
++- Only shares NAMED in the payload are read or touched — never
++  enumerate-and-converge (the read-only ``list`` verb enumerates; that is its
++  job, and the deployment's drift check owns the comparison).
++- Structurally non-destructive: no delete/rename/move code path exists. An
++  ACL grant is removed only for a principal the payload explicitly names with
++  ``"none"``; unnamed principals are reported as unmanaged drift, untouched.
++- Encryption is a CREATE-TIME, human decision: creating a share declared
++  ``encrypted: true`` is refused (Key Manager + key custody cannot ride a
++  headless argv); an existing encrypted share gets posture asserted only.
++  A declared/actual encryption mismatch is a contradiction -> guard error.
++
++Kept import-light and Python 3.8-clean (stdlib only — this also keeps the seam
++generator's run-from-source-tree property when it imports the schema).
++"""
++
++import json
++import re
++import subprocess
++from typing import Any, Callable, Dict, List, Optional, Tuple
++
++from syrviscore.errors import SyrvisError
++from syrviscore.service_schema import NAME_RE
++
++SHARES_API_VERSION = "syrvis-shares/v1"
++
++# ---------------------------------------------------------------------------
++# The frozen payload schema — the wire contract artifact.
++#
++# JSON-Schema-shaped, exported for external tooling (the catalog embeds it) and
++# the SOURCE the validator below derives its allowed keys/enums from, so code
++# and contract cannot diverge. tests/test_payload_schemas.py pins its sha256:
++# an accidental edit fails the test; a deliberate contract change updates the
++# digest AND bumps SHARES_API_VERSION.
++# ---------------------------------------------------------------------------
++
++SHARE_NAME_MAX = 32  # DSM's own shared-folder name cap
++DESCRIPTION_MAX = 128
++ACL_LEVELS = ("rw", "ro", "none")  # "none" = the NAMED removal form
++VOLUME_PATTERN = r"^/volume[0-9]{1,2}$"
++PRINCIPAL_PATTERN = NAME_RE.pattern  # principal slugs share the platform charset
++
++SHARES_PAYLOAD_SCHEMA = {
++    "$id": "syrvis-shares/v1",
++    "type": "object",
++    "required": ["apiVersion", "shares"],
++    "additionalProperties": False,
++    "properties": {
++        "apiVersion": {"const": SHARES_API_VERSION},
++        "shares": {
++            "type": "object",
++            "minProperties": 1,
++            "additionalProperties": {
++                "type": "object",
++                "required": ["volume", "hide_unauthorized", "recycle_bin", "encrypted", "acl"],
++                "additionalProperties": False,
++                "properties": {
++                    "volume": {"type": "string", "pattern": VOLUME_PATTERN},
++                    "description": {"type": "string", "maxLength": DESCRIPTION_MAX},
++                    "hide_unauthorized": {"type": "boolean"},
++                    "recycle_bin": {"type": "boolean"},
++                    "encrypted": {"type": "boolean"},
++                    "acl": {
++                        "type": "object",
++                        "propertyNames": {"pattern": PRINCIPAL_PATTERN},
++                        "additionalProperties": {"enum": list(ACL_LEVELS)},
++                    },
++                },
++            },
++        },
++    },
++}
++
++# Derived from the schema so the validator can never quietly diverge from the
++# published contract (the schema is the source; these are its projections).
++_SHARE_PROPS = SHARES_PAYLOAD_SCHEMA["properties"]["shares"]["additionalProperties"]
++ALLOWED_SHARE_KEYS = frozenset(_SHARE_PROPS["properties"].keys())
++REQUIRED_SHARE_KEYS = frozenset(_SHARE_PROPS["required"])
++
++_VOLUME_RE = re.compile(VOLUME_PATTERN)
++_PRINCIPAL_RE = re.compile(PRINCIPAL_PATTERN)
++
++
++class ShareError(SyrvisError):
++    """An invalid shares payload, a guard refusal, or a DSM backend failure."""
++
++    code = "share_plane_error"
++
++
++def _no_control(value: str) -> bool:
++    return not any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)
++
++
++def _valid_share_name(name: Any) -> bool:
++    """DSM's naming envelope: 1-32 chars, printable, no path separators, no
++    leading/trailing space (spaces INSIDE are legal — e.g. 'Secure Documents')."""
++    if not isinstance(name, str) or not name or len(name) > SHARE_NAME_MAX:
++        return False
++    if not _no_control(name) or "/" in name or "\\" in name:
++        return False
++    return name == name.strip()
++
++
++class SharesBundle:
++    """A validated ``syrvis-shares/v1`` payload (mapping of share name -> spec)."""
++
++    def __init__(self, shares: Dict[str, Dict[str, Any]]):
++        self.shares = shares
++
++    @classmethod
++    def from_dict(cls, data: Any) -> "SharesBundle":
++        if not isinstance(data, dict):
++            raise ShareError("shares payload must be a mapping")
++        unknown = set(data.keys()) - {"apiVersion", "shares"}
++        if unknown:
++            raise ShareError(
++                "unknown payload keys: {} (allowed: apiVersion, shares)".format(
++                    ", ".join(sorted(unknown))
++                )
++            )
++        api = data.get("apiVersion")
++        if api != SHARES_API_VERSION:
++            raise ShareError(
++                "unsupported payload apiVersion {!r} (expected {!r})".format(
++                    api, SHARES_API_VERSION
++                )
++            )
++        raw = data.get("shares")
++        if not isinstance(raw, dict) or not raw:
++            raise ShareError("'shares' must be a non-empty mapping of share name -> spec")
++
++        shares: Dict[str, Dict[str, Any]] = {}
++        for name, spec in raw.items():
++            shares[name] = cls._parse_share(name, spec)
++        return cls(shares)
++
++    @staticmethod
++    def _parse_share(name: Any, spec: Any) -> Dict[str, Any]:
++        if not _valid_share_name(name):
++            raise ShareError(
++                "invalid share name {!r} (1-{} printable chars, no /\\, no edge spaces)".format(
++                    name, SHARE_NAME_MAX
++                )
++            )
++        if not isinstance(spec, dict):
++            raise ShareError("share {!r} must be a mapping".format(name))
++        unknown = set(spec.keys()) - ALLOWED_SHARE_KEYS
++        if unknown:
++            raise ShareError(
++                "share {!r}: unknown keys {} (allowed: {})".format(
++                    name, ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_SHARE_KEYS))
++                )
++            )
++        missing = REQUIRED_SHARE_KEYS - set(spec.keys())
++        if missing:
++            raise ShareError(
++                "share {!r}: missing required keys {}".format(name, ", ".join(sorted(missing)))
++            )
++
++        volume = spec["volume"]
++        if not isinstance(volume, str) or not _VOLUME_RE.fullmatch(volume):
++            raise ShareError(
++                "share {!r}: volume {!r} must match {}".format(name, volume, VOLUME_PATTERN)
++            )
++        for flag in ("hide_unauthorized", "recycle_bin", "encrypted"):
++            if not isinstance(spec[flag], bool):
++                raise ShareError("share {!r}: {!r} must be a boolean".format(name, flag))
++
++        description = spec.get("description", "")
++        if (
++            not isinstance(description, str)
++            or len(description) > DESCRIPTION_MAX
++            or not _no_control(description)
++        ):
++            raise ShareError(
++                "share {!r}: description must be a single-line string of at most "
++                "{} chars".format(name, DESCRIPTION_MAX)
++            )
++
++        acl = spec["acl"]
++        if not isinstance(acl, dict):
++            raise ShareError(
++                "share {!r}: 'acl' must be a mapping of principal -> level".format(name)
++            )
++        for principal, level in acl.items():
++            if not isinstance(principal, str) or not _PRINCIPAL_RE.fullmatch(principal):
++                raise ShareError(
++                    "share {!r}: invalid ACL principal {!r} (must match {})".format(
++                        name, principal, PRINCIPAL_PATTERN
++                    )
++                )
++            if level not in ACL_LEVELS:
++                raise ShareError(
++                    "share {!r}: ACL level for {!r} must be one of {} (got {!r})".format(
++                        name, principal, "/".join(ACL_LEVELS), level
++                    )
++                )
++
++        return {
++            "volume": volume,
++            "description": description,
++            "hide_unauthorized": spec["hide_unauthorized"],
++            "recycle_bin": spec["recycle_bin"],
++            "encrypted": spec["encrypted"],
++            "acl": dict(acl),
++        }
++
++
++# ---------------------------------------------------------------------------
++# The DSM backend (synowebapi) — the ONLY privileged surface of this module.
++# ---------------------------------------------------------------------------
++
++
++class DsmShareBackend:
++    """Drives DSM shared folders via ``synowebapi --exec`` (root-only).
++
++    ``run`` is injectable so the backend is fully testable without a NAS: it
++    receives the argv list and returns (stdout, returncode) — the vms.py
++    adapter pattern. In production it defaults to a subprocess call (the seam
++    invokes share verbs under ``sudo -n``).
++
++    VERIFY-ON-NAS: the SYNO.Core.Share / SYNO.Core.Share.Permission parameter
++    shapes below are asserted from DSM API documentation and community usage,
++    not yet executed against a live DSM 7.2. First production use is gated on
++    ``share list`` + ``share declare --dry-run`` reading sanely (spec §6.2);
++    the declare path's post-apply re-read reports any wrong assumption as
++    residual drift.
++    """
++
++    SHARE_API = "SYNO.Core.Share"
++    PERM_API = "SYNO.Core.Share.Permission"
++
++    # The `additional` fields we ask list/get for — the posture the payload
++    # declares plus what the deployment's checks want to see.
++    _ADDITIONAL = json.dumps(
++        [
++            "hidden",
++            "encryption",
++            "enable_recycle_bin",
++            "recycle_bin_admin_only",
++            "hide_unreadable",
++            "vol_path",
++            "desc",
++        ]
++    )
++
++    def __init__(
++        self,
++        binary: str = "/usr/syno/bin/synowebapi",
++        run: Optional[Callable[[List[str]], Any]] = None,
++        timeout_s: int = 60,
++    ) -> None:
++        self._binary = binary
++        self._timeout = timeout_s
++        self._run = run or self._subprocess_run
++
++    def _subprocess_run(self, argv: List[str]):
++        proc = subprocess.run(argv, capture_output=True, text=True, timeout=self._timeout)
++        return proc.stdout, proc.returncode
++
++    def _exec(self, api: str, method: str, version: int = 1, **params: str) -> Dict[str, Any]:
++        argv = [
++            self._binary,
++            "--exec",
++            "api={}".format(api),
++            "version={}".format(version),
++            "method={}".format(method),
++        ]
++        for key, value in params.items():
++            argv.append("{}={}".format(key, value))
++        try:
++            stdout, rc = self._run(argv)
++        except Exception as exc:  # noqa: BLE001 - synowebapi missing / timeout
++            raise ShareError("synowebapi call failed: {}".format(exc))
++        try:
++            data = json.loads(stdout or "{}")
++        except ValueError:
++            raise ShareError("synowebapi returned non-JSON (rc={})".format(rc))
++        if not data.get("success", False):
++            err = data.get("error") or {}
++            raise ShareError("DSM API error on {}.{}: {}".format(api, method, err or "unknown"))
++        return data.get("data") or {}
++
++    # -- reads ---------------------------------------------------------------
++
++    def list_shares(self) -> List[Dict[str, Any]]:
++        """All shared folders with posture fields (the ``share list`` read)."""
++        data = self._exec(self.SHARE_API, "list", additional=self._ADDITIONAL)
++        return list(data.get("shares") or [])
++
++    def get_share(self, name: str) -> Optional[Dict[str, Any]]:
++        """One share's info, or None if it does not exist.
++
++        Implemented via list-and-pick rather than ``method=get``: a get on a
++        missing name raises an opaque DSM error code, while the list form lets
++        "absent" be a clean None (and one list call serves a whole payload via
++        the plan's cache).
++        """
++        for share in self.list_shares():
++            if share.get("name") == name:
++                return share
++        return None
++
++    def get_permissions(self, name: str) -> List[Dict[str, Any]]:
++        """The share's local-user permission rows (principal-level rw/ro/deny).
++
++        VERIFY-ON-NAS: Share.Permission list is user_group_type-filtered; we
++        read local users only (principals are local DSM users by design).
++        """
++        data = self._exec(
++            self.PERM_API,
++            "list",
++            name=_q(name),
++            user_group_type="local_user",
++        )
++        return list(data.get("items") or [])
++
++    # -- mutations (create / set / permissions) ------------------------------
++
++    def create_share(self, name: str, volume: str, description: str) -> None:
++        """Create a PLAINTEXT share (encrypted creation is refused upstream)."""
++        shareinfo = json.dumps(
++            {"name": name, "vol_path": volume, "desc": description}, sort_keys=True
++        )
++        self._exec(self.SHARE_API, "create", name=_q(name), shareinfo=shareinfo)
++
++    def set_share(self, name: str, fields: Dict[str, Any]) -> None:
++        """Assert posture fields on an existing share (partial shareinfo)."""
++        shareinfo = json.dumps(fields, sort_keys=True)
++        self._exec(self.SHARE_API, "set", name=_q(name), shareinfo=shareinfo)
++
++    def set_permission(self, name: str, principal: str, level: str) -> None:
++        """Set one local user's share-level permission (rw / ro / none).
++
++        VERIFY-ON-NAS: the permission row shape mirrors what Permission.list
++        returns; ``none`` clears both grants (no deny row — default-deny does
++        the rest, and a deny row is a stronger state than "not granted").
++        """
++        row = {
++            "name": principal,
++            "type": "local_user",
++            "is_writable": level == "rw",
++            "is_readonly": level == "ro",
++            "is_deny": False,
++            "is_custom": False,
++        }
++        self._exec(
++            self.PERM_API,
++            "set",
++            name=_q(name),
++            user_group_info=json.dumps([row], sort_keys=True),
++        )
++
++
++def _q(value: str) -> str:
++    """Quote a share name for a synowebapi string parameter.
++
++    synowebapi parses ``key=value`` params itself; wrapping the value in JSON
++    string quotes keeps names with spaces ('Secure Documents') one token AND
++    one well-formed API string. Each param is ONE argv element (list-form
++    subprocess, never a shell), so this is encoding, not escaping.
++    """
++    return json.dumps(value)
++
++
++# ---------------------------------------------------------------------------
++# Normalization: DSM's share/permission rows -> the payload's field vocabulary
++# ---------------------------------------------------------------------------
++
++
++def _norm_share(raw: Dict[str, Any]) -> Dict[str, Any]:
++    """Project a DSM share row onto the payload vocabulary (tolerant reads:
++    a field DSM did not return maps to None and simply reports as drift)."""
++    enc = raw.get("encryption")
++    encrypted = None if enc is None else bool(enc)
++    vol_path = raw.get("vol_path")
++    return {
++        "name": raw.get("name"),
++        "volume": vol_path,
++        "path": "{}/{}".format(vol_path, raw.get("name")) if vol_path else None,
++        "description": raw.get("desc"),
++        "hide_unauthorized": raw.get("hide_unreadable"),
++        "recycle_bin": raw.get("enable_recycle_bin"),
++        "encrypted": encrypted,
++        # eCryptfs shares report a mount state through the encryption field on
++        # DSM (1=mounted, 2=unmounted per observed API dumps) — surfaced raw so
++        # the deployment's checks can alert on an unmounted encrypted share.
++        "encryption_raw": enc,
++    }
++
++
++def _norm_perms(rows: List[Dict[str, Any]]) -> Dict[str, str]:
++    """Permission rows -> {principal: 'rw'|'ro'} (deny/none rows drop out)."""
++    out: Dict[str, str] = {}
++    for row in rows:
++        principal = row.get("name")
++        if not principal or row.get("is_deny"):
++            continue
++        if row.get("is_writable"):
++            out[principal] = "rw"
++        elif row.get("is_readonly"):
++            out[principal] = "ro"
++    return out
++
++
++# ---------------------------------------------------------------------------
++# Plan -> converge -> re-read
++# ---------------------------------------------------------------------------
++
++_POSTURE_FIELDS = ("hide_unauthorized", "recycle_bin")
++
++# payload field -> the DSM shareinfo key set_share writes
++_SET_FIELD_MAP = {
++    "hide_unauthorized": "hide_unreadable",
++    "recycle_bin": "enable_recycle_bin",
++}
++
++
++def plan_shares(bundle: SharesBundle, backend: DsmShareBackend) -> Dict[str, Any]:
++    """Compute the per-share converge plan. Read-only; guard violations raise.
++
++    Guards run HERE, before any mutation, so a payload is applied
++    all-or-not-at-all at the guard layer (mirrors apply's validation-first
++    posture): encrypted-create refusals and encryption contradictions abort
++    the whole payload with nothing changed.
++    """
++    plan: Dict[str, Any] = {}
++    for name, spec in bundle.shares.items():
++        current_raw = backend.get_share(name)
++        entry: Dict[str, Any] = {
++            "spec": spec,
++            "changes": {},
++            "acl_changes": {},
++            "unmanaged_acl": [],
++        }
++        if current_raw is None:
++            if spec["encrypted"]:
++                raise ShareError(
++                    "share {!r}: refusing to create an ENCRYPTED share headlessly "
++                    "(Key Manager enrolment and key custody are a human, create-time "
++                    "ceremony — see the deployment runbook); create it there, then "
++                    "re-declare".format(name),
++                )
++            entry["action"] = "create"
++            entry["changes"] = {
++                field: {"from": None, "to": spec[field]}
++                for field in ("volume", "description") + _POSTURE_FIELDS
++            }
++            entry["acl_changes"] = {
++                principal: {"from": None, "to": level}
++                for principal, level in sorted(spec["acl"].items())
++                if level != "none"
++            }
++            plan[name] = entry
++            continue
++
++        current = _norm_share(current_raw)
++        if current["encrypted"] is not None and bool(current["encrypted"]) != spec["encrypted"]:
++            # A declared/actual encryption mismatch is a CONTRADICTION (share
++            # encryption is create-time), not drift to fix. Refuse loudly.
++            raise ShareError(
++                "share {!r}: declared encrypted={} but the share is encrypted={} — "
++                "encryption is a create-time property; fix the declaration or "
++                "recreate the share via the runbook".format(
++                    name, spec["encrypted"], bool(current["encrypted"])
++                )
++            )
++        if current["volume"] is not None and current["volume"] != spec["volume"]:
++            # Moving a share between volumes is a data migration, not a flag.
++            raise ShareError(
++                "share {!r}: declared volume {!r} but the share lives on {!r} — "
++                "moving a share is OWNER-DECISION (runbook), never a converge".format(
++                    name, spec["volume"], current["volume"]
++                )
++            )
++
++        for field in _POSTURE_FIELDS:
++            if current[field] is None or bool(current[field]) != spec[field]:
++                entry["changes"][field] = {"from": current[field], "to": spec[field]}
++
++        current_acl = _norm_perms(backend.get_permissions(name))
++        for principal, level in sorted(spec["acl"].items()):
++            have = current_acl.get(principal)
++            want = None if level == "none" else level
++            if have != want:
++                entry["acl_changes"][principal] = {"from": have, "to": want}
++        entry["unmanaged_acl"] = sorted(set(current_acl) - set(spec["acl"]))
++
++        entry["action"] = "update" if (entry["changes"] or entry["acl_changes"]) else "unchanged"
++        plan[name] = entry
++    return plan
++
++
++def apply_share_plan(plan: Dict[str, Any], backend: DsmShareBackend) -> Tuple[Dict[str, Any], bool]:
++    """Execute a plan, re-read, and report — returns (report, ok).
++
++    Per-share backend failures land in that share's ``errors`` and flip ok
++    False; other shares still converge (reconcile-style aggregation — a re-run
++    is idempotent and picks up where it failed).
++    """
++    report: Dict[str, Any] = {}
++    ok = True
++    for name, entry in plan.items():
++        spec = entry["spec"]
++        result = {
++            "action": entry["action"],
++            "changes": entry["changes"],
++            "acl_changes": entry["acl_changes"],
++            "unmanaged_acl": entry["unmanaged_acl"],
++            "converged": True,
++            "errors": [],
++        }
++        try:
++            if entry["action"] == "create":
++                backend.create_share(name, spec["volume"], spec["description"])
++            if entry["action"] in ("create", "update"):
++                set_fields = {
++                    _SET_FIELD_MAP[f]: spec[f]
++                    for f in _POSTURE_FIELDS
++                    if entry["action"] == "create" or f in entry["changes"]
++                }
++                if set_fields:
++                    backend.set_share(name, set_fields)
++                for principal, change in entry["acl_changes"].items():
++                    backend.set_permission(name, principal, spec["acl"].get(principal, "none"))
++        except ShareError as e:
++            result["errors"].append(str(e))
++            result["converged"] = False
++            ok = False
++            report[name] = result
++            continue
++
++        # Re-read and report RESIDUAL drift honestly: an imperfect backend
++        # assumption must surface here, never as a silent false convergence.
++        try:
++            residual = _residual_drift(name, spec, backend)
++        except ShareError as e:
++            result["errors"].append("post-apply re-read failed: {}".format(e))
++            result["converged"] = False
++            ok = False
++            report[name] = result
++            continue
++        if residual:
++            result["residual"] = residual
++            result["converged"] = False
++            ok = False
++        report[name] = result
++    return report, ok
++
++
++def _residual_drift(name: str, spec: Dict[str, Any], backend: DsmShareBackend) -> Dict[str, Any]:
++    residual: Dict[str, Any] = {}
++    current_raw = backend.get_share(name)
++    if current_raw is None:
++        return {"share": "still missing after create"}
++    current = _norm_share(current_raw)
++    for field in _POSTURE_FIELDS:
++        if current[field] is None or bool(current[field]) != spec[field]:
++            residual[field] = {"actual": current[field], "declared": spec[field]}
++    current_acl = _norm_perms(backend.get_permissions(name))
++    for principal, level in spec["acl"].items():
++        want = None if level == "none" else level
++        if current_acl.get(principal) != want:
++            residual.setdefault("acl", {})[principal] = {
++                "actual": current_acl.get(principal),
++                "declared": want,
++            }
++    return residual
++
++
++def declare_shares(
++    bundle: SharesBundle,
++    backend: Optional[DsmShareBackend] = None,
++    dry_run: bool = False,
++) -> Dict[str, Any]:
++    """The library entry behind ``syrvis share declare [--dry-run]``."""
++    backend = backend or DsmShareBackend()
++    plan = plan_shares(bundle, backend)
++    if dry_run:
++        shares_report = {
++            name: {
++                "action": entry["action"],
++                "changes": entry["changes"],
++                "acl_changes": entry["acl_changes"],
++                "unmanaged_acl": entry["unmanaged_acl"],
++            }
++            for name, entry in plan.items()
++        }
++        return {"dry_run": True, "shares": shares_report, "ok": True}
++    shares_report, ok = apply_share_plan(plan, backend)
++    return {"dry_run": False, "shares": shares_report, "ok": ok}
++
++
++def list_shares(backend: Optional[DsmShareBackend] = None) -> Dict[str, Any]:
++    """The library entry behind ``syrvis share list --json`` (read-only).
++
++    Enumerates ALL shares with normalized posture + the permission matrix; the
++    deployment side owns the comparison against its registry (undeclared-share
++    detection, ACL audit). No registry knowledge lives here.
++    """
++    backend = backend or DsmShareBackend()
++    out: List[Dict[str, Any]] = []
++    for raw in backend.list_shares():
++        share = _norm_share(raw)
++        name = share.get("name")
++        try:
++            share["acl"] = _norm_perms(backend.get_permissions(name)) if name else {}
++        except ShareError as e:
++            share["acl"] = None
++            share["acl_error"] = str(e)
++        out.append(share)
++    return {"shares": sorted(out, key=lambda s: s.get("name") or "")}
+diff --git a/packages/syrviscore/src/syrviscore/users.py b/packages/syrviscore/src/syrviscore/users.py
+new file mode 100644
+index 0000000..159bf32
+--- /dev/null
++++ b/packages/syrviscore/src/syrviscore/users.py
+@@ -0,0 +1,556 @@
++"""
++DSM local users as declared state — the ``syrvis user declare|list`` plane.
++
++A deployment repo declares its human-account posture (local DSM users,
++``nologin`` shells, ``users``-only group membership); this verb converges DSM
++to it from a resolved JSON payload on stdin (docs/share-user-declare-spec.md):
++
++    <users.json> | sudo syrvis user declare --json
++
++Unlike the share plane, every mutation here uses a form the estate has already
++executed live (the seam provision script + runbooks): ``synouser --add`` for
++create, ``synogroup --memberadd`` for membership, and a surgical, count-checked
++``/etc/passwd`` rewrite for the login shell. Reads come straight from
++``/etc/passwd`` + ``/etc/group`` (exactly what the deployment's account checks
++parse today) — no bracket-text parsing of ``synouser --get``.
++
++Hard boundaries (each has a test):
++
++- **Passwords are never touched.** The schema has no password field and no
++  code path reads or changes one. Creating a MISSING user requires some
++  password for ``synouser --add``, so create installs a cryptographically
++  random throwaway (the provision script's proven pattern) and reports
++  ``password: unset (owner ceremony required)`` — the real credential ceremony
++  stays human.
++- **Structurally non-destructive**: no delete/disable/expire code path; group
++  membership is additive-only (extra memberships are reported, never removed).
++- **No privilege minting**: asserting membership of ``administrators`` or
++  ``docker`` (root-equivalent on DSM) is refused at validation.
++- **Seam self-preservation**: ANY DSM user-database write regenerates
++  ``/etc/passwd`` and reverts the seam accounts (``syrvis-operator``,
++  ``syrvis-reader``) to ``/sbin/nologin`` — severing the seam this verb
++  arrived on. After converging, :func:`heal_seam_shells` re-asserts
++  ``/bin/sh`` on both in the SAME invocation (the boot hook's self-heal,
++  reported under ``seam_selfheal``). The in-flight SSH session survives
++  regardless; the heal keeps the NEXT call alive.
++
++Kept import-light and Python 3.8-clean (stdlib only).
++"""
++
++import os
++import re
++import secrets
++import subprocess
++import tempfile
++from pathlib import Path
++from typing import Any, Callable, Dict, List, Optional, Tuple
++
++from syrviscore.errors import SyrvisError
++from syrviscore.service_schema import NAME_RE
++
++USERS_API_VERSION = "syrvis-users/v1"
++
++# ---------------------------------------------------------------------------
++# The frozen payload schema — the wire contract artifact (see shares.py for
++# the freeze mechanics; tests/test_payload_schemas.py pins the sha256).
++# ---------------------------------------------------------------------------
++
++FULL_NAME_MAX = 64
++ALLOWED_SHELLS = ("/sbin/nologin", "/bin/sh")
++# DSM's docker group is root-equivalent and admin membership is exactly what
++# the human-identity posture forbids — the seam must not be able to mint
++# either. OWNER-DECISION through the DSM UI only.
++FORBIDDEN_GROUPS = frozenset({"administrators", "docker"})
++USERNAME_PATTERN = NAME_RE.pattern
++
++USERS_PAYLOAD_SCHEMA = {
++    "$id": "syrvis-users/v1",
++    "type": "object",
++    "required": ["apiVersion", "users"],
++    "additionalProperties": False,
++    "properties": {
++        "apiVersion": {"const": USERS_API_VERSION},
++        "users": {
++            "type": "object",
++            "minProperties": 1,
++            "propertyNames": {"pattern": USERNAME_PATTERN},
++            "additionalProperties": {
++                "type": "object",
++                "required": ["shell", "groups"],
++                "additionalProperties": False,
++                "properties": {
++                    "full_name": {"type": "string", "maxLength": FULL_NAME_MAX},
++                    "shell": {"enum": list(ALLOWED_SHELLS)},
++                    "groups": {
++                        "type": "array",
++                        "items": {
++                            "type": "string",
++                            "pattern": USERNAME_PATTERN,
++                            "not": {"enum": sorted(FORBIDDEN_GROUPS)},
++                        },
++                    },
++                },
++            },
++        },
++    },
++}
++
++_USER_PROPS = USERS_PAYLOAD_SCHEMA["properties"]["users"]["additionalProperties"]
++ALLOWED_USER_KEYS = frozenset(_USER_PROPS["properties"].keys())
++REQUIRED_USER_KEYS = frozenset(_USER_PROPS["required"])
++
++_USERNAME_RE = re.compile(USERNAME_PATTERN)
++
++# The operator-seam accounts DSM keeps reverting to nologin (design lineage:
++# the provision script + boot hook heal exactly these two).
++SEAM_SHELL_USERS = ("syrvis-operator", "syrvis-reader")
++SEAM_SHELL = "/bin/sh"
++
++PASSWD_PATH = Path("/etc/passwd")
++GROUP_PATH = Path("/etc/group")
++
++
++class UserError(SyrvisError):
++    """An invalid users payload, a guard refusal, or a DSM backend failure."""
++
++    code = "user_plane_error"
++
++
++def _no_control(value: str) -> bool:
++    return not any(ord(c) < 0x20 or ord(c) == 0x7F for c in value)
++
++
++class UsersBundle:
++    """A validated ``syrvis-users/v1`` payload (mapping of username -> spec)."""
++
++    def __init__(self, users: Dict[str, Dict[str, Any]]):
++        self.users = users
++
++    @classmethod
++    def from_dict(cls, data: Any) -> "UsersBundle":
++        if not isinstance(data, dict):
++            raise UserError("users payload must be a mapping")
++        unknown = set(data.keys()) - {"apiVersion", "users"}
++        if unknown:
++            raise UserError(
++                "unknown payload keys: {} (allowed: apiVersion, users)".format(
++                    ", ".join(sorted(unknown))
++                )
++            )
++        api = data.get("apiVersion")
++        if api != USERS_API_VERSION:
++            raise UserError(
++                "unsupported payload apiVersion {!r} (expected {!r})".format(api, USERS_API_VERSION)
++            )
++        raw = data.get("users")
++        if not isinstance(raw, dict) or not raw:
++            raise UserError("'users' must be a non-empty mapping of username -> spec")
++
++        users: Dict[str, Dict[str, Any]] = {}
++        for name, spec in raw.items():
++            users[name] = cls._parse_user(name, spec)
++        return cls(users)
++
++    @staticmethod
++    def _parse_user(name: Any, spec: Any) -> Dict[str, Any]:
++        if not isinstance(name, str) or not _USERNAME_RE.fullmatch(name):
++            raise UserError("invalid username {!r} (must match {})".format(name, USERNAME_PATTERN))
++        if not isinstance(spec, dict):
++            raise UserError("user {!r} must be a mapping".format(name))
++        unknown = set(spec.keys()) - ALLOWED_USER_KEYS
++        if unknown:
++            raise UserError(
++                "user {!r}: unknown keys {} (allowed: {})".format(
++                    name, ", ".join(sorted(unknown)), ", ".join(sorted(ALLOWED_USER_KEYS))
++                )
++            )
++        missing = REQUIRED_USER_KEYS - set(spec.keys())
++        if missing:
++            raise UserError(
++                "user {!r}: missing required keys {}".format(name, ", ".join(sorted(missing)))
++            )
++
++        shell = spec["shell"]
++        if shell not in ALLOWED_SHELLS:
++            raise UserError(
++                "user {!r}: shell must be one of {} (got {!r})".format(
++                    name, ", ".join(ALLOWED_SHELLS), shell
++                )
++            )
++
++        groups = spec["groups"]
++        if not isinstance(groups, list) or not all(
++            isinstance(g, str) and NAME_RE.fullmatch(g) for g in groups
++        ):
++            raise UserError(
++                "user {!r}: 'groups' must be a list of group names matching {}".format(
++                    name, NAME_RE.pattern
++                )
++            )
++        forbidden = FORBIDDEN_GROUPS.intersection(groups)
++        if forbidden:
++            raise UserError(
++                "user {!r}: refusing to assert membership of {} — privileged group "
++                "membership is OWNER-DECISION (DSM UI), never a seam converge".format(
++                    name, ", ".join(sorted(forbidden))
++                )
++            )
++
++        full_name = spec.get("full_name", "")
++        if (
++            not isinstance(full_name, str)
++            or len(full_name) > FULL_NAME_MAX
++            or not _no_control(full_name)
++            or ":" in full_name  # a colon would corrupt the passwd gecos field
++        ):
++            raise UserError(
++                "user {!r}: full_name must be a single-line string of at most "
++                "{} chars with no ':'".format(name, FULL_NAME_MAX)
++            )
++
++        return {
++            "full_name": full_name,
++            "shell": shell,
++            "groups": sorted(set(groups)),
++        }
++
++
++# ---------------------------------------------------------------------------
++# The DSM backend — /etc/passwd + /etc/group reads, proven-form mutations.
++# ---------------------------------------------------------------------------
++
++
++class DsmUserBackend:
++    """DSM local-user state via the user database files + synouser/synogroup.
++
++    Paths and ``run`` are injectable so the backend is fully testable without
++    a NAS (and a test can never touch the real /etc). Mutations assume the
++    caller is root (the seam invokes user verbs under ``sudo -n``).
++    """
++
++    def __init__(
++        self,
++        passwd_path: Path = PASSWD_PATH,
++        group_path: Path = GROUP_PATH,
++        run: Optional[Callable[[List[str]], Any]] = None,
++        timeout_s: int = 30,
++    ) -> None:
++        self._passwd = Path(passwd_path)
++        self._group = Path(group_path)
++        self._timeout = timeout_s
++        self._run = run or self._subprocess_run
++
++    def _subprocess_run(self, argv: List[str]):
++        proc = subprocess.run(argv, capture_output=True, text=True, timeout=self._timeout)
++        return proc.stdout + proc.stderr, proc.returncode
++
++    # -- reads (the user database files — what the estate's checks parse) ----
++
++    def _passwd_rows(self) -> List[List[str]]:
++        try:
++            text = self._passwd.read_text()
++        except OSError as e:
++            raise UserError("cannot read {}: {}".format(self._passwd, e))
++        return [line.split(":") for line in text.splitlines() if line and ":" in line]
++
++    def get_user(self, name: str) -> Optional[Dict[str, Any]]:
++        """The passwd row projected to a dict, or None if absent."""
++        for row in self._passwd_rows():
++            if row[0] == name and len(row) >= 7:
++                return {
++                    "name": row[0],
++                    "uid": int(row[2]) if row[2].isdigit() else None,
++                    "full_name": row[4],
++                    "home": row[5],
++                    "shell": row[6],
++                }
++        return None
++
++    def list_users(self) -> List[Dict[str, Any]]:
++        """All passwd rows (the ``user list`` read enumerates; declare never does)."""
++        return [
++            {
++                "name": row[0],
++                "uid": int(row[2]) if row[2].isdigit() else None,
++                "full_name": row[4],
++                "home": row[5],
++                "shell": row[6],
++            }
++            for row in self._passwd_rows()
++            if len(row) >= 7
++        ]
++
++    def groups_of(self, name: str) -> List[str]:
++        """Group names listing ``name`` as a member (secondary memberships)."""
++        try:
++            text = self._group.read_text()
++        except OSError as e:
++            raise UserError("cannot read {}: {}".format(self._group, e))
++        out = []
++        for line in text.splitlines():
++            parts = line.split(":")
++            if len(parts) >= 4:
++                members = [m for m in parts[3].split(",") if m]
++                if name in members:
++                    out.append(parts[0])
++        return sorted(out)
++
++    # -- mutations (live-verified forms only) --------------------------------
++
++    def add_user(self, name: str, full_name: str) -> None:
++        """Create a local user via the provision script's proven synouser form.
++
++        The mandatory password argument is a cryptographically random throwaway
++        that is never recorded anywhere — the account is unusable until the
++        human credential ceremony sets a real one (spec §5.5). It transits the
++        NAS-local process table for the duration of the call, exactly like the
++        provisioning path; acceptable for a random discard, and the reason no
++        code path ever accepts a CHOSEN password.
++        """
++        randpw = secrets.token_hex(24)
++        # DSM synouser --add: username password "full name" expired(0|1) mail AppPrivilege
++        _, rc = self._run_checked(
++            ["/usr/syno/sbin/synouser", "--add", name, randpw, full_name, "0", "", ""]
++        )
++        if rc != 0:
++            raise UserError(
++                "synouser --add {} failed (rc={}); create the user via DSM "
++                "Control Panel and re-declare".format(name, rc)
++            )
++
++    def add_to_group(self, group: str, member: str) -> None:
++        """Additive membership via synogroup --memberadd (never replaces a list)."""
++        out, rc = self._run_checked(["/usr/syno/sbin/synogroup", "--memberadd", group, member])
++        if rc != 0:
++            raise UserError(
++                "synogroup --memberadd {} {} failed (rc={}): {} — very old DSMs "
++                "lack --memberadd; add via DSM Control Panel and re-declare".format(
++                    group, member, rc, out.strip()[:200]
++                )
++            )
++
++    def _run_checked(self, argv: List[str]) -> Tuple[str, int]:
++        try:
++            return self._run(argv)
++        except Exception as exc:  # noqa: BLE001 - binary missing / timeout
++            raise UserError("{} failed: {}".format(argv[0], exc))
++
++    def set_shell(self, name: str, shell: str) -> None:
++        """Surgically set ONE user's login shell in the passwd file.
++
++        The provision script's pattern reimplemented: rewrite only field 7 of
++        the one matching row, refuse to install unless the record count is
++        unchanged AND the edit took, then atomic-rename into place (a crash
++        mid-write can never leave a torn user database).
++        """
++        try:
++            text = self._passwd.read_text()
++        except OSError as e:
++            raise UserError("cannot read {}: {}".format(self._passwd, e))
++        lines = text.splitlines()
++        edited = False
++        new_lines = []
++        for line in lines:
++            parts = line.split(":")
++            if parts and parts[0] == name and len(parts) >= 7:
++                parts[6] = shell
++                new_lines.append(":".join(parts))
++                edited = True
++            else:
++                new_lines.append(line)
++        if not edited:
++            raise UserError(
++                "user {!r} not found in {} — cannot set shell".format(name, self._passwd)
++            )
++        if len(new_lines) != len(lines):  # pragma: no cover - structurally impossible
++            raise UserError("refusing to install {} (record count changed)".format(self._passwd))
++        content = "\n".join(new_lines) + ("\n" if text.endswith("\n") else "")
++
++        fd, tmp_name = tempfile.mkstemp(
++            dir=str(self._passwd.parent), prefix=".{}.syrvis.".format(self._passwd.name)
++        )
++        try:
++            with os.fdopen(fd, "w") as f:
++                f.write(content)
++            os.chmod(tmp_name, 0o644)
++            os.replace(tmp_name, str(self._passwd))
++        except BaseException:
++            try:
++                os.unlink(tmp_name)
++            except OSError:
++                pass
++            raise
++
++
++# ---------------------------------------------------------------------------
++# Plan -> converge -> re-read (+ the seam-shell self-heal)
++# ---------------------------------------------------------------------------
++
++
++def plan_users(bundle: UsersBundle, backend: DsmUserBackend) -> Dict[str, Any]:
++    """Compute the per-user converge plan. Read-only."""
++    plan: Dict[str, Any] = {}
++    for name, spec in bundle.users.items():
++        current = backend.get_user(name)
++        entry: Dict[str, Any] = {"spec": spec, "changes": {}, "notes": []}
++        if current is None:
++            entry["action"] = "create"
++            entry["changes"]["shell"] = {"from": None, "to": spec["shell"]}
++            entry["changes"]["groups"] = {"add": spec["groups"]}
++            entry["notes"].append("password: unset (owner ceremony required)")
++            plan[name] = entry
++            continue
++
++        if current["shell"] != spec["shell"]:
++            entry["changes"]["shell"] = {"from": current["shell"], "to": spec["shell"]}
++        have_groups = set(backend.groups_of(name))
++        missing = sorted(set(spec["groups"]) - have_groups)
++        if missing:
++            entry["changes"]["groups"] = {"add": missing}
++        extra = sorted(have_groups - set(spec["groups"]))
++        if extra:
++            # Additive-only: extra memberships are REPORTED, never removed
++            # (removal is OWNER-DECISION; the deployment's checks alert on
++            # privileged extras).
++            entry["unmanaged_groups"] = extra
++        if spec["full_name"] and current["full_name"] != spec["full_name"]:
++            # Report-only: a gecos rewrite is not worth a user-database
++            # regeneration (synouser --modify is unreliable across DSM versions).
++            entry["notes"].append(
++                "full_name drift (actual {!r}, declared {!r}) — report-only".format(
++                    current["full_name"], spec["full_name"]
++                )
++            )
++        entry["action"] = "update" if entry["changes"] else "unchanged"
++        plan[name] = entry
++    return plan
++
++
++def apply_user_plan(plan: Dict[str, Any], backend: DsmUserBackend) -> Tuple[Dict[str, Any], bool]:
++    """Execute a plan, re-read, and report — returns (report, ok)."""
++    report: Dict[str, Any] = {}
++    ok = True
++    for name, entry in plan.items():
++        spec = entry["spec"]
++        result: Dict[str, Any] = {
++            "action": entry["action"],
++            "changes": entry["changes"],
++            "notes": list(entry["notes"]),
++            "converged": True,
++            "errors": [],
++        }
++        if "unmanaged_groups" in entry:
++            result["unmanaged_groups"] = entry["unmanaged_groups"]
++        try:
++            if entry["action"] == "create":
++                backend.add_user(name, spec["full_name"])
++            if "shell" in entry["changes"]:
++                backend.set_shell(name, spec["shell"])
++            for group in entry["changes"].get("groups", {}).get("add", []):
++                backend.add_to_group(group, name)
++        except UserError as e:
++            result["errors"].append(str(e))
++            result["converged"] = False
++            ok = False
++            report[name] = result
++            continue
++
++        # Re-read: residual drift must surface loudly, never as a false
++        # convergence (e.g. a memberadd that "succeeded" but did not take).
++        try:
++            current = backend.get_user(name)
++            residual: Dict[str, Any] = {}
++            if current is None:
++                residual["user"] = "still missing after create"
++            else:
++                if current["shell"] != spec["shell"]:
++                    residual["shell"] = {"actual": current["shell"], "declared": spec["shell"]}
++                still_missing = sorted(set(spec["groups"]) - set(backend.groups_of(name)))
++                if still_missing:
++                    residual["groups"] = {"missing": still_missing}
++        except UserError as e:
++            result["errors"].append("post-apply re-read failed: {}".format(e))
++            result["converged"] = False
++            ok = False
++            report[name] = result
++            continue
++        if residual:
++            result["residual"] = residual
++            result["converged"] = False
++            ok = False
++        report[name] = result
++    return report, ok
++
++
++def heal_seam_shells(backend: DsmUserBackend) -> Dict[str, str]:
++    """Re-assert /bin/sh on the seam accounts (the design/39 §5 trap).
++
++    ANY DSM user-database write regenerates /etc/passwd and reverts the seam
++    accounts to /sbin/nologin, severing the operator seam this verb arrived
++    on. Idempotent + guarded (a missing seam account is skipped, not created);
++    the boot hook and the schedule self-heal job assert the same posture.
++    """
++    healed: Dict[str, str] = {}
++    for user in SEAM_SHELL_USERS:
++        current = backend.get_user(user)
++        if current is None:
++            healed[user] = "absent"
++        elif current["shell"] == SEAM_SHELL:
++            healed[user] = "ok"
++        else:
++            backend.set_shell(user, SEAM_SHELL)
++            healed[user] = "healed"
++    return healed
++
++
++def declare_users(
++    bundle: UsersBundle,
++    backend: Optional[DsmUserBackend] = None,
++    dry_run: bool = False,
++) -> Dict[str, Any]:
++    """The library entry behind ``syrvis user declare [--dry-run]``."""
++    backend = backend or DsmUserBackend()
++    plan = plan_users(bundle, backend)
++    if dry_run:
++        users_report = {}
++        for name, entry in plan.items():
++            row = {
++                "action": entry["action"],
++                "changes": entry["changes"],
++                "notes": entry["notes"],
++            }
++            if "unmanaged_groups" in entry:
++                row["unmanaged_groups"] = entry["unmanaged_groups"]
++            users_report[name] = row
++        return {"dry_run": True, "users": users_report, "ok": True}
++
++    users_report, ok = apply_user_plan(plan, backend)
++    # The same-invocation seam self-heal (spec §5.6). Runs unconditionally
++    # after converge: cheap, idempotent, and a mutating run above may have
++    # just regenerated /etc/passwd underneath the seam.
++    try:
++        selfheal = heal_seam_shells(backend)
++    except UserError as e:
++        selfheal = {"error": str(e)}
++        ok = False
++    return {"dry_run": False, "users": users_report, "seam_selfheal": selfheal, "ok": ok}
++
++
++def list_users(backend: Optional[DsmUserBackend] = None) -> Dict[str, Any]:
++    """The library entry behind ``syrvis user list --json`` (read-only).
++
++    Enumerates the local user database with shells and group memberships; the
++    deployment side owns the posture comparison. Never touches passwords or
++    shadow state; DSM app privileges are out of scope (spec §8).
++    """
++    backend = backend or DsmUserBackend()
++    out = []
++    for user in backend.list_users():
++        row = dict(user)
++        try:
++            row["groups"] = backend.groups_of(user["name"])
++        except UserError as e:
++            row["groups"] = None
++            row["groups_error"] = str(e)
++        out.append(row)
++    return {"users": sorted(out, key=lambda u: u.get("name") or "")}
+diff --git a/tests/test_payload_schemas.py b/tests/test_payload_schemas.py
+new file mode 100644
+index 0000000..7ceb65a
+--- /dev/null
++++ b/tests/test_payload_schemas.py
+@@ -0,0 +1,89 @@
++"""Freeze guards for the share/user declare payload schemas (the wire contract).
++
++The schemas are exported constants a deployment's tooling may verify payloads
++against (the seam catalog embeds them), so an ACCIDENTAL edit is a silent
++contract break. These tests pin the sha256 of each schema's canonical JSON: a
++deliberate contract change updates the digest here AND bumps the apiVersion —
++in the same commit, as a visible decision.
++
++The literal key-set assertions are the second witness: the validators derive
++their allowed keys from the schema constants, so without an independent
++restatement here a schema edit would self-consistently slip through.
++"""
++
++import hashlib
++import json
++
++from syrviscore.shares import SHARES_API_VERSION, SHARES_PAYLOAD_SCHEMA
++from syrviscore.users import USERS_API_VERSION, USERS_PAYLOAD_SCHEMA
++
++SHARES_SCHEMA_SHA256 = "e0504edd600eddd124d5502461f26f4222d861902e9f4e13f2be5eb613e75bad"
++USERS_SCHEMA_SHA256 = "a4211d27d033d7b3f0fb775f5b911ee1de5ae53d2c280c0d1a92e7aa85b249f3"
++
++
++def _digest(schema):
++    canon = json.dumps(schema, sort_keys=True, separators=(",", ":"))
++    return hashlib.sha256(canon.encode()).hexdigest()
++
++
++class TestSharesSchemaFrozen:
++    def test_digest_pinned(self):
++        assert _digest(SHARES_PAYLOAD_SCHEMA) == SHARES_SCHEMA_SHA256, (
++            "SHARES_PAYLOAD_SCHEMA changed. If deliberate: bump SHARES_API_VERSION "
++            "and update SHARES_SCHEMA_SHA256 in the same commit."
++        )
++
++    def test_api_version_matches_id(self):
++        assert SHARES_PAYLOAD_SCHEMA["$id"] == SHARES_API_VERSION == "syrvis-shares/v1"
++
++    def test_share_key_set_literal(self):
++        props = SHARES_PAYLOAD_SCHEMA["properties"]["shares"]["additionalProperties"]
++        assert set(props["properties"]) == {
++            "volume",
++            "description",
++            "hide_unauthorized",
++            "recycle_bin",
++            "encrypted",
++            "acl",
++        }
++        assert set(props["required"]) == {
++            "volume",
++            "hide_unauthorized",
++            "recycle_bin",
++            "encrypted",
++            "acl",
++        }
++        # The named-removal contract: rw/ro grants plus the explicit "none".
++        acl = props["properties"]["acl"]
++        assert acl["additionalProperties"]["enum"] == ["rw", "ro", "none"]
++
++    def test_json_serializable(self):
++        json.dumps(SHARES_PAYLOAD_SCHEMA)
++
++
++class TestUsersSchemaFrozen:
++    def test_digest_pinned(self):
++        assert _digest(USERS_PAYLOAD_SCHEMA) == USERS_SCHEMA_SHA256, (
++            "USERS_PAYLOAD_SCHEMA changed. If deliberate: bump USERS_API_VERSION "
++            "and update USERS_SCHEMA_SHA256 in the same commit."
++        )
++
++    def test_api_version_matches_id(self):
++        assert USERS_PAYLOAD_SCHEMA["$id"] == USERS_API_VERSION == "syrvis-users/v1"
++
++    def test_user_key_set_literal(self):
++        props = USERS_PAYLOAD_SCHEMA["properties"]["users"]["additionalProperties"]
++        assert set(props["properties"]) == {"full_name", "shell", "groups"}
++        assert set(props["required"]) == {"shell", "groups"}
++        # The password boundary is STRUCTURAL: no password-ish field may ever
++        # appear in the schema (the credential ceremony stays human).
++        assert not any("pass" in key.lower() for key in props["properties"])
++        assert props["properties"]["shell"]["enum"] == ["/sbin/nologin", "/bin/sh"]
++        # Privileged groups are refused by schema, not just by code.
++        assert props["properties"]["groups"]["items"]["not"]["enum"] == [
++            "administrators",
++            "docker",
++        ]
++
++    def test_json_serializable(self):
++        json.dumps(USERS_PAYLOAD_SCHEMA)
+diff --git a/tests/test_seam_verbs.py b/tests/test_seam_verbs.py
+new file mode 100644
+index 0000000..80dc528
+--- /dev/null
++++ b/tests/test_seam_verbs.py
+@@ -0,0 +1,160 @@
++"""The data-plane seam entries + the verb catalog (seam verbs / gen verbs).
++
++Three concerns:
++
++1. The new registry entries carry the ratified tiers and shapes (declares =
++   sudo converge, plans/lists = read-only, seam_verbs = no sudo; no slots).
++2. The catalog is a faithful, JSON-serializable projection of the registry,
++   embedding the frozen payload schemas, and both emitters (`gen verbs` and
++   `syrvis seam verbs --json`) produce the identical document.
++3. The committed sudoers/shim artifacts in the MCP package equal this source
++   tree's generator output — the service-side mirror of the MCP package's G18
++   drift test, so `make check` (which does not run the MCP suite) still fails
++   loudly when a registry change forgets to regenerate the artifacts.
++"""
++
++import json
++from pathlib import Path
++
++from click.testing import CliRunner
++
++from syrviscore.__version__ import __version__
++from syrviscore.seam import gen, registry
++from syrviscore.shares import SHARES_PAYLOAD_SCHEMA
++from syrviscore.users import USERS_PAYLOAD_SCHEMA
++
++REPO = Path(__file__).resolve().parents[1]
++MCP_DEPLOY = REPO / "packages" / "syrviscore-mcp" / "deploy"
++
++NEW_IDS = {
++    "share_declare_plan",
++    "share_declare",
++    "share_list",
++    "user_declare_plan",
++    "user_declare",
++    "user_list",
++    "seam_verbs",
++}
++
++
++class TestRegistryEntries:
++    def test_all_present(self):
++        assert NEW_IDS <= set(registry.COMMANDS_BY_ID)
++
++    def test_declares_are_sudo_converge_not_destructive(self):
++        for cmd_id in ("share_declare", "user_declare"):
++            cmd = registry.get_command(cmd_id)
++            assert cmd.sudo and not cmd.read_only and not cmd.destructive
++            assert cmd.flags == ["--json"]
++
++    def test_plans_are_sudo_read_only(self):
++        for cmd_id in ("share_declare_plan", "user_declare_plan"):
++            cmd = registry.get_command(cmd_id)
++            assert cmd.sudo and cmd.read_only and not cmd.destructive
++            assert cmd.flags == ["--dry-run", "--json"]
++
++    def test_lists_are_sudo_read_only(self):
++        for cmd_id in ("share_list", "user_list"):
++            cmd = registry.get_command(cmd_id)
++            assert cmd.sudo and cmd.read_only and cmd.flags == ["--json"]
++
++    def test_seam_verbs_is_plain_read(self):
++        cmd = registry.get_command("seam_verbs")
++        assert not cmd.sudo and cmd.read_only and not cmd.destructive
++
++    def test_no_slots_anywhere(self):
++        """The payload names its targets — nothing user-chosen crosses argv."""
++        for cmd_id in NEW_IDS:
++            cmd = registry.get_command(cmd_id)
++            assert cmd.positional is None
++            assert all(not isinstance(f, registry.FlagValue) for f in cmd.flags)
++
++    def test_stdin_wire_formats(self):
++        assert registry.get_command("share_declare").stdin == "syrvis-shares/v1"
++        assert registry.get_command("share_declare_plan").stdin == "syrvis-shares/v1"
++        assert registry.get_command("user_declare").stdin == "syrvis-users/v1"
++        assert registry.get_command("user_declare_plan").stdin == "syrvis-users/v1"
++        for cmd_id in ("share_list", "user_list", "seam_verbs"):
++            assert registry.get_command(cmd_id).stdin is None
++        # The pre-existing stdin writers are annotated too (catalog honesty).
++        assert registry.get_command("apply").stdin == "syrvis-instance/v1"
++        assert registry.get_command("deploy").stdin == "syrvis-bundle/v1"
++        assert registry.get_command("secret_set").stdin == "text"
++        assert registry.get_command("config_set").stdin == "text"
++
++    def test_rendered_shapes(self):
++        sudoers = gen.render_sudoers()
++        for shape in (
++            "share declare --dry-run --json",
++            "share declare --json",
++            "share list --json",
++            "user declare --dry-run --json",
++            "user declare --json",
++            "user list --json",
++        ):
++            assert "/volume1/syrviscore/bin/syrvis {}".format(shape) in sudoers
++        # seam_verbs is not sudo -> must NOT appear in the sudoers policy...
++        assert "seam verbs" not in sudoers
++        # ...but must be an accepted shim shape.
++        assert '[ "${2}" = "seam" ] && [ "${3}" = "verbs" ]' in gen.render_shim()
++
++
++class TestCatalog:
++    def test_covers_every_command(self):
++        doc = registry.catalog()
++        assert doc["catalog_version"] == registry.CATALOG_VERSION == 1
++        assert {c["id"] for c in doc["commands"]} == set(registry.COMMANDS_BY_ID)
++
++    def test_json_serializable_round_trip(self):
++        doc = registry.catalog(service_version="1.2.3")
++        again = json.loads(json.dumps(doc))
++        assert again["service_version"] == "1.2.3"
++
++    def test_embeds_frozen_payload_schemas(self):
++        doc = registry.catalog()
++        assert doc["payloads"]["syrvis-shares/v1"] == SHARES_PAYLOAD_SCHEMA
++        assert doc["payloads"]["syrvis-users/v1"] == USERS_PAYLOAD_SCHEMA
++
++    def test_faithful_projection_of_a_slotted_command(self):
++        """Spot-check a command with flag slots + positional serializes fully
++        enough for a consumer to reconstruct its accepted argv shapes."""
++        doc = registry.catalog()
++        run = [c for c in doc["commands"] if c["id"] == "service_run"][0]
++        assert run["subcommand"] == ["service", "run"]
++        assert {"literal": "--image"} in run["flags"]
++        assert {"slot": {"name": "image", "kind": "image", "optional": False}} in run["flags"]
++        assert run["positional"] == {"name": "name", "kind": "name", "optional": False}
++
++    def test_gen_verbs_and_cli_emit_identical_documents(self, capsys):
++        rc = gen.main(["gen", "verbs"])
++        assert rc == 0
++        from_gen = json.loads(capsys.readouterr().out)
++
++        from syrviscore.cli import cli
++
++        r = CliRunner().invoke(cli, ["seam", "verbs", "--json"])
++        assert r.exit_code == 0, r.output
++        from_cli = json.loads(r.output)
++
++        assert from_gen == from_cli
++        assert from_cli["service_version"] == __version__
++
++
++class TestCommittedArtifactsCurrent:
++    """The service-side mirror of the MCP package's G18 drift test."""
++
++    def test_sudoers_matches_generator(self):
++        committed = (MCP_DEPLOY / "sudoers.d" / "syrviscore-mcp").read_text()
++        assert committed == gen.render_sudoers(), (
++            "committed sudoers drifted from the registry — regenerate with "
++            "`python -m syrviscore.seam.gen sudoers > packages/syrviscore-mcp/"
++            "deploy/sudoers.d/syrviscore-mcp`"
++        )
++
++    def test_shim_matches_generator(self):
++        committed = (MCP_DEPLOY / "ssh" / "syrvis-mcp-shim").read_text()
++        assert committed == gen.render_shim(), (
++            "committed shim drifted from the registry — regenerate with "
++            "`python -m syrviscore.seam.gen shim > packages/syrviscore-mcp/"
++            "deploy/ssh/syrvis-mcp-shim`"
++        )
+diff --git a/tests/test_shares.py b/tests/test_shares.py
+new file mode 100644
+index 0000000..8caa49d
+--- /dev/null
++++ b/tests/test_shares.py
+@@ -0,0 +1,454 @@
++"""syrvis share declare|list — schema, guards, converge, honest reporting.
++
++Mirrors test_instance_apply.py's shape: schema strictness first (root parsing
++attacker-controlled stdin), then the converge semantics against a stateful
++fake DSM (the injected-run pattern from test_vms.py / test_macvlan_shim.py:
++the fake dispatches on the synowebapi argv and mutates modeled share state, so
++create/set/permission calls and the post-apply re-read are exercised end to
++end), then the CLI boundary with elevation stubbed.
++
++The blast-radius invariants each get an explicit test: payload scope, no
++destructive path, encrypted-create refusal, encryption/volume contradictions,
++named-removal-only ACLs, and the honest-residual-drift report when a backend
++call silently does not take.
++"""
++
++import json
++
++import pytest
++from click.testing import CliRunner
++
++from syrviscore import shares as shares_mod
++from syrviscore.shares import (
++    SHARES_API_VERSION,
++    DsmShareBackend,
++    ShareError,
++    SharesBundle,
++    declare_shares,
++    list_shares,
++    plan_shares,
++)
++
++
++def spec(**over):
++    d = {
++        "volume": "/volume5",
++        "hide_unauthorized": True,
++        "recycle_bin": False,
++        "encrypted": False,
++        "acl": {"kevin": "rw", "syrvis-reader": "ro"},
++    }
++    d.update(over)
++    return d
++
++
++def payload(**shares):
++    return {"apiVersion": SHARES_API_VERSION, "shares": shares or {"Books": spec()}}
++
++
++def dsm_row(name, **over):
++    row = {
++        "name": name,
++        "vol_path": "/volume5",
++        "desc": "",
++        "hide_unreadable": True,
++        "enable_recycle_bin": False,
++        "encryption": 0,
++    }
++    row.update(over)
++    return row
++
++
++class FakeDsm:
++    """Dispatches faked ``synowebapi`` argv, modeling share + permission state.
++
++    State: ``shares`` is name -> raw DSM row; ``perms`` is name -> {principal:
++    "rw"|"ro"}. Mutating methods update the state so the post-apply re-read
++    sees the result. ``inert_set``/``fail_set`` model a set call that silently
++    does not take / errors, for the honesty tests.
++    """
++
++    def __init__(self, shares=(), perms=None, inert_set=False, fail_set=()):
++        self.shares = {row["name"]: dict(row) for row in shares}
++        self.perms = {name: dict(v) for name, v in (perms or {}).items()}
++        self.inert_set = inert_set
++        self.fail_set = set(fail_set)  # share names whose `set` calls error
++        self.calls = []
++
++    def _params(self, argv):
++        assert argv[0] == "/usr/syno/bin/synowebapi" and argv[1] == "--exec"
++        params = dict(p.split("=", 1) for p in argv[2:])
++        return params
++
++    def __call__(self, argv):
++        self.calls.append(list(argv))
++        p = self._params(argv)
++        api, method = p["api"], p["method"]
++
++        if api == "SYNO.Core.Share" and method == "list":
++            return self._ok({"shares": [dict(r) for r in self.shares.values()]})
++        if api == "SYNO.Core.Share" and method == "create":
++            info = json.loads(p["shareinfo"])
++            name = info["name"]
++            self.shares[name] = dsm_row(
++                name,
++                vol_path=info["vol_path"],
++                desc=info.get("desc", ""),
++                hide_unreadable=False,  # DSM defaults, before set_share asserts
++                enable_recycle_bin=False,
++            )
++            return self._ok({})
++        if api == "SYNO.Core.Share" and method == "set":
++            name = json.loads(p["name"])
++            if name in self.fail_set:
++                return json.dumps({"success": False, "error": {"code": 3300}}), 0
++            if not self.inert_set:
++                self.shares[name].update(json.loads(p["shareinfo"]))
++            return self._ok({})
++        if api == "SYNO.Core.Share.Permission" and method == "list":
++            name = json.loads(p["name"])
++            items = [
++                {
++                    "name": principal,
++                    "is_writable": level == "rw",
++                    "is_readonly": level == "ro",
++                    "is_deny": False,
++                }
++                for principal, level in sorted(self.perms.get(name, {}).items())
++            ]
++            return self._ok({"items": items})
++        if api == "SYNO.Core.Share.Permission" and method == "set":
++            name = json.loads(p["name"])
++            if not self.inert_set:
++                for row in json.loads(p["user_group_info"]):
++                    grants = self.perms.setdefault(name, {})
++                    if row["is_writable"]:
++                        grants[row["name"]] = "rw"
++                    elif row["is_readonly"]:
++                        grants[row["name"]] = "ro"
++                    else:
++                        grants.pop(row["name"], None)
++            return self._ok({})
++        raise AssertionError("unexpected synowebapi call: {}".format(argv))
++
++    @staticmethod
++    def _ok(data):
++        return json.dumps({"success": True, "data": data}), 0
++
++    def mutating_calls(self):
++        return [c for c in self.calls if "method=create" in c or "method=set" in c]
++
++
++def backend(fake):
++    return DsmShareBackend(run=fake)
++
++
++# ---------------------------------------------------------------------------
++# Schema
++# ---------------------------------------------------------------------------
++
++
++class TestParse:
++    def test_not_a_mapping(self):
++        with pytest.raises(ShareError, match="mapping"):
++            SharesBundle.from_dict(["x"])
++
++    def test_wrong_api_version(self):
++        with pytest.raises(ShareError, match="apiVersion"):
++            SharesBundle.from_dict({"apiVersion": "syrvis-shares/v9", "shares": {"B": spec()}})
++
++    def test_unknown_top_level_key(self):
++        doc = payload()
++        doc["extra"] = 1
++        with pytest.raises(ShareError, match="unknown payload keys"):
++            SharesBundle.from_dict(doc)
++
++    def test_empty_shares(self):
++        with pytest.raises(ShareError, match="non-empty"):
++            SharesBundle.from_dict({"apiVersion": SHARES_API_VERSION, "shares": {}})
++
++    @pytest.mark.parametrize(
++        "name",
++        ["", "a/b", "a\\b", " Books", "Books ", "x" * 33, "bad\nname"],
++    )
++    def test_invalid_share_names(self, name):
++        with pytest.raises(ShareError, match="share name"):
++            SharesBundle.from_dict(payload(**{name: spec()}))
++
++    def test_space_inside_name_is_legal(self):
++        b = SharesBundle.from_dict(payload(**{"Secure Documents": spec()}))
++        assert "Secure Documents" in b.shares
++
++    def test_unknown_share_key(self):
++        with pytest.raises(ShareError, match="unknown keys"):
++            SharesBundle.from_dict(payload(Books=spec(sensitivity="low")))
++
++    def test_missing_required_key(self):
++        s = spec()
++        del s["recycle_bin"]
++        with pytest.raises(ShareError, match="missing required"):
++            SharesBundle.from_dict(payload(Books=s))
++
++    @pytest.mark.parametrize("volume", ["/volume", "/volume5/", "volume5", "/vol5", "/volume123"])
++    def test_bad_volume(self, volume):
++        with pytest.raises(ShareError, match="volume"):
++            SharesBundle.from_dict(payload(Books=spec(volume=volume)))
++
++    def test_flags_must_be_boolean(self):
++        with pytest.raises(ShareError, match="boolean"):
++            SharesBundle.from_dict(payload(Books=spec(recycle_bin="no")))
++
++    def test_bad_principal_and_level(self):
++        with pytest.raises(ShareError, match="principal"):
++            SharesBundle.from_dict(payload(Books=spec(acl={"Kevin!": "rw"})))
++        with pytest.raises(ShareError, match="ACL level"):
++            SharesBundle.from_dict(payload(Books=spec(acl={"kevin": "admin"})))
++
++    def test_description_default_and_caps(self):
++        b = SharesBundle.from_dict(payload())
++        assert b.shares["Books"]["description"] == ""
++        with pytest.raises(ShareError, match="description"):
++            SharesBundle.from_dict(payload(Books=spec(description="x" * 129)))
++
++
++# ---------------------------------------------------------------------------
++# Guards (all raise at PLAN time — nothing mutated)
++# ---------------------------------------------------------------------------
++
++
++class TestGuards:
++    def test_encrypted_create_refused(self):
++        fake = FakeDsm()
++        b = SharesBundle.from_dict(payload(Records=spec(encrypted=True)))
++        with pytest.raises(ShareError, match="ENCRYPTED share headlessly"):
++            plan_shares(b, backend(fake))
++        assert fake.mutating_calls() == []
++
++    def test_encryption_contradiction_refused(self):
++        fake = FakeDsm(shares=[dsm_row("Records", encryption=1)])
++        b = SharesBundle.from_dict(payload(Records=spec(encrypted=False)))
++        with pytest.raises(ShareError, match="create-time property"):
++            plan_shares(b, backend(fake))
++        assert fake.mutating_calls() == []
++
++    def test_encrypted_existing_share_posture_asserted(self):
++        """An EXISTING encrypted share is fine — posture asserted, keys untouched."""
++        fake = FakeDsm(
++            shares=[dsm_row("Records", encryption=1, hide_unreadable=False)],
++            perms={"Records": {}},
++        )
++        b = SharesBundle.from_dict(payload(Records=spec(encrypted=True, acl={"anton": "rw"})))
++        plan = plan_shares(b, backend(fake))
++        assert plan["Records"]["action"] == "update"
++        assert "hide_unauthorized" in plan["Records"]["changes"]
++
++    def test_volume_move_refused(self):
++        fake = FakeDsm(shares=[dsm_row("Books", vol_path="/volume4")])
++        b = SharesBundle.from_dict(payload(Books=spec(volume="/volume5")))
++        with pytest.raises(ShareError, match="OWNER-DECISION"):
++            plan_shares(b, backend(fake))
++        assert fake.mutating_calls() == []
++
++
++# ---------------------------------------------------------------------------
++# Converge (plan -> apply -> re-read)
++# ---------------------------------------------------------------------------
++
++
++class TestDeclare:
++    def test_create_missing_share(self):
++        fake = FakeDsm()
++        b = SharesBundle.from_dict(payload())
++        report = declare_shares(b, backend(fake))
++        assert report["ok"] is True
++        entry = report["shares"]["Books"]
++        assert entry["action"] == "create" and entry["converged"] is True
++        # The share now exists with the declared posture + grants.
++        assert fake.shares["Books"]["hide_unreadable"] is True
++        assert fake.perms["Books"] == {"kevin": "rw", "syrvis-reader": "ro"}
++
++    def test_update_flags_and_acl(self):
++        fake = FakeDsm(
++            shares=[dsm_row("Books", hide_unreadable=False, enable_recycle_bin=True)],
++            perms={"Books": {"kevin": "ro"}},
++        )
++        b = SharesBundle.from_dict(payload())
++        report = declare_shares(b, backend(fake))
++        entry = report["shares"]["Books"]
++        assert entry["action"] == "update" and entry["converged"] is True
++        assert entry["changes"]["hide_unauthorized"] == {"from": False, "to": True}
++        assert entry["changes"]["recycle_bin"] == {"from": True, "to": False}
++        assert entry["acl_changes"]["kevin"] == {"from": "ro", "to": "rw"}
++        assert fake.perms["Books"]["kevin"] == "rw"
++
++    def test_named_removal_only(self):
++        """'none' removes a NAMED principal; unnamed grants are reported, kept."""
++        fake = FakeDsm(
++            shares=[dsm_row("Books")],
++            perms={"Books": {"kevin": "rw", "lisa": "rw", "cerebrate": "rw"}},
++        )
++        b = SharesBundle.from_dict(payload(Books=spec(acl={"kevin": "rw", "lisa": "none"})))
++        report = declare_shares(b, backend(fake))
++        entry = report["shares"]["Books"]
++        assert entry["acl_changes"] == {"lisa": {"from": "rw", "to": None}}
++        assert entry["unmanaged_acl"] == ["cerebrate"]
++        assert "lisa" not in fake.perms["Books"]
++        assert fake.perms["Books"]["cerebrate"] == "rw"  # untouched, only reported
++
++    def test_idempotent_rerun_mutates_nothing(self):
++        fake = FakeDsm()
++        b = SharesBundle.from_dict(payload())
++        declare_shares(b, backend(fake))
++        fake.calls = []
++        report = declare_shares(b, backend(fake))
++        assert report["shares"]["Books"]["action"] == "unchanged"
++        assert fake.mutating_calls() == []
++
++    def test_payload_scope_never_touches_unnamed_shares(self):
++        fake = FakeDsm(
++            shares=[dsm_row("Books"), dsm_row("Other", hide_unreadable=False)],
++            perms={"Books": {"kevin": "rw", "syrvis-reader": "ro"}, "Other": {"x": "rw"}},
++        )
++        b = SharesBundle.from_dict(payload())
++        declare_shares(b, backend(fake))
++        assert not any("Other" in " ".join(c) for c in fake.mutating_calls())
++        assert fake.shares["Other"]["hide_unreadable"] is False  # untouched
++
++    def test_dry_run_reports_and_mutates_nothing(self):
++        fake = FakeDsm(shares=[dsm_row("Books", hide_unreadable=False)], perms={"Books": {}})
++        b = SharesBundle.from_dict(payload())
++        report = declare_shares(b, backend(fake), dry_run=True)
++        assert report["dry_run"] is True and report["ok"] is True
++        assert report["shares"]["Books"]["action"] == "update"
++        assert fake.mutating_calls() == []
++
++    def test_inert_backend_reports_residual_not_convergence(self):
++        """A set call that silently does not take must surface as residual
++        drift (converged False, ok False) — never a false 'changed' report."""
++        fake = FakeDsm(
++            shares=[dsm_row("Books", hide_unreadable=False)],
++            perms={"Books": {"kevin": "rw", "syrvis-reader": "ro"}},
++            inert_set=True,
++        )
++        b = SharesBundle.from_dict(payload())
++        report = declare_shares(b, backend(fake))
++        entry = report["shares"]["Books"]
++        assert report["ok"] is False and entry["converged"] is False
++        assert entry["residual"]["hide_unauthorized"] == {"actual": False, "declared": True}
++
++    def test_per_share_error_aggregation(self):
++        """One share's backend failure doesn't stop the others (re-run heals)."""
++        fake = FakeDsm(
++            shares=[dsm_row("Books", hide_unreadable=False)],
++            perms={"Books": {"kevin": "rw", "syrvis-reader": "ro"}},
++            fail_set={"Books"},
++        )
++        b = SharesBundle.from_dict(
++            payload(
++                Books=spec(),
++                Gaming=spec(acl={"kevin": "rw"}),
++            )
++        )
++        report = declare_shares(b, backend(fake))
++        assert report["ok"] is False
++        assert report["shares"]["Books"]["errors"]
++        assert report["shares"]["Books"]["converged"] is False
++        # The other share still converges in the same run.
++        assert report["shares"]["Gaming"]["action"] == "create"
++        assert report["shares"]["Gaming"]["converged"] is True
++
++    def test_no_delete_code_path_exists(self):
++        """Structural invariant: the backend has no share-delete surface at all."""
++        surface = [m for m in dir(DsmShareBackend) if not m.startswith("_")]
++        assert not any("delete" in m or "remove" in m for m in surface)
++
++
++# ---------------------------------------------------------------------------
++# list (read-only)
++# ---------------------------------------------------------------------------
++
++
++class TestList:
++    def test_lists_all_with_posture_and_acl(self):
++        fake = FakeDsm(
++            shares=[dsm_row("Books"), dsm_row("Records", encryption=1)],
++            perms={"Books": {"kevin": "rw"}, "Records": {"anton": "rw"}},
++        )
++        report = list_shares(backend(fake))
++        names = [s["name"] for s in report["shares"]]
++        assert names == ["Books", "Records"]
++        books = report["shares"][0]
++        assert books["path"] == "/volume5/Books"
++        assert books["hide_unauthorized"] is True and books["recycle_bin"] is False
++        assert books["acl"] == {"kevin": "rw"}
++        records = report["shares"][1]
++        assert records["encrypted"] is True and records["encryption_raw"] == 1
++
++    def test_list_mutates_nothing(self):
++        fake = FakeDsm(shares=[dsm_row("Books")], perms={"Books": {}})
++        list_shares(backend(fake))
++        assert fake.mutating_calls() == []
++
++
++# ---------------------------------------------------------------------------
++# CLI — syrvis share declare/list (elevation stubbed, backend faked)
++# ---------------------------------------------------------------------------
++
++
++class TestShareCli:
++    def _run(self, monkeypatch, fake, argv, stdin=None):
++        import syrviscore.privilege as privilege
++        from syrviscore.cli import cli
++
++        monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
++        monkeypatch.setattr(shares_mod, "DsmShareBackend", lambda: backend(fake))
++        return CliRunner().invoke(cli, argv, input=stdin)
++
++    def test_registered(self):
++        from syrviscore.cli import cli
++
++        assert "share" in cli.commands
++        assert set(cli.commands["share"].commands) == {"declare", "list"}
++
++    def test_declare_json_happy_path(self, monkeypatch):
++        fake = FakeDsm()
++        r = self._run(monkeypatch, fake, ["share", "declare", "--json"], json.dumps(payload()))
++        assert r.exit_code == 0, r.output
++        report = json.loads(r.output)
++        assert report["ok"] is True and report["shares"]["Books"]["action"] == "create"
++
++    def test_declare_dry_run_json(self, monkeypatch):
++        fake = FakeDsm()
++        r = self._run(
++            monkeypatch,
++            fake,
++            ["share", "declare", "--dry-run", "--json"],
++            json.dumps(payload()),
++        )
++        assert r.exit_code == 0, r.output
++        assert json.loads(r.output)["dry_run"] is True
++        assert fake.mutating_calls() == []
++
++    def test_declare_schema_error_json_envelope(self, monkeypatch):
++        fake = FakeDsm()
++        bad = {"apiVersion": SHARES_API_VERSION, "shares": {"B": {"volume": "nope"}}}
++        r = self._run(monkeypatch, fake, ["share", "declare", "--json"], json.dumps(bad))
++        assert r.exit_code == 1
++        assert "error" in json.loads(r.output)
++        assert fake.calls == []  # rejected before any DSM read
++
++    def test_declare_not_converged_exits_nonzero(self, monkeypatch):
++        fake = FakeDsm(
++            shares=[dsm_row("Books", hide_unreadable=False)],
++            perms={"Books": {"kevin": "rw", "syrvis-reader": "ro"}},
++            inert_set=True,
++        )
++        r = self._run(monkeypatch, fake, ["share", "declare", "--json"], json.dumps(payload()))
++        assert r.exit_code == 1
++        assert json.loads(r.output)["ok"] is False
++
++    def test_list_json(self, monkeypatch):
++        fake = FakeDsm(shares=[dsm_row("Books")], perms={"Books": {"kevin": "rw"}})
++        r = self._run(monkeypatch, fake, ["share", "list", "--json"])
++        assert r.exit_code == 0, r.output
++        assert json.loads(r.output)["shares"][0]["name"] == "Books"
+diff --git a/tests/test_users.py b/tests/test_users.py
+new file mode 100644
+index 0000000..fb448d9
+--- /dev/null
++++ b/tests/test_users.py
+@@ -0,0 +1,434 @@
++"""syrvis user declare|list — schema, guards, converge, the seam-shell trap.
++
++Backend reads run against tmp passwd/group files (injectable paths — a test
++can never touch the real /etc, mirroring test_macvlan_shim's ifcfg fixture);
++mutations run through a fake ``run`` that models synouser/synogroup AND the
++DSM trap this verb must survive: any user-database write regenerates
++/etc/passwd, reverting the seam accounts to /sbin/nologin. The declare path
++must re-assert those shells in the same invocation (spec §5.6).
++
++The hard boundaries each get an explicit test: no password field, random
++throwaway at create only, no delete/disable surface, additive-only groups,
++privileged-group refusal.
++"""
++
++import json
++
++import pytest
++from click.testing import CliRunner
++
++from syrviscore import users as users_mod
++from syrviscore.users import (
++    USERS_API_VERSION,
++    DsmUserBackend,
++    UserError,
++    UsersBundle,
++    declare_users,
++    heal_seam_shells,
++    list_users,
++)
++
++PASSWD = """root:x:0:0:root:/root:/bin/ash
++kevin:x:1026:100:Kevin:/var/services/homes/kevin:/sbin/nologin
++lisa:x:1027:100:Lisa:/var/services/homes/lisa:/sbin/nologin
++syrvis-operator:x:1030:100:SyrvisCore MCP operator:/var/services/homes/syrvis-operator:/bin/sh
++syrvis-reader:x:1031:100:SyrvisCore reader:/var/services/homes/syrvis-reader:/bin/sh
++"""
++
++GROUP = """users:x:100:kevin,lisa
++administrators:x:101:cerebrate
++docker:x:999:syrvis-operator,cerebrate
++homes:x:106:
++"""
++
++
++def spec(**over):
++    d = {"shell": "/sbin/nologin", "groups": ["users"]}
++    d.update(over)
++    return d
++
++
++def payload(**users):
++    return {"apiVersion": USERS_API_VERSION, "users": users or {"kevin": spec()}}
++
++
++@pytest.fixture
++def etc(tmp_path):
++    passwd = tmp_path / "passwd"
++    group = tmp_path / "group"
++    passwd.write_text(PASSWD)
++    group.write_text(GROUP)
++    return passwd, group
++
++
++class FakeSynoTools:
++    """Models synouser/synogroup against the tmp passwd/group files — including
++    the DSM trap: every mutation regenerates passwd, reverting the seam
++    accounts to /sbin/nologin (the 2026-07-28 live discovery)."""
++
++    def __init__(self, passwd, group, revert_seam_shells=True, fail=()):
++        self.passwd = passwd
++        self.group = group
++        self.revert_seam_shells = revert_seam_shells
++        self.fail = set(fail)  # binaries whose calls should fail
++        self.calls = []
++
++    def __call__(self, argv):
++        self.calls.append(list(argv))
++        tool = argv[0].rsplit("/", 1)[-1]
++        if tool in self.fail:
++            return "mock failure", 1
++        if tool == "synouser" and argv[1] == "--add":
++            name, _pw, full_name = argv[2], argv[3], argv[4]
++            self.passwd.write_text(
++                self.passwd.read_text()
++                + "{}:x:1050:100:{}:/var/services/homes/{}:/sbin/nologin\n".format(
++                    name, full_name, name
++                )
++            )
++            self._regenerate()
++            return "", 0
++        if tool == "synogroup" and argv[1] == "--memberadd":
++            group_name, member = argv[2], argv[3]
++            lines = []
++            for line in self.group.read_text().splitlines():
++                parts = line.split(":")
++                if parts[0] == group_name:
++                    members = [m for m in parts[3].split(",") if m]
++                    if member not in members:
++                        members.append(member)
++                    parts[3] = ",".join(members)
++                lines.append(":".join(parts))
++            self.group.write_text("\n".join(lines) + "\n")
++            self._regenerate()
++            return "", 0
++        raise AssertionError("unexpected tool call: {}".format(argv))
++
++    def _regenerate(self):
++        """DSM regenerates /etc/passwd on ANY user-database write, resetting
++        the seam accounts' shells to nologin."""
++        if not self.revert_seam_shells:
++            return
++        lines = []
++        for line in self.passwd.read_text().splitlines():
++            parts = line.split(":")
++            if parts[0] in ("syrvis-operator", "syrvis-reader") and len(parts) >= 7:
++                parts[6] = "/sbin/nologin"
++            lines.append(":".join(parts))
++        self.passwd.write_text("\n".join(lines) + "\n")
++
++
++def backend(etc, **kw):
++    passwd, group = etc
++    fake = FakeSynoTools(passwd, group, **kw)
++    b = DsmUserBackend(passwd_path=passwd, group_path=group, run=fake)
++    return b, fake
++
++
++# ---------------------------------------------------------------------------
++# Schema
++# ---------------------------------------------------------------------------
++
++
++class TestParse:
++    def test_wrong_api_version(self):
++        with pytest.raises(UserError, match="apiVersion"):
++            UsersBundle.from_dict({"apiVersion": "syrvis-users/v9", "users": {"k": spec()}})
++
++    def test_empty_users(self):
++        with pytest.raises(UserError, match="non-empty"):
++            UsersBundle.from_dict({"apiVersion": USERS_API_VERSION, "users": {}})
++
++    @pytest.mark.parametrize("name", ["", "Kevin", "bad name", "-lead", "x" * 65])
++    def test_invalid_usernames(self, name):
++        with pytest.raises(UserError, match="username"):
++            UsersBundle.from_dict(payload(**{name: spec()}))
++
++    def test_password_field_is_structurally_impossible(self):
++        """THE boundary: no password key exists — unknown keys are rejected."""
++        with pytest.raises(UserError, match="unknown keys"):
++            UsersBundle.from_dict(payload(kevin=spec(password="hunter2")))
++
++    def test_privileged_groups_refused(self):
++        with pytest.raises(UserError, match="OWNER-DECISION"):
++            UsersBundle.from_dict(payload(kevin=spec(groups=["users", "docker"])))
++        with pytest.raises(UserError, match="OWNER-DECISION"):
++            UsersBundle.from_dict(payload(kevin=spec(groups=["administrators"])))
++
++    def test_shell_enum(self):
++        with pytest.raises(UserError, match="shell"):
++            UsersBundle.from_dict(payload(kevin=spec(shell="/bin/bash")))
++
++    def test_full_name_colon_rejected(self):
++        with pytest.raises(UserError, match="full_name"):
++            UsersBundle.from_dict(payload(kevin=spec(full_name="a:b")))
++
++    def test_valid_defaults(self):
++        b = UsersBundle.from_dict(payload())
++        assert b.users["kevin"] == {
++            "full_name": "",
++            "shell": "/sbin/nologin",
++            "groups": ["users"],
++        }
++
++
++# ---------------------------------------------------------------------------
++# Backend (tmp files; fake tools)
++# ---------------------------------------------------------------------------
++
++
++class TestBackend:
++    def test_get_user_and_groups(self, etc):
++        b, _ = backend(etc)
++        u = b.get_user("kevin")
++        assert u["uid"] == 1026 and u["shell"] == "/sbin/nologin"
++        assert b.groups_of("kevin") == ["users"]
++        assert b.get_user("nobody-here") is None
++
++    def test_set_shell_surgical(self, etc):
++        passwd, _ = etc
++        b, _ = backend(etc)
++        before = passwd.read_text()
++        b.set_shell("kevin", "/bin/sh")
++        after = passwd.read_text()
++        assert "kevin:x:1026:100:Kevin:/var/services/homes/kevin:/bin/sh" in after
++        # Only the one field of the one row changed; everything else intact.
++        assert after.count("\n") == before.count("\n")
++        assert after.replace(":/bin/sh", ":/sbin/nologin").count("root:x:0:0") == 1
++        assert b.get_user("lisa")["shell"] == "/sbin/nologin"
++
++    def test_set_shell_missing_user_raises(self, etc):
++        b, _ = backend(etc)
++        with pytest.raises(UserError, match="not found"):
++            b.set_shell("ghost", "/bin/sh")
++
++    def test_add_user_argv_form(self, etc):
++        """The provision script's proven form: name, random throwaway pw,
++        fullname, expired=0, no mail, no app privilege."""
++        b, fake = backend(etc)
++        b.add_user("anton", "Anton Yamos")
++        argv = fake.calls[-1]
++        assert argv[0] == "/usr/syno/sbin/synouser" and argv[1] == "--add"
++        assert argv[2] == "anton" and argv[4] == "Anton Yamos"
++        assert argv[5:] == ["0", "", ""]
++        randpw = argv[3]
++        assert len(randpw) == 48 and all(c in "0123456789abcdef" for c in randpw)
++
++    def test_add_to_group_argv_form(self, etc):
++        b, fake = backend(etc)
++        b.add_to_group("users", "anton")
++        assert fake.calls[-1] == ["/usr/syno/sbin/synogroup", "--memberadd", "users", "anton"]
++
++
++# ---------------------------------------------------------------------------
++# Converge (plan -> apply -> re-read + seam self-heal)
++# ---------------------------------------------------------------------------
++
++
++class TestDeclare:
++    def test_unchanged_user_mutates_nothing(self, etc):
++        b, fake = backend(etc)
++        report = declare_users(UsersBundle.from_dict(payload()), b)
++        assert report["ok"] is True
++        assert report["users"]["kevin"]["action"] == "unchanged"
++        assert fake.calls == []  # no synouser/synogroup call at all
++
++    def test_create_missing_user_with_seam_selfheal(self, etc):
++        """Creating a user trips DSM's passwd regeneration (seam shells revert
++        to nologin); the SAME invocation must heal them back to /bin/sh."""
++        passwd, _ = etc
++        b, fake = backend(etc)
++        bundle = UsersBundle.from_dict(
++            payload(anton=spec(full_name="Anton Yamos", groups=["users"]))
++        )
++        report = declare_users(bundle, b)
++        assert report["ok"] is True, report
++        entry = report["users"]["anton"]
++        assert entry["action"] == "create" and entry["converged"] is True
++        assert "password: unset (owner ceremony required)" in entry["notes"]
++        # The trap fired (fake reverted the seam shells) — and was healed.
++        assert report["seam_selfheal"] == {
++            "syrvis-operator": "healed",
++            "syrvis-reader": "healed",
++        }
++        text = passwd.read_text()
++        assert "syrvis-operator:" in text
++        for seam_user in ("syrvis-operator", "syrvis-reader"):
++            row = [line for line in text.splitlines() if line.startswith(seam_user + ":")][0]
++            assert row.endswith(":/bin/sh")
++
++    def test_no_mutation_no_heal_needed(self, etc):
++        b, _ = backend(etc)
++        report = declare_users(UsersBundle.from_dict(payload()), b)
++        assert report["seam_selfheal"] == {"syrvis-operator": "ok", "syrvis-reader": "ok"}
++
++    def test_shell_converge(self, etc):
++        b, _ = backend(etc)
++        bundle = UsersBundle.from_dict(payload(kevin=spec(shell="/bin/sh")))
++        report = declare_users(bundle, b)
++        entry = report["users"]["kevin"]
++        assert entry["action"] == "update"
++        assert entry["changes"]["shell"] == {"from": "/sbin/nologin", "to": "/bin/sh"}
++        assert b.get_user("kevin")["shell"] == "/bin/sh"
++
++    def test_groups_additive_only(self, etc):
++        """Missing memberships are added; extra memberships are reported and
++        NEVER removed (no removal call shape even exists in the backend)."""
++        b, fake = backend(etc)
++        bundle = UsersBundle.from_dict(payload(kevin=spec(groups=["users", "homes"])))
++        # 'homes' doesn't exist as a membership -> planned add; kevin's other
++        # memberships (none beyond users) stay untouched.
++        report = declare_users(bundle, b)
++        entry = report["users"]["kevin"]
++        assert entry["changes"]["groups"] == {"add": ["homes"]}
++        assert ["/usr/syno/sbin/synogroup", "--memberadd", "homes", "kevin"] in fake.calls
++        assert not any("--memberdel" in c for call in fake.calls for c in call)
++        # The fake applies the membership, so the re-read converges.
++        assert entry["converged"] is True and report["ok"] is True
++
++    def test_unmanaged_groups_reported_not_removed(self, etc):
++        passwd, group = etc
++        group.write_text("users:x:100:kevin,lisa\nstaff:x:105:kevin\n")
++        b, fake = backend(etc)
++        report = declare_users(UsersBundle.from_dict(payload()), b)
++        entry = report["users"]["kevin"]
++        assert entry["unmanaged_groups"] == ["staff"]
++        assert fake.calls == []
++        assert "kevin" in group.read_text().split("staff:x:105:")[1]
++
++    def test_full_name_drift_is_report_only(self, etc):
++        b, fake = backend(etc)
++        bundle = UsersBundle.from_dict(payload(kevin=spec(full_name="Kevin T")))
++        report = declare_users(bundle, b)
++        entry = report["users"]["kevin"]
++        assert entry["action"] == "unchanged"
++        assert any("full_name drift" in n for n in entry["notes"])
++        assert fake.calls == []
++
++    def test_payload_scope_never_touches_unnamed_users(self, etc):
++        b, fake = backend(etc)
++        bundle = UsersBundle.from_dict(payload(kevin=spec(shell="/bin/sh")))
++        declare_users(bundle, b)
++        assert b.get_user("lisa")["shell"] == "/sbin/nologin"  # untouched
++        assert not any("lisa" in c for call in fake.calls for c in call)
++
++    def test_dry_run_mutates_nothing(self, etc):
++        passwd, _ = etc
++        before = passwd.read_text()
++        b, fake = backend(etc)
++        bundle = UsersBundle.from_dict(payload(anton=spec()))
++        report = declare_users(bundle, b, dry_run=True)
++        assert report["dry_run"] is True and report["ok"] is True
++        assert report["users"]["anton"]["action"] == "create"
++        assert "seam_selfheal" not in report  # a plan heals nothing
++        assert fake.calls == [] and passwd.read_text() == before
++
++    def test_create_failure_aggregated(self, etc):
++        b, fake = backend(etc, fail=("synouser",))
++        bundle = UsersBundle.from_dict(payload(anton=spec(), kevin=spec(shell="/bin/sh")))
++        report = declare_users(bundle, b)
++        assert report["ok"] is False
++        assert report["users"]["anton"]["errors"]
++        # The other user still converged in the same run.
++        assert report["users"]["kevin"]["converged"] is True
++
++    def test_no_delete_or_disable_surface(self):
++        surface = [m for m in dir(DsmUserBackend) if not m.startswith("_")]
++        assert not any(
++            "delete" in m or "remove" in m or "disable" in m or "expire" in m for m in surface
++        )
++
++
++class TestHealSeamShells:
++    def test_absent_seam_account_skipped_not_created(self, tmp_path):
++        passwd = tmp_path / "passwd"
++        group = tmp_path / "group"
++        passwd.write_text("root:x:0:0:root:/root:/bin/ash\n")
++        group.write_text("users:x:100:\n")
++        b = DsmUserBackend(passwd_path=passwd, group_path=group, run=lambda argv: ("", 1))
++        healed = heal_seam_shells(b)
++        assert healed == {"syrvis-operator": "absent", "syrvis-reader": "absent"}
++        assert "syrvis-operator" not in passwd.read_text()
++
++
++# ---------------------------------------------------------------------------
++# list (read-only)
++# ---------------------------------------------------------------------------
++
++
++class TestList:
++    def test_lists_users_with_groups(self, etc):
++        b, fake = backend(etc)
++        report = list_users(b)
++        names = [u["name"] for u in report["users"]]
++        assert names == sorted(names) and "kevin" in names and "root" in names
++        kevin = [u for u in report["users"] if u["name"] == "kevin"][0]
++        assert kevin["shell"] == "/sbin/nologin" and kevin["groups"] == ["users"]
++        assert fake.calls == []  # pure file reads
++
++    def test_never_reports_password_material(self, etc):
++        b, _ = backend(etc)
++        blob = json.dumps(list_users(b))
++        assert "password" not in blob.lower() and ":x:" not in blob
++
++
++# ---------------------------------------------------------------------------
++# CLI — syrvis user declare/list (elevation stubbed, backend faked)
++# ---------------------------------------------------------------------------
++
++
++class TestUserCli:
++    def _run(self, monkeypatch, etc, argv, stdin=None, **kw):
++        import syrviscore.privilege as privilege
++        from syrviscore.cli import cli
++
++        b, fake = backend(etc, **kw)
++        monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
++        monkeypatch.setattr(users_mod, "DsmUserBackend", lambda: b)
++        result = CliRunner().invoke(cli, argv, input=stdin)
++        return result, fake
++
++    def test_registered(self):
++        from syrviscore.cli import cli
++
++        assert "user" in cli.commands
++        assert set(cli.commands["user"].commands) == {"declare", "list"}
++
++    def test_declare_json_happy_path(self, monkeypatch, etc):
++        r, _ = self._run(
++            monkeypatch,
++            etc,
++            ["user", "declare", "--json"],
++            json.dumps(payload(anton=spec(full_name="Anton Yamos"))),
++        )
++        assert r.exit_code == 0, r.output
++        report = json.loads(r.output)
++        assert report["users"]["anton"]["action"] == "create"
++        assert report["seam_selfheal"]["syrvis-operator"] == "healed"
++
++    def test_declare_dry_run(self, monkeypatch, etc):
++        r, fake = self._run(
++            monkeypatch,
++            etc,
++            ["user", "declare", "--dry-run", "--json"],
++            json.dumps(payload(anton=spec())),
++        )
++        assert r.exit_code == 0, r.output
++        assert json.loads(r.output)["dry_run"] is True
++        assert fake.calls == []
++
++    def test_declare_guard_error_json_envelope(self, monkeypatch, etc):
++        r, fake = self._run(
++            monkeypatch,
++            etc,
++            ["user", "declare", "--json"],
++            json.dumps(payload(kevin=spec(groups=["docker"]))),
++        )
++        assert r.exit_code == 1
++        assert "error" in json.loads(r.output)
++        assert fake.calls == []
++
++    def test_list_json(self, monkeypatch, etc):
++        r, _ = self._run(monkeypatch, etc, ["user", "list", "--json"])
++        assert r.exit_code == 0, r.output
++        assert any(u["name"] == "kevin" for u in json.loads(r.output)["users"])

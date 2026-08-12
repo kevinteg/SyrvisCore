@@ -6,5 +6,7 @@
 # tag (syrviscore.compose DEFAULT_DOCKER_IMAGES["dashboard"]). Bump it by hand on
 # a real dashboard change and re-pin the image; a service-only release leaves it
 # alone. (Was force-synced to the service version until 2026-07-31, which drifted
-# the package version ahead of the correctly-pinned 0.5.1 image.)
-__version__ = "0.5.1"
+# the package version ahead of the correctly-pinned 0.5.1 image — 0.5.2-0.5.6 are
+# published ghcr tags from that era, so a real bump lands past them on the first
+# free tag rather than colliding with an already-pushed image.)
+__version__ = "0.5.7"
