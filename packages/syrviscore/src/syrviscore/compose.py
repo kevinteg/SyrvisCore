@@ -64,12 +64,9 @@ DEFAULT_DOCKER_IMAGES = {
         # dashboard bump lands on the first free tag. The invariant (test_compose
         # TestImagePinLockstep) is pin == the DASHBOARD package __version__,
         # which advances only on a real dashboard change.
-        # TAG-ONLY while 0.5.8 is unbuilt: a digest exists only for a published
-        # image, and carrying 0.5.7's would pull the OLD content under the new
-        # tag. `syrvis images` reads a tag-only core pin as needs-attention —
-        # the right signal until CI publishes 0.5.8 and the digest-pin follow-up
-        # restores the repo:tag@sha256:… form here.
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.8",
+        # Digest resolved 2026-08-12 from the CI-published 0.5.8 index (contains
+        # linux/amd64 — the NAS architecture — plus its attestation manifest).
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.8@sha256:9893e5c56c4808ef32b3e41e20f4f253461d21509c728bc61dcdda836f36301a",
         "description": "SyrvisCore web dashboard",
     },
 }
