@@ -14,6 +14,7 @@ from . import (
     me,
     routes,
     services,
+    summary,
     system,
     updates,
 )
@@ -32,5 +33,6 @@ api_router.include_router(links.router)
 api_router.include_router(routes.router)
 api_router.include_router(updates.router)
 api_router.include_router(deployments.router)
+api_router.include_router(summary.router)
 
 __all__ = ["api_router"]

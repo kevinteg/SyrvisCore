@@ -32,6 +32,49 @@ LAN ─────────────────────────�
                           docker.sock · $SYRVIS_HOME · traefik:8080 · portainer:9000 · cloudflared:20241
 ```
 
+## The folded summary — `GET /api/summary`
+
+One small read-only document (`syrvis-summary/v1`) that answers *"is this
+platform worth diving into right now?"* for an **external** umbrella console —
+so a status page can render one honest pill without re-deriving platform
+semantics or scraping the SPA. SyrvisCore is the authority on its own health;
+consumers pass the fold through.
+
+```json
+{
+  "schema": "syrvis-summary/v1",
+  "generated_at": "2026-08-12T03:34:04Z",
+  "state": "ok",
+  "detail": "4/4 core · 26/26 L2 running · no drift",
+  "runstate": "active",
+  "version": {"active": "0.5.7", "dashboard": "0.5.8",
+              "update_available": false, "image_updates": 7},
+  "containers": {"core": {"desired": 4, "running": 4, "unhealthy": []},
+                 "l2":   {"desired": 26, "running": 26, "unhealthy": []}},
+  "drift": {"core_in_sync": true, "l2_in_sync": true, "items": 0},
+  "tunnel": {"enabled": true, "ready_connections": 4},
+  "traefik": {"routers": 26, "errors": 0},
+  "last_deploy": {"at": "2026-08-11T16:20:11Z", "target": "blog", "revision": 12}
+}
+```
+
+It is an **aggregation, not a new probe**: the TTL-cached health snapshot, the
+runstate, the services model, the deployment history, and the update caches.
+It makes **no outbound network call**, so it is cheap to poll continuously —
+`update_available` / `image_updates` read the caches `/api/updates` and the CLI
+populate and are `null` while cold. Any block whose source can't answer is
+`null` rather than a fabricated zero.
+
+The fold: `down` = a core container not running, core state unreadable, or the
+instance halted; `degraded` = core/L2 drift, an L2 service not running, a
+maintenance hold, or the tunnel enabled with zero ready edge connections;
+otherwise `ok`. Pending image updates are informational and never degrade the
+state. The `verify` **validator** report is deliberately excluded — from inside
+this container it false-negatives on "Python venv: Not found" (issue #16); the
+drift *gatherers* it shares a module with are used.
+
+Nothing site-specific crosses it: no domain, hostnames, env values, or tokens.
+
 ## Auth (pluggable)
 
 A request is authenticated if it presents **either** a valid Cloudflare Access JWT

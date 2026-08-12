@@ -26,6 +26,16 @@ def _ver_key(version: str):
         return (0,)
 
 
+def cached_platform_version():
+    """The last platform-version check, or None if nothing has run one yet.
+
+    Cache-only by design: ``/api/summary`` folds this in and must never be the
+    thing that reaches out to GitHub. Expiry-tolerant — a stale answer to "is a
+    newer release out?" beats no answer, and the route below refreshes it.
+    """
+    return _cache["data"]
+
+
 def _current_version():
     try:
         from syrviscore.config_reader import read_config
