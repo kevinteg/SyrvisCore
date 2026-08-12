@@ -104,7 +104,7 @@ def _client_with(make_settings, monkeypatch, components=None, **sources):
         "_layer2_drift_sync": lambda: (True, 0),
         "_last_deploy_sync": lambda: {
             "at": "2026-08-11T16:20:11Z",
-            "target": "immich-server",
+            "target": "blog",
             "revision": 12,
         },
         "_version_sync": lambda active: {
@@ -268,7 +268,7 @@ def test_summary_contract_shape(make_settings, monkeypatch):
     assert body["traefik"] == {"routers": 26, "errors": 0}
     assert body["last_deploy"] == {
         "at": "2026-08-11T16:20:11Z",
-        "target": "immich-server",
+        "target": "blog",
         "revision": 12,
     }
 
