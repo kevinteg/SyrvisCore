@@ -66,6 +66,33 @@ const (
 	collectBudget  = 25 * time.Second
 	listTimeout    = 10 * time.Second
 	inspectTimeout = 5 * time.Second
+
+	// ── STARTUP PING BUDGET ─ added 2026-08-14 ─────────────────────────────────
+	// WHY: main() used to do `client.Ping(context.Background())` then errCheck(),
+	// i.e. an UNBOUNDED call whose every failure was os.Exit(1). That treated a
+	// TRANSIENT dependency gap as misconfiguration. In the homebase this exporter
+	// reaches Docker through docker-socket-proxy over the `proxy` network, so at
+	// startup it routinely meets one of:
+	//   - the proxy container not up yet (any deploy/reconcile/daemon restart
+	//     brings them back in no guaranteed order), or
+	//   - Docker's embedded DNS at 127.0.0.11 not yet resolving `docker-socket-
+	//     proxy` — the literal observed error was
+	//     `dial tcp: lookup docker-socket-proxy on 127.0.0.11:53: no such host`.
+	// Both clear on their own in seconds. Exiting instantly turned them into a
+	// crash loop paced by Docker's exponential restart backoff (~1/min once the
+	// backoff grows), which is SLOW enough that ContainerRestartLoop's 30m window
+	// never saw more than three restarts — so it ran undetected for a long time
+	// while every scrape in between was a metrics gap.
+	//
+	// pingRetryFor MUST stay well above a normal dependency start. If Docker is
+	// still unreachable after it, that IS misconfiguration: we exit, the restart
+	// policy retries, and up{job="docker-health"}==0 alerts — which is correct and
+	// is the behaviour DockerHealthExporterDown is written against. We do NOT
+	// start serving with no container series: answering 200 with an empty result
+	// set is the fail-open shape DockerContainerMetricsAbsent exists to catch.
+	pingTimeout   = 5 * time.Second
+	pingRetryFor  = 90 * time.Second
+	pingRetryWait = 3 * time.Second
 )
 
 type dockerHealthCollector struct {
@@ -334,6 +361,43 @@ func errCheck(err error) {
 	}
 }
 
+// waitForDocker blocks until the Docker API answers a ping, or until pingRetryFor
+// is exhausted. Each attempt is bounded by pingTimeout so a hung intermediary
+// cannot stall startup forever the way the old context.Background() ping could.
+//
+// Returning an error (rather than exiting here) keeps the exit decision in main's
+// errCheck, so there is still exactly ONE place in this binary that terminates the
+// process on a Docker problem.
+func waitForDocker(c *client.Client) error {
+	deadline := time.Now().Add(pingRetryFor)
+	var last error
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
+		_, err := c.Ping(ctx)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				normalLogger.Log(
+					"message", "Docker API reachable, continuing startup",
+					"attempts", attempt)
+			}
+			return nil
+		}
+		last = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf(
+				"docker API unreachable after %s and %d attempt(s): %w",
+				pingRetryFor, attempt, last)
+		}
+		errorLogger.Log(
+			"message", "Docker API not reachable yet — retrying (transient dependency, not fatal)",
+			"attempt", attempt,
+			"retry_in", pingRetryWait.String(),
+			"error", err)
+		time.Sleep(pingRetryWait)
+	}
+}
+
 // Define flags.
 var (
 	address = flag.String("listen-address", ":8080", "The address to listen on for HTTP requests.")
@@ -354,8 +418,9 @@ func main() {
 	errCheck(err)
 	defer client.Close()
 
-	_, err = client.Ping(context.Background())
-	errCheck(err)
+	// Bounded + retried; see the pingRetryFor block. errCheck only once the whole
+	// budget is spent, so a transient dependency gap costs seconds, not a restart.
+	errCheck(waitForDocker(client))
 
 	prometheus.MustRegister(&dockerHealthCollector{
 		containerClient: client,
