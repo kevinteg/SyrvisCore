@@ -1050,12 +1050,42 @@ class ServiceManager:
         secrets_root_dir = paths_.get("secrets") or data_root_dir
 
         if service.volumes:
-            from .service_schema import INFRA_HOST_MOUNTS
+            from .service_schema import FILEPLANE_PREFIX, INFRA_HOST_MOUNTS
 
             is_infra = service.tier == "infra"
             data_root = os.path.realpath(str(data_root_dir))
             processed_volumes = []
+            shares_cache = None
             for vol in service.volumes:
+                if vol.startswith(FILEPLANE_PREFIX):
+                    # File-plane bind (fileplane=<share>[/<subpath>]:<mount>:<mode>):
+                    # resolve the declared share (shares.d) to its host path. The
+                    # engine NEVER creates or chmods file-plane directories — that
+                    # content is operator-owned; a missing path is a loud error,
+                    # not a mkdir (the 0777 any-UID treatment data dirs get would
+                    # be a security regression on a family share).
+                    from .shares_registry import (
+                        SharesRegistryError,
+                        load_shares,
+                        resolve_fileplane,
+                    )
+
+                    body = vol[len(FILEPLANE_PREFIX) :]
+                    source, container_path, mode = body.split(":")
+                    share_id, _, subpath = source.partition("/")
+                    if shares_cache is None:
+                        shares_cache = load_shares(self.syrvis_home)
+                    host_path = resolve_fileplane(
+                        shares_cache, service.name, share_id, subpath, mode
+                    )
+                    if not os.path.isdir(host_path):
+                        raise SharesRegistryError(
+                            "File-plane path {!r} (share {!r}) does not exist on "
+                            "this host — file-plane content is operator-managed; "
+                            "the engine will not create it".format(host_path, share_id)
+                        )
+                    processed_volumes.append("{}:{}:{}".format(host_path, container_path, mode))
+                    continue
                 parts = vol.split(":")
                 host_path, container_path = parts[0], parts[1]
                 mode = parts[2] if len(parts) > 2 else "rw"
@@ -1112,6 +1142,11 @@ class ServiceManager:
                 processed_volumes.append(f"{resolved}:{container_path}:{mode}")
 
             svc["volumes"] = processed_volumes
+
+        if service.ports:
+            # Raw host port publishes (non-HTTP data planes — sync protocols
+            # etc.). Declared intent, schema-validated 'H:C/proto'.
+            svc["ports"] = list(service.ports)
 
         # NB: depends_on is rejected at schema-validation time (a single-service
         # compose project cannot depend on another), so it is never emitted here.

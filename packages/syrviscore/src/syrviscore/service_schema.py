@@ -84,6 +84,7 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "command",
         "env_file",
         "volumes",
+        "ports",
         "networks",
         "depends_on",
         "config_templates",
@@ -630,6 +631,123 @@ def _validate_dashboard(data: Any) -> Dict[str, Any]:
     return result
 
 
+FILEPLANE_PREFIX = "fileplane="
+_SHARE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _normalize_fileplane_entry(entry: Dict[str, Any]) -> str:
+    """Normalize the YAML mapping form of a fileplane volume to its canonical string.
+
+    Declaration form (services.d YAML):
+
+        volumes:
+          - fileplane: {share: gaming, subpath: Emulation/ROMS, mount: /roms, mode: ro}
+
+    Canonical internal form (round-trips through manifests unchanged):
+
+        fileplane=gaming/Emulation/ROMS:/roms:ro
+
+    The share is referenced BY ID — resolution against $SYRVIS_HOME/shares.d
+    happens at render time (shares_registry), so a declaration validates
+    anywhere but only binds on a host that has declared the share.
+    """
+    spec = entry.get("fileplane")
+    if not isinstance(spec, dict):
+        raise ServiceValidationError(
+            "Volume {!r}: 'fileplane' must be a mapping with keys "
+            "share/mount[/subpath/mode]".format(entry)
+        )
+    unknown = set(spec) - {"share", "subpath", "mount", "mode"}
+    if unknown:
+        raise ServiceValidationError(
+            "Volume fileplane: unknown key(s) {} — allowed: share, subpath, "
+            "mount, mode".format(sorted(unknown))
+        )
+    share = spec.get("share")
+    if not isinstance(share, str) or not _SHARE_ID_RE.match(share or ""):
+        raise ServiceValidationError(
+            "Volume fileplane: 'share' must be a lowercase share id "
+            "([a-z0-9-]), got {!r}".format(share)
+        )
+    subpath = spec.get("subpath", "")
+    if subpath:
+        _validate_relative_subpath(subpath, "fileplane subpath")
+        if ":" in subpath:
+            raise ServiceValidationError("Volume fileplane: ':' is not permitted in subpath")
+    mount = spec.get("mount")
+    mode = spec.get("mode", "ro")
+    source = share + ("/" + subpath if subpath else "")
+    return "{}{}:{}:{}".format(FILEPLANE_PREFIX, source, mount, mode)
+
+
+def _validate_fileplane_volume(vol: str) -> str:
+    """Validate the canonical ``fileplane=<share>[/<subpath>]:<mount>:<mode>`` form.
+
+    File-plane binds reference operator-declared NAS shares (shares.d) by id —
+    the sanctioned exception to the absolute-host-path refusal, precisely
+    because no path appears here: the engine resolves the id at render time
+    and refuses undeclared shares. Mode defaults ro; rw is additionally gated
+    at render time by the share's writers: sanction (shares_registry).
+    """
+    body = vol[len(FILEPLANE_PREFIX) :]
+    parts = body.split(":")
+    if len(parts) not in (2, 3):
+        raise ServiceValidationError(
+            "Volume {!r}: expected 'fileplane=<share>[/<subpath>]:"
+            "/container/path[:mode]'".format(vol)
+        )
+    source, container = parts[0], parts[1]
+    mode = parts[2] if len(parts) == 3 else "ro"
+    if mode not in ("ro", "rw"):
+        raise ServiceValidationError("Volume {!r}: mode must be ro or rw".format(vol))
+    share, _, subpath = source.partition("/")
+    if not _SHARE_ID_RE.match(share):
+        raise ServiceValidationError(
+            "Volume {!r}: share id must be lowercase [a-z0-9-]".format(vol)
+        )
+    if subpath:
+        _validate_relative_subpath(subpath, "fileplane subpath")
+    if not PurePosixPath(container).is_absolute() or ".." in PurePosixPath(container).parts:
+        raise ServiceValidationError(
+            "Volume {!r}: container path must be absolute (no '..')".format(vol)
+        )
+    return "{}{}:{}:{}".format(FILEPLANE_PREFIX, source, container, mode)
+
+
+def _validate_ports(data: Any) -> List[str]:
+    """Validate ``ports:`` — direct host port publishes, ``"H:C[/proto]"``.
+
+    This is the raw-protocol escape hatch for services whose data plane is not
+    HTTP (sync protocols, game servers): Traefik cannot route them, so they
+    publish on the host. Declared intent, same as exposure — a published port
+    is reachable by every LAN client, and the declaration is the audit trail.
+    """
+    if not isinstance(data, list):
+        raise ServiceValidationError("ports must be a list of 'host:container[/proto]' strings")
+    out: List[str] = []
+    for entry in data:
+        if not isinstance(entry, str) or not entry:
+            raise ServiceValidationError("ports entries must be non-empty strings")
+        spec, _, proto = entry.partition("/")
+        proto = proto or "tcp"
+        if proto not in ("tcp", "udp"):
+            raise ServiceValidationError("Port {!r}: protocol must be tcp or udp".format(entry))
+        host_s, sep, container_s = spec.partition(":")
+        if not sep:
+            raise ServiceValidationError(
+                "Port {!r}: expected 'host:container[/proto]'".format(entry)
+            )
+        try:
+            host_p, container_p = int(host_s), int(container_s)
+        except ValueError:
+            raise ServiceValidationError("Port {!r}: ports must be integers".format(entry))
+        for p in (host_p, container_p):
+            if not 1 <= p <= 65535:
+                raise ServiceValidationError("Port {!r}: out of range 1-65535".format(entry))
+        out.append("{}:{}/{}".format(host_p, container_p, proto))
+    return out
+
+
 def _validate_volume(vol: str, tier: str = "") -> str:
     """Validate a volume entry against the mount policy.
 
@@ -637,6 +755,8 @@ def _validate_volume(vol: str, tier: str = "") -> str:
       - named volumes: ``myvolume:/container/path[:mode]``
       - relative host paths (resolved under data/<service>/):
         ``subdir:/container/path[:mode]``
+      - file-plane share references (resolved via shares.d at render time):
+        ``fileplane=<share>[/<subpath>]:/container/path[:mode]``
     Refused (all tiers): '..' traversal, '$' expansions, modes other than ro/rw.
 
     The **infra tier** (design/22) additionally permits an ENUMERATED, READ-ONLY
@@ -652,6 +772,8 @@ def _validate_volume(vol: str, tier: str = "") -> str:
         raise ServiceValidationError(
             "Volume {!r}: environment expansion is not permitted".format(vol)
         )
+    if vol.startswith(FILEPLANE_PREFIX):
+        return _validate_fileplane_volume(vol)
 
     parts = vol.split(":")
     if len(parts) < 2 or len(parts) > 3:
@@ -785,6 +907,7 @@ class ServiceDefinition:
     # secrets, keeping them out of this manifest.
     env_file: str = ""
     volumes: List[str] = field(default_factory=list)
+    ports: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)
     depends_on: List[str] = field(default_factory=list)
     config_templates: List[ConfigTemplate] = field(default_factory=list)
@@ -882,11 +1005,16 @@ class ServiceDefinition:
         if data.get("location"):
             location = _validate_location(data["location"])
 
-        volumes = data.get("volumes", [])
-        if not isinstance(volumes, list):
+        raw_volumes = data.get("volumes", [])
+        if not isinstance(raw_volumes, list):
             raise ServiceValidationError("volumes must be a list")
-        for vol in volumes:
-            _validate_volume(vol, tier)
+        volumes = []
+        for vol in raw_volumes:
+            if isinstance(vol, dict) and "fileplane" in vol:
+                vol = _normalize_fileplane_entry(vol)
+            volumes.append(_validate_volume(vol, tier))
+
+        ports = _validate_ports(data.get("ports", [])) if data.get("ports") else []
 
         networks = data.get("networks", [])
         if not isinstance(networks, list):
@@ -984,6 +1112,7 @@ class ServiceDefinition:
             location=location,
             env_file=env_file,
             volumes=volumes,
+            ports=ports,
             networks=networks,
             depends_on=depends_on,
             config_templates=templates,
@@ -1058,6 +1187,8 @@ class ServiceDefinition:
             result["env_file"] = self.env_file
         if self.volumes:
             result["volumes"] = self.volumes
+        if self.ports:
+            result["ports"] = list(self.ports)
         if self.networks:
             result["networks"] = self.networks
         if self.depends_on:

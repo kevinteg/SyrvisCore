@@ -200,9 +200,11 @@ syrvis stack apply --from desired.yaml   # converge core stack + L2 set to match
 | **2 — richer schema** | `healthcheck`, `env_file` (0600), `resources` ✅; `service run --volume/--env-file` ✅ | ✅ shipped |
 | **3 — catalog** | file-based service catalog (bundled + `$SYRVIS_HOME/catalog/`); `service run <name>` resolution; `service catalog` list ✅ | ✅ shipped |
 | **4 — convergence** | `stack apply --from` with plan/dry-run/`on_undeclared` policy ✅; `verify` extended to the L2 set ✅; the MCP `stack_apply_from` tool remains (needs a base64url transport slot through the forced-command shim's charset whitelist) | ✅ CLI/library shipped; MCP tool pending |
-| **5 — non-HTTP (if needed)** | explicit reject *or* `traefik.protocol: tcp/udp` | deferred until a concrete need |
+| **5 — non-HTTP (if needed)** | explicit reject *or* `traefik.protocol: tcp/udp` | ✅ shipped 2026-08-14 as `ports:` (direct host publish, `"H:C[/proto]"`, tcp/udp, schema-validated) — the concrete need was a sync-protocol service (Syncthing :22000); Traefik TCP entrypoints remain unbuilt/unneeded |
+| **6 — file-plane volumes** | `fileplane:` volume class — services reference operator-declared NAS shares BY ID (`{share, subpath, mount, mode}` → canonical `fileplane=<share>[/<sub>]:<mount>:<mode>`), resolved at render time against a new minimal `$SYRVIS_HOME/shares.d/*.yaml` registry (`shares_registry.py`: id/share_name/volume consumed, richer deployment-repo keys ignored). Absolute host paths stay refused everywhere; `mode` defaults `ro`; `rw` against a `class: resting` share requires the service in the share's `writers:` list (the ingest-contract check); the engine NEVER creates or chmods file-plane paths — missing dir is a loud error. Deployment repos must ship `shares.d/` to `$SYRVIS_HOME` alongside services.d (their apply tooling's job — the engine only reads it) | ✅ shipped 2026-08-14 (tests: `test_fileplane.py`, 28 cases) |
 
-Phases 1–4 shipped 2026-07-11 (additive, backward-compatible, audited).
+Phases 1–4 shipped 2026-07-11; phases 5–6 shipped 2026-08-14 (additive,
+backward-compatible, audited).
 
 ### Remaining follow-ups
 
