@@ -122,16 +122,32 @@ class TestGetSyrvisHome:
         assert "syrviscore*" in str(exc.value)
         assert "syrvisctl install" in str(exc.value)  # named only to forbid it
 
-    def test_marker_without_self_identification_is_not_enough(self, tmp_path):
-        """A stray manifest that records a DIFFERENT install_path is refused."""
+    def test_env_var_accepts_bind_mounted_view_of_real_install(self, tmp_path):
+        """An explicit SYRVIS_HOME accepts a manifest recording a DIFFERENT path.
+
+        A bind-mounted view of a real install (the dashboard container mounts
+        the tree at /syrvis) records the HOST path in its manifest. The env var
+        is operator intent, so the CONTENT check suffices here — path
+        self-identity stays load-bearing only for the scan strategies
+        (TestIsInstallRoot below). Regression 2026-08-16: requiring identity
+        here emptied the dashboard's entire Layer-2 list, silently.
+        """
         import json as _json
 
-        stray = tmp_path / "syrviscore"
-        stray.mkdir()
-        (stray / ".syrviscore-manifest.json").write_text(
+        view = tmp_path / "syrvis"
+        view.mkdir()
+        (view / ".syrviscore-manifest.json").write_text(
             _json.dumps({"schema_version": 3, "install_path": "/volume4/syrviscore"})
         )
-        set_syrvis_home(str(stray))
+        set_syrvis_home(str(view))
+        assert get_syrvis_home() == view
+
+    def test_env_var_still_refuses_a_bare_marker(self, tmp_path):
+        """A directory with an unparseable/bare marker is still refused loudly."""
+        bare = tmp_path / "syrviscore"
+        bare.mkdir()
+        (bare / ".syrviscore-manifest.json").write_text("not json")
+        set_syrvis_home(str(bare))
         with pytest.raises(SyrvisHomeError, match="no SyrvisCore installation exists there"):
             get_syrvis_home()
 

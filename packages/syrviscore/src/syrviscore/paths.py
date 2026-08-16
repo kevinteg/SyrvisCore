@@ -99,16 +99,17 @@ def is_mounted_volume(location) -> bool:
     return os.path.ismount(str(target))
 
 
-def _is_install_root(candidate: Path) -> bool:
-    """True iff `candidate` holds a manifest that SELF-IDENTIFIES as this install.
+def _is_install_manifest(candidate: Path) -> bool:
+    """True iff `candidate` holds a parseable install manifest (bare markers fail).
 
-    A genuine install manifest records `install_path` == its own root (and carries
-    `schema_version`/`versions`). A stray copy dropped under a location root (e.g.
-    a mis-scoped restore under `/volume6/syrviscore`) records a DIFFERENT
-    install_path — so it can never masquerade as the root during auto-detection.
-    Falls back to accepting a manifest that predates `install_path` (older
-    installs) as long as it parses and looks like an install manifest, never a
-    bare marker. Any read/parse failure → not an install root (fail closed).
+    This is the CONTENT half of the install-root test: the manifest exists,
+    parses, and carries install bookkeeping. It deliberately does NOT compare
+    `install_path` to the candidate path — a bind-mounted view of a real install
+    (the dashboard container mounts the tree at /syrvis) records the HOST path
+    and is still a genuine install. Path self-identity is layered on top by
+    `_is_install_root` for the SCAN strategies, where a stray copy under a
+    location root must never win auto-detection. Any read/parse failure → False
+    (fail closed).
     """
     manifest = candidate / ".syrviscore-manifest.json"
     if not candidate.exists() or not manifest.exists():
@@ -121,15 +122,33 @@ def _is_install_root(candidate: Path) -> bool:
         return False
     if not isinstance(data, dict):
         return False
+    return bool(data.get("install_path")) or "schema_version" in data or "versions" in data
+
+
+def _is_install_root(candidate: Path) -> bool:
+    """True iff `candidate` holds a manifest that SELF-IDENTIFIES as this install.
+
+    `_is_install_manifest` plus path identity: a genuine install manifest records
+    `install_path` == its own root. A stray copy dropped under a location root
+    (e.g. a mis-scoped restore under `/volume6/syrviscore`) records a DIFFERENT
+    install_path — so it can never masquerade as the root during auto-detection.
+    Manifests that predate `install_path` are accepted on content alone.
+    """
+    if not _is_install_manifest(candidate):
+        return False
+    import json as _json
+
+    try:
+        data = _json.loads((candidate / ".syrviscore-manifest.json").read_text())
+    except Exception:
+        return False
     recorded = data.get("install_path")
     if recorded:
         try:
             return Path(recorded).resolve() == candidate.resolve()
         except Exception:
             return False
-    # Pre-`install_path` manifest: accept only if it still looks like an install
-    # manifest (has the version bookkeeping a bare marker wouldn't).
-    return "schema_version" in data or "versions" in data
+    return True
 
 
 def get_syrvis_home() -> Path:
@@ -163,7 +182,14 @@ def get_syrvis_home() -> Path:
     syrvis_home = os.environ.get("SYRVIS_HOME")
     if syrvis_home:
         syrvis_path = Path(syrvis_home)
-        if _is_install_root(syrvis_path):
+        # Content check only — NOT path self-identity. An explicit SYRVIS_HOME is
+        # operator intent, and legitimate bind-mounted views of a real install
+        # (the dashboard container mounts the tree at /syrvis) record the HOST
+        # path in the manifest. Path identity stays load-bearing for the scan
+        # strategies below, where a stray copy must never win auto-detection.
+        # (Regression 2026-08-16: the strict check here emptied the dashboard's
+        # entire Layer-2 list, silently, on the 0.5.9 image.)
+        if _is_install_manifest(syrvis_path):
             return syrvis_path
         raise SyrvisHomeError(
             "SYRVIS_HOME is set to {} but no SyrvisCore installation exists there "
