@@ -72,16 +72,17 @@ DEFAULT_DOCKER_IMAGES = {
     # syrviscore-lib freshness tradeoff — is a separate, still-open decision.)
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.5.8",
+        "tag": "0.5.9",
         # 0.5.8 and not 0.5.2: ghcr already holds 0.5.2-0.5.7 — 0.5.2-0.5.6 are
         # relics of the pre-2026-07-31 force-sync era when every service release
         # pushed a dashboard image, and 0.5.7 is a real published build — so a
         # dashboard bump lands on the first free tag. The invariant (test_compose
         # TestImagePinLockstep) is pin == the DASHBOARD package __version__,
         # which advances only on a real dashboard change.
-        # Digest resolved 2026-08-12 from the CI-published 0.5.8 index (contains
-        # linux/amd64 — the NAS architecture — plus its attestation manifest).
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.8@sha256:9893e5c56c4808ef32b3e41e20f4f253461d21509c728bc61dcdda836f36301a",
+        # Digest resolved 2026-08-16 from the CI-published 0.5.9 index (rebuilt so
+        # the bundled service_schema knows ports:/fileplane — the 0.5.8 image
+        # rejected syncthing's manifest as "Failed to load service definition").
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.9@sha256:e675f9a3b44e05567d0ff2854356d237612cc12eb2e271489d5a5535eef605ee",
         "description": "SyrvisCore web dashboard",
     },
 }
