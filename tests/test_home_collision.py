@@ -57,6 +57,12 @@ def _declare_share(home, share_id, share_name, volume):
     )
 
 
+def _configure_segment(home, segment):
+    """Point this instance's apps-root derivation at ``segment`` (0.5.14)."""
+    (home / "config").mkdir(parents=True, exist_ok=True)
+    (home / "config" / ".env").write_text("SYRVIS_APPS_ROOT_NAME={}\n".format(segment))
+
+
 class TestCheckHomeCollision:
     def test_clean_layout_passes(self, volumes, monkeypatch):
         _platform_root(volumes, 4)
@@ -136,6 +142,114 @@ class TestCheckHomeCollision:
         assert "Home collision" in {c.name for c in report.checks}
 
 
+class TestPostRenameTruthTable:
+    """0.5.14: the owner's ``syrviscore`` -> ``syrviscore-apps`` share rename.
+
+    The armed test is NAME-GENERIC — any shares.d share name that equals a plain
+    volume-root directory of the same name on ANOTHER volume — precisely because
+    the rename does not eliminate the collision class, it evacuates the valuable
+    thing from it. Post-rename the SYRVIS_HOME on /volume4 is out of range
+    forever (nothing is named ``syrviscore`` but the install root itself), while
+    ``/volume6/syrviscore-apps`` still wears the new share's name on another
+    volume. The owner accepts that residual; the check must still SEE it.
+    """
+
+    SEG = "syrviscore-apps"
+
+    def _post_rename_home(self, volumes, monkeypatch):
+        home = _platform_root(volumes, 4)  # /volume4/syrviscore stays the install root
+        _configure_segment(home, self.SEG)
+        _declare_share(home, "syrviscore-apps", self.SEG, "/volume5")
+        (volumes / "volume5" / self.SEG / "apps").mkdir(parents=True)  # the SHARE itself
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+        return home
+
+    def test_share_plus_a_same_named_plain_root_elsewhere_is_armed_but_passes(
+        self, volumes, monkeypatch
+    ):
+        home = self._post_rename_home(volumes, monkeypatch)
+        residual = volumes / "volume6" / self.SEG
+        (residual / "apps").mkdir(parents=True)
+
+        result = validators.InstallationValidator().check_home_collision()
+
+        assert result.passed is True  # 0.5.13 grading: a standing, accepted state
+        assert "ARMED" in result.message
+        assert str(residual) in result.details
+        # the decapitation surface is OUT of the blast radius — that is the win
+        assert str(home) not in result.details
+        assert result.fixable is False
+
+    def test_share_with_no_same_named_plain_root_elsewhere_is_a_clean_pass(
+        self, volumes, monkeypatch
+    ):
+        self._post_rename_home(volumes, monkeypatch)
+
+        result = validators.InstallationValidator().check_home_collision()
+
+        assert result.passed is True
+        assert "ARMED" not in result.message
+        assert "no 'syrviscore_N' / 'syrviscore-apps_N' sibling" in result.message
+
+    def test_an_actual_segment_rename_fails_hard(self, volumes, monkeypatch):
+        self._post_rename_home(volumes, monkeypatch)
+        renamed = volumes / "volume6" / (self.SEG + "_1")
+        (renamed / "apps").mkdir(parents=True)
+
+        result = validators.InstallationValidator().check_home_collision()
+
+        assert result.passed is False
+        assert str(renamed) in result.message
+        assert "sudo mv {} {}".format(renamed, volumes / "volume6" / self.SEG) in result.details
+
+    def test_an_install_root_rename_still_fails_after_the_segment_rename(
+        self, volumes, monkeypatch
+    ):
+        """Two watched names, not one: the install root is never configurable."""
+        self._post_rename_home(volumes, monkeypatch)
+        renamed = _renamed_root(volumes, 6)
+
+        result = validators.InstallationValidator().check_home_collision()
+
+        assert result.passed is False
+        assert "sudo mv {} {}".format(renamed, volumes / "volume6" / "syrviscore") in result.details
+
+    def test_the_segment_must_be_configured_for_its_rename_to_be_watched(
+        self, volumes, monkeypatch
+    ):
+        """Documents the coupling: writing SYRVIS_APPS_ROOT_NAME is what arms the
+        detection, so the key goes in BEFORE the trees move."""
+        home = _platform_root(volumes, 4)
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+        ((volumes / "volume6" / (self.SEG + "_1")) / "apps").mkdir(parents=True)
+
+        assert validators.InstallationValidator().check_home_collision().passed is True
+
+    def test_an_unrelated_share_arms_nothing_without_a_matching_plain_root(
+        self, volumes, monkeypatch
+    ):
+        home = _platform_root(volumes, 4)
+        _declare_share(home, "gaming", "Gaming", "/volume5")
+        (volumes / "volume5" / "Gaming").mkdir()
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+
+        assert "ARMED" not in validators.InstallationValidator().check_home_collision().message
+
+    def test_a_generic_share_name_colliding_on_another_volume_is_armed(self, volumes, monkeypatch):
+        """Name-generic really means generic: nothing about this is syrviscore."""
+        home = _platform_root(volumes, 4)
+        _declare_share(home, "gaming", "Gaming", "/volume5")
+        (volumes / "volume5" / "Gaming").mkdir()
+        (volumes / "volume6" / "Gaming").mkdir()
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+
+        result = validators.InstallationValidator().check_home_collision()
+
+        assert result.passed is True
+        assert "ARMED" in result.message
+        assert str(volumes / "volume6" / "Gaming") in result.details
+
+
 class TestSyrvisctlDoctor:
     """The manager-side diagnosis, which needs NO resolvable home."""
 
@@ -149,6 +263,25 @@ class TestSyrvisctlDoctor:
         assert rows[str(volumes / "volume4" / "syrviscore")] == "platform"
         assert rows[str(volumes / "volume6" / "syrviscore_1")] == "renamed"
         assert rows[str(volumes / "volume6" / "syrviscore.scaffold-20260816")] == "other"
+
+    def test_scan_classifies_a_renamed_apps_root_from_the_rootfs_cache(self, volumes, monkeypatch):
+        """The manager cannot import the platform or resolve a home, so the
+        configured segment reaches it via the rootfs boot-env cache — the same
+        file that already carries NTFY_URL, written by the same ensure."""
+        cache = volumes / "boot.env"
+        cache.write_text("NTFY_URL='https://n/x'\nSYRVIS_APPS_ROOT_NAME='syrviscore-apps'\n")
+        monkeypatch.setattr(manager_doctor, "BOOT_ENV_PATH", cache)
+        (volumes / "volume5" / "syrviscore-apps").mkdir()
+        (volumes / "volume6" / "syrviscore-apps_1" / "apps").mkdir(parents=True)
+
+        rows = {r["path"]: r["kind"] for r in manager_doctor.scan_volume_roots()}
+
+        assert rows[str(volumes / "volume5" / "syrviscore-apps")] == "platform"
+        assert rows[str(volumes / "volume6" / "syrviscore-apps_1")] == "renamed"
+
+    def test_an_absent_cache_leaves_the_segment_at_the_package_name(self, volumes, monkeypatch):
+        monkeypatch.setattr(manager_doctor, "BOOT_ENV_PATH", volumes / "absent.env")
+        assert manager_doctor.apps_root_name() == "syrviscore"
 
     def test_boot_hook_missing_is_a_finding(self, volumes, monkeypatch):
         monkeypatch.setattr(manager_doctor, "BOOT_SCRIPT_PATH", volumes / "absent-S99.sh")

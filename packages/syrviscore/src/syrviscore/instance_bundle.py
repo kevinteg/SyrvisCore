@@ -43,6 +43,7 @@ import yaml
 
 from syrviscore.errors import SyrvisError
 
+from . import paths
 from . import stack as stack_mod
 from .config_reader import is_secret_key
 from .service_schema import ServiceDefinition, ServiceValidationError
@@ -306,6 +307,17 @@ def _plan_env(
             )
         )
     env.setdefault("SYRVIS_HOME", str(home))
+
+    # The apps-root segment is a PATH COMPONENT the engine derives every located
+    # app's home from, so a malformed one is refused here rather than at the next
+    # reconcile — same reasoning as the SYRVIS_HOME check above. Blank is legal
+    # (it means "the default").
+    segment = (env.get(paths.APPS_ROOT_NAME_ENV) or "").strip()
+    if segment:
+        try:
+            paths.validate_apps_root_name(segment)
+        except paths.AppsRootNameError as e:
+            raise InstanceBundleError("bundle env {}".format(e))
 
     path = _env_path(home)
     existing = parse_env_file(path)

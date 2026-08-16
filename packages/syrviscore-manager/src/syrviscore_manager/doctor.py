@@ -46,13 +46,14 @@ SEAM_ACCOUNTS = ("syrvis-operator", "syrvis-reader")
 # duplicated across the package boundary, and it is duplicated precisely so the
 # manager never has to import the service package to answer "is it current?".
 # A deployed hook BELOW this is missing the 2026-08-16 reclaim guard / seam heal
-# / failure alarm and must be regenerated with `sudo syrvis verify --fix`.
-MIN_BOOT_HOOK_CONTRACT = 2
+# / failure alarm (contract 2) or its extension to the configured apps-root
+# segment (contract 3), and must be regenerated with `sudo syrvis verify --fix`.
+MIN_BOOT_HOOK_CONTRACT = 3
 
 _CONTRACT_RE = re.compile(r"^#\s*boot-hook-contract:\s*(\d+)\s*$", re.MULTILINE)
 _VOLUME_RE = re.compile(r"^volume\d+$")
-_COLLISION_RE = re.compile(r"^{}_\d+$".format(re.escape(paths.PACKAGE_NAME)))
 _NOLOGIN_RE = re.compile(r"(nologin|/false)$")
+_APPS_ROOT_RE = re.compile(r"^SYRVIS_APPS_ROOT_NAME=['\"]?([^'\"\n]*)['\"]?\s*$", re.MULTILINE)
 
 
 def _volumes_root() -> Path:
@@ -60,17 +61,41 @@ def _volumes_root() -> Path:
     return sim_root if sim_root else Path("/")
 
 
-def scan_volume_roots() -> List[Dict[str, Any]]:
-    """Every ``<volume>/syrviscore*`` directory on this host, classified.
+def apps_root_name() -> str:
+    """The configured apps-root segment, read from the ROOTFS boot-env cache.
 
-    The one command the responder never ran. ``kind`` is ``platform`` for the
-    expected name, ``renamed`` for a DSM collision sibling (``syrviscore_1``),
-    and ``other`` for anything else sharing the prefix (a ``.scaffold-*`` set
-    aside by hand, say). ``manifest`` and ``apps`` say WHICH platform root it is:
-    the install root carries the manifest, an app-home root carries ``apps/``.
+    The manager must answer "is this a renamed platform root?" without importing
+    the service package or resolving a home — both live inside the tree under
+    suspicion. The cache at :data:`BOOT_ENV_PATH` is written beside the boot hook
+    on every ensure precisely so this fact survives on the rootfs. Absent or
+    unreadable -> the package name, i.e. 0.5.13 behaviour.
+    """
+    try:
+        match = _APPS_ROOT_RE.search(BOOT_ENV_PATH.read_text())
+    except OSError:
+        return paths.PACKAGE_NAME
+    if not match:
+        return paths.PACKAGE_NAME
+    return match.group(1).strip() or paths.PACKAGE_NAME
+
+
+def scan_volume_roots() -> List[Dict[str, Any]]:
+    """Every platform-named volume-root directory on this host, classified.
+
+    The one command the responder never ran. ``kind`` is ``platform`` for an
+    expected name (the install root ``syrviscore`` or the configured apps-root
+    segment), ``renamed`` for a DSM collision sibling (``<name>_1``), and
+    ``other`` for anything else sharing a prefix (a ``.scaffold-*`` set aside by
+    hand, say). ``manifest`` and ``apps`` say WHICH platform root it is: the
+    install root carries the manifest, an app-home root carries ``apps/``.
     """
     found: List[Dict[str, Any]] = []
     root = _volumes_root()
+    watched = [paths.PACKAGE_NAME]
+    segment = apps_root_name()
+    if segment not in watched:
+        watched.append(segment)
+    collision_re = re.compile(r"^(?:{})_\d+$".format("|".join(re.escape(n) for n in watched)))
     try:
         volumes = sorted(root.iterdir())
     except OSError:
@@ -84,11 +109,11 @@ def scan_volume_roots() -> List[Dict[str, Any]]:
             continue
         for entry in entries:
             try:
-                if not entry.name.startswith(paths.PACKAGE_NAME) or not entry.is_dir():
+                if not any(entry.name.startswith(n) for n in watched) or not entry.is_dir():
                     continue
-                if entry.name == paths.PACKAGE_NAME:
+                if entry.name in watched:
                     kind = "platform"
-                elif _COLLISION_RE.match(entry.name):
+                elif collision_re.match(entry.name):
                     kind = "renamed"
                 else:
                     kind = "other"
@@ -205,9 +230,11 @@ def run(explicit_home: Optional[Path] = None) -> Dict[str, Any]:
     if renamed:
         findings.append(
             "COLLISION: {} renamed platform root(s) — {}. DSM renamed these at boot "
-            "because a shared folder shares the name '{}'. Check the target is absent "
+            "because a shared folder shares the name ({}). Check the target is absent "
             "or empty, then mv each back. Do NOT run 'syrvisctl install'.".format(
-                len(renamed), ", ".join(renamed), paths.PACKAGE_NAME
+                len(renamed),
+                ", ".join(renamed),
+                " / ".join(sorted({paths.PACKAGE_NAME, apps_root_name()})),
             )
         )
     if home["resolved"] is None:

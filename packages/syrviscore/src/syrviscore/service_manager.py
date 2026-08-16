@@ -220,12 +220,24 @@ class ServiceManager:
             )
         return str(data.get("location") or "")
 
+    def _apps_root_name(self) -> str:
+        """The configured apps-root segment (``SYRVIS_APPS_ROOT_NAME``).
+
+        Resolved through :func:`paths.get_apps_root_name` against THIS manager's
+        home, so a manager constructed with an explicit ``syrvis_home`` (tests,
+        the dashboard's bind-mounted view) reads that instance's config rather
+        than whatever the ambient process happens to have resolved.
+        """
+        return paths.get_apps_root_name(self.syrvis_home)
+
     def _app_home(self, service_or_name) -> Optional[Path]:
         """The ONE resolution point for an app's home (design/26).
 
         A ServiceDefinition/dict with a truthy ``location`` resolves to
-        ``<location>/syrviscore/apps/<name>``; a bare NAME reads ``location``
-        from the central materialized manifest and resolves the same way.
+        ``<location>/<apps-root>/apps/<name>`` — where ``<apps-root>`` is the
+        configured :func:`paths.get_apps_root_name` segment, ``syrviscore`` by
+        default; a bare NAME reads ``location`` from the central materialized
+        manifest and resolves the same way.
         No location -> None (the legacy layout under SYRVIS_HOME).
 
         A location that reaches here MUST re-match ``^/volume\\d+$`` — a
@@ -249,7 +261,7 @@ class ServiceManager:
                 "Service {!r} declares invalid location {!r} (must match "
                 "^/volume<N>$) — refusing to derive paths from it".format(name, location)
             )
-        return paths.resolve_volume_root(location) / "syrviscore" / "apps" / name
+        return paths.resolve_volume_root(location) / self._apps_root_name() / "apps" / name
 
     def _service_paths(
         self, name: str, service: Optional[ServiceDefinition] = None
@@ -335,7 +347,7 @@ class ServiceManager:
         # hardened root shell (umask 077) the mkdirs above would land 0700 and
         # a non-root container UID could not even traverse to its data dir.
         # Explicit best-effort 0755 on the home and the created ancestors
-        # (<vol>/syrviscore and <vol>/syrviscore/apps) — same explicit-chmod
+        # (<vol>/<apps-root> and <vol>/<apps-root>/apps) — same explicit-chmod
         # discipline every slot below gets. The volume root itself is DSM's.
         for ancestor in (home, home.parent, home.parent.parent):
             try:

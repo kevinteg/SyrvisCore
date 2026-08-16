@@ -151,12 +151,14 @@ def _config_checksums(home: Path, service, configs=None) -> Dict[str, str]:
     sums: Dict[str, str] = {}
     location = getattr(service, "location", "") or ""
     if location:
-        # v2 app home (design/26): rendered configs live under home/config.
+        # v2 app home (design/26): rendered configs live under home/config. The
+        # apps-root segment is instance config (SYRVIS_APPS_ROOT_NAME), resolved
+        # against the SAME home the record is being written under.
         from . import paths as paths_mod
 
         data_dir = (
             paths_mod.resolve_volume_root(location)
-            / "syrviscore"
+            / paths_mod.get_apps_root_name(home)
             / "apps"
             / service.name
             / "config"

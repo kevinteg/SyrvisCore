@@ -29,7 +29,18 @@ from . import privileged_ops
 
 # `/volume<N>` roots and DSM's collision-rename suffix (`syrviscore_1`).
 _VOLUME_RE = re.compile(r"^volume\d+$")
-_COLLISION_RE = re.compile(r"^{}_\d+$".format(re.escape(paths.PACKAGE_NAME)))
+
+
+def _collision_re(names):
+    """Regex matching ``<name>_<N>`` for any watched volume-root ``name``.
+
+    Two names are watched at once since 0.5.14: the install-root name
+    (``paths.PACKAGE_NAME``, never configurable) and the configured apps-root
+    segment (``SYRVIS_APPS_ROOT_NAME``). They are the same string on a default
+    install, so the pattern degrades to exactly the 0.5.13 one.
+    """
+    alternation = "|".join(re.escape(n) for n in sorted(set(names)))
+    return re.compile(r"^(?:{})_\d+$".format(alternation))
 
 
 def _volume_roots() -> List[Path]:
@@ -51,6 +62,40 @@ def _volume_roots() -> List[Path]:
                 out.append(entry)
         except OSError:  # pragma: no cover - a vanishing/permission-denied entry
             continue
+    return out
+
+
+def _strip_rename_suffix(name: str) -> str:
+    """``syrviscore-apps_1`` -> ``syrviscore-apps``: the name DSM renamed FROM."""
+    return re.sub(r"_\d+$", "", name)
+
+
+def _installed_locations(syrvis_home: Path) -> Dict[str, List[str]]:
+    """``{location: [service names]}`` for every INSTALLED located service.
+
+    Read straight off the central materialized manifests
+    (``services/<name>/syrvis-service.yaml``) — the platform's index of what is
+    actually installed — because a manifest with ``location:`` is proof the app
+    home was materialized once. Never raises: an unreadable/corrupt manifest is
+    skipped here and fails loudly on the per-service path instead.
+    """
+    import yaml  # local: validators is imported by the import-light CLI paths
+
+    out: Dict[str, List[str]] = {}
+    try:
+        manifests = sorted((Path(syrvis_home) / "services").glob("*/syrvis-service.yaml"))
+    except OSError:
+        return out
+    for manifest in manifests:
+        try:
+            data = yaml.safe_load(manifest.read_text())
+        except Exception:  # noqa: BLE001 - corrupt manifest: not this check's finding
+            continue
+        if not isinstance(data, dict):
+            continue
+        location = str(data.get("location") or "")
+        if location:
+            out.setdefault(location, []).append(manifest.parent.name)
     return out
 
 
@@ -452,24 +497,56 @@ class InstallationValidator:
             details="Run syrvisctl install to set up the service",
         )
 
+    def _watched_root_names(self) -> List[str]:
+        """The volume-root directory names the platform owns.
+
+        The install-root name (never configurable — the wrapper, sudoers policy
+        and SPK all bake it) plus the configured apps-root segment. Identical on
+        a default install; two distinct names after the 2026-08-16 rename.
+        """
+        names = [paths.PACKAGE_NAME]
+        try:
+            segment = paths.get_apps_root_name(self.syrvis_home)
+        except Exception:  # noqa: BLE001 - a bad segment is check_apps_root's finding
+            segment = paths.PACKAGE_NAME
+        if segment not in names:
+            names.append(segment)
+        return names
+
     def check_home_collision(self) -> CheckResult:
         """FAIL when a volume root carries a DSM collision-renamed sibling.
 
         The single cheapest, most specific signal the 2026-08-16 decapitation
         produced — and the platform was blind to it by construction, which is
-        why a human found it with ``ls``. DSM renames ``<volume>/syrviscore`` to
-        ``<volume>/syrviscore_1`` at the first COLD boot after a shared folder of
+        why a human found it with ``ls``. DSM renames ``<volume>/<name>`` to
+        ``<volume>/<name>_1`` at the first COLD boot after a shared folder of
         the same name is created anywhere on the box. Every control-plane path is
         absolute into that tree, so one rename takes out the wrapper, the
         operator seam, and both self-healers at once.
 
         Two findings, in severity order:
 
-        * FAIL — a ``<volume>/syrviscore_<N>`` sibling EXISTS. The tree is
-          renamed right now; the message carries the exact ``mv``.
-        * WARN — a shares.d declaration claims the platform's own directory name
-          as a DSM share name while plain platform roots exist. Nothing is broken
-          yet; the landmine is ARMED and the next cold boot trips it.
+        * FAIL — a ``<volume>/<watched-name>_<N>`` sibling EXISTS. The tree is
+          renamed right now; the message carries the exact ``mv``. Watched names
+          are the install root (``syrviscore``) and the configured apps-root
+          segment, so a post-rename ``syrviscore-apps_1`` fails exactly as
+          loudly as the original did.
+        * ⚠ ARMED (passed=True) — a shares.d share name equals a PLAIN volume-root
+          directory of the same name on a DIFFERENT volume. Nothing is broken
+          yet; the landmine is armed and the next cold boot trips it.
+
+        The armed test is deliberately NAME-GENERIC rather than "is the share
+        called ``syrviscore``". That matters because of what the owner's
+        2026-08-16 rename does and does NOT buy: renaming the share to
+        ``syrviscore-apps`` (and the apps roots with it) takes the /volume4
+        SYRVIS_HOME — the decapitation surface, the tree that holds the wrapper,
+        the seam and both self-healers — permanently OUT of the blast radius,
+        which is the whole reason the rename was worth doing. It does not
+        eliminate the collision CLASS: ``/volume6/syrviscore-apps`` is still a
+        plain directory wearing the new share's name on another volume, so the
+        pattern returns, one volume wide, with only app data behind it. The owner
+        accepts that residual (the boot guard reclaims it), so it grades as the
+        ⚠-ARMED pass — but a check that stopped LOOKING for it would be lying.
 
         ``fixable=False`` deliberately: reclaiming a renamed root is the boot
         guard's job (it can tell an empty scaffold from a real share and refuses
@@ -477,18 +554,25 @@ class InstallationValidator:
         directories on a NAS would be far worse than one that tells the truth.
         """
         name = "Home collision"
+        watched = self._watched_root_names()
+        collision_re = _collision_re(watched)
         renamed: List[Path] = []
         plain_roots: List[Path] = []
+        # name -> the plain volume-root directories carrying it (any name, so the
+        # armed test can pair an arbitrary share against an arbitrary root).
+        plain_by_name: Dict[str, List[Path]] = {}
         for volume in _volume_roots():
             for entry in _iter_dirs(volume):
-                if entry.name == paths.PACKAGE_NAME:
-                    plain_roots.append(entry)
-                elif _COLLISION_RE.match(entry.name):
+                if collision_re.match(entry.name):
                     renamed.append(entry)
+                    continue
+                plain_by_name.setdefault(entry.name, []).append(entry)
+                if entry.name in watched:
+                    plain_roots.append(entry)
 
         if renamed:
             moves = "; ".join(
-                "sudo mv {} {}".format(p, p.parent / paths.PACKAGE_NAME) for p in renamed
+                "sudo mv {} {}".format(p, p.parent / _strip_rename_suffix(p.name)) for p in renamed
             )
             return CheckResult(
                 name=name,
@@ -498,45 +582,46 @@ class InstallationValidator:
                 ),
                 details=(
                     "DSM renamed these at boot because a shared folder shares the name "
-                    "'{}'. Nothing is lost — the data is in the renamed directory. Verify "
+                    "({}). Nothing is lost — the data is in the renamed directory. Verify "
                     "the target is absent or empty FIRST, then: {}. Do NOT run "
-                    "'syrvisctl install'.".format(paths.PACKAGE_NAME, moves)
+                    "'syrvisctl install'.".format(" / ".join(watched), moves)
                 ),
                 fixable=False,
             )
 
-        armed = self._colliding_share_names()
-        if armed and plain_roots:
-            # passed=True DELIBERATELY (0.5.13): this is the PERMANENT armed
-            # precondition — design/53 names the share 'syrviscore' on purpose
-            # so location: derivation lands inside it, and the design/61/63
-            # boot guard is the accepted mitigation. CheckResult is binary, and
-            # encoding this standing fact as passed=False put the smoke tier —
-            # and therefore the nas-heartbeat dead-man that gates on it —
-            # permanently red within hours of the check shipping (observed
-            # 2026-08-16: `verify rc=1 failed=[Home collision]` in every
-            # fail-ping). A liveness gate must only go red for states someone
-            # can FIX; the armed landmine is a design decision, carried here as
-            # message truth, in design/53, and by check_boot_script's guard —
-            # not as a perpetual alarm. An ACTUAL rename (branch above) still
-            # fails hard.
+        armed = self._armed_share_collisions(plain_by_name)
+        if armed:
+            # passed=True DELIBERATELY (0.5.13 semantics, kept): this is a
+            # STANDING precondition the owner has accepted, not an incident.
+            # design/53 needed the share name so location: derivation landed
+            # inside it; the 2026-08-16 rename moves the SYRVIS_HOME out of
+            # range but leaves the same shape one volume wide, and the boot
+            # guard is the accepted mitigation. CheckResult is binary, and
+            # encoding a standing fact as passed=False put the smoke tier — and
+            # therefore the nas-heartbeat dead-man gating on it — permanently
+            # red within hours of the check shipping (observed 2026-08-16:
+            # `verify rc=1 failed=[Home collision]` in every fail-ping). A
+            # liveness gate must only go red for states someone can FIX; the
+            # armed landmine is carried here as message truth, not as a
+            # perpetual alarm. An ACTUAL rename (branch above) still fails hard.
+            at_risk = sorted({str(p) for _, roots in armed for p in roots})
             return CheckResult(
                 name=name,
                 passed=True,
-                message="⚠ ARMED (by design/53): DSM share '{}' ({}) coexists with {} "
-                "plain platform root(s) — a cold boot renames them; the boot guard "
-                "reclaims".format(
-                    paths.PACKAGE_NAME,
-                    ", ".join(armed),
-                    len(plain_roots),
+                message="⚠ ARMED (accepted): DSM share(s) {} coexist with {} plain "
+                "volume-root dir(s) of the same name on other volumes — a cold boot "
+                "renames them; the boot guard reclaims".format(
+                    ", ".join(label for label, _ in armed), len(at_risk)
                 ),
                 details=(
-                    "A shared folder and a plain volume directory of the same name coexist "
-                    "fine until the next COLD boot, when DSM renames the plain ones to "
-                    "'{}_1'. The 0.5.9+ rootfs boot hook reclaims the rename at the next "
-                    "boot and the boot-integrity gate detects it within 10 minutes; the "
-                    "standing fix would be renaming the SHARE, rejected while location: "
-                    "derivation depends on the name (design/62/63).".format(paths.PACKAGE_NAME)
+                    "A shared folder and a same-named plain volume directory on ANOTHER "
+                    "volume coexist fine until the next COLD boot, when DSM renames the "
+                    "plain ones to '<name>_1'. At risk: {}. The 0.5.9+ rootfs boot hook "
+                    "reclaims the rename at the next boot (0.5.14+ for the configured "
+                    "apps-root segment) and the boot-integrity gate detects it within 10 "
+                    "minutes. The 2026-08-16 share rename deliberately took SYRVIS_HOME "
+                    "out of this blast radius; what remains is app data on one volume, "
+                    "which the owner accepts.".format(", ".join(at_risk))
                 ),
                 fixable=False,
             )
@@ -550,13 +635,19 @@ class InstallationValidator:
         return CheckResult(
             name=name,
             passed=True,
-            message="{} platform root(s), no '{}_N' sibling".format(
-                len(plain_roots), paths.PACKAGE_NAME
+            message="{} platform root(s), no {} sibling".format(
+                len(plain_roots), " / ".join("'{}_N'".format(n) for n in watched)
             ),
         )
 
-    def _colliding_share_names(self) -> List[str]:
-        """shares.d declarations whose DSM share name IS the platform's own name."""
+    def _armed_share_collisions(self, plain_by_name: Dict[str, List[Path]]):
+        """(label, at-risk roots) for every shares.d share that arms the rename.
+
+        NAME-GENERIC by design (see :meth:`check_home_collision`): a share arms
+        the DSM collision when a PLAIN volume-root directory of the same name
+        exists on a DIFFERENT volume. Its own directory (same volume) is the
+        share itself and is never at risk.
+        """
         if not self.syrvis_home:
             return []
         try:
@@ -567,9 +658,117 @@ class InstallationValidator:
             return []
         out = []
         for share_id, decl in sorted(shares.items()):
-            if PurePosixPath(decl.root).name == paths.PACKAGE_NAME:
-                out.append("{} -> {}".format(share_id, decl.root))
+            root = PurePosixPath(decl.root)
+            share_volume = root.parent.name  # e.g. "volume5" (sim-root safe)
+            at_risk = [p for p in plain_by_name.get(root.name, []) if p.parent.name != share_volume]
+            if at_risk:
+                out.append(("{} -> {}".format(share_id, decl.root), at_risk))
         return out
+
+    def check_apps_root(self) -> CheckResult:
+        """FAIL when the CONFIGURED apps-root tree is missing at a located volume.
+
+        The window-day safety net for the 2026-08-16 rename. Located apps derive
+        their home as ``<location>/<SYRVIS_APPS_ROOT_NAME>/apps/<name>``; setting
+        the key and moving the trees are two separate acts, and doing them in
+        either order leaves a window where the platform derives a path that is
+        not there. Absent is CREATE to a declarative engine — which is how a
+        reconcile once scaffolded empty trees beside real databases — so this
+        says so BEFORE anything converges, and names the exact ``mv``.
+
+        Scoped to INSTALLED services (a materialized manifest with ``location:``
+        proves the tree existed once), so a declared-but-never-installed app can
+        never make it fire. An invalid ``SYRVIS_APPS_ROOT_NAME`` fails here too:
+        that is the one place an operator sees why nothing resolves.
+
+        It also refuses to ASSERT what it cannot know: ``config/.env`` is 0600 by
+        design, so a caller that cannot read it (the unprivileged ``syrvis-reader``
+        seam identity) would resolve the DEFAULT segment and then "discover" that
+        the renamed tree is missing. That is the 0.5.13 lesson — a check that
+        cannot reach its input must say so, not go red forever.
+        """
+        name = "Apps root"
+        try:
+            segment = paths.get_apps_root_name(self.syrvis_home)
+        except paths.AppsRootNameError as e:
+            return CheckResult(name=name, passed=False, message=str(e), fixable=False)
+
+        if not self.syrvis_home:
+            return CheckResult(
+                name=name,
+                passed=True,
+                message="segment '{}' (tree check skipped — SYRVIS_HOME not found)".format(segment),
+            )
+
+        env_path = self.syrvis_home / "config" / ".env"
+        if env_path.exists() and not os.access(str(env_path), os.R_OK):
+            return CheckResult(
+                name=name,
+                passed=True,
+                message="segment unknown — {} is not readable by this identity "
+                "(0600 by design); re-run as root or the operator".format(env_path),
+            )
+
+        locations = _installed_locations(self.syrvis_home)
+        if not locations:
+            return CheckResult(
+                name=name,
+                passed=True,
+                message="segment '{}', no located services installed".format(segment),
+            )
+
+        missing = []
+        for location in sorted(locations):
+            root = paths.resolve_volume_root(location) / segment
+            if not root.is_dir():
+                missing.append((location, root))
+        if not missing:
+            return CheckResult(
+                name=name,
+                passed=True,
+                message="segment '{}' present at {} located volume(s)".format(
+                    segment, len(locations)
+                ),
+            )
+
+        steps = []
+        for location, root in missing:
+            volume_root = paths.resolve_volume_root(location)
+            source = None
+            for candidate in _iter_dirs(volume_root):
+                if candidate.name == paths.PACKAGE_NAME and (candidate / "apps").is_dir():
+                    source = candidate
+                    break
+                if _collision_re([segment]).match(candidate.name):
+                    source = candidate
+                    break
+            if source is not None:
+                steps.append("sudo mv {} {}".format(source, root))
+            else:
+                steps.append("(no candidate tree found on {} — restore {})".format(location, root))
+        return CheckResult(
+            name=name,
+            passed=False,
+            message="apps-root '{}' MISSING at {}: {}".format(
+                segment,
+                ", ".join(location for location, _ in missing),
+                ", ".join(str(root) for _, root in missing),
+            ),
+            details=(
+                "{} services are installed with location: on these volumes, so their homes "
+                "derive as <location>/{}/apps/<name> — a path that does not exist. Do NOT "
+                "reconcile: a declarative engine reads absent as CREATE and would scaffold "
+                "empty trees beside the real data. Either move the tree into place ({}) or "
+                "unset SYRVIS_APPS_ROOT_NAME in config/.env to go back to "
+                "'{}'.".format(
+                    sum(len(locations[location]) for location, _ in missing),
+                    segment,
+                    "; ".join(steps),
+                    paths.PACKAGE_NAME,
+                )
+            ),
+            fixable=False,
+        )
 
     def check_manifest(self) -> CheckResult:
         """Check if manifest exists and is valid."""
@@ -662,6 +861,9 @@ class InstallationValidator:
         # state a collision rename produces, and this check's whole job is to say
         # why. It touches only volume roots, never the install tree.
         report.checks.append(self.check_home_collision())
+        # Same reasoning: an unresolvable home is a state this check REPORTS on
+        # (it names the segment that failed to resolve), not one it skips.
+        report.checks.append(self.check_apps_root())
 
         if self.syrvis_home:
             report.checks.append(self.check_manifest())
@@ -1268,7 +1470,11 @@ class SystemValidator:
             )
 
         try:
-            expected = privileged_ops.render_boot_script(self.install_dir)
+            # Same segment resolution the WRITER uses, or every verify on a
+            # renamed-apps-root instance would report permanent drift.
+            expected = privileged_ops.render_boot_script(
+                self.install_dir, privileged_ops.read_apps_root_name(self.install_dir)
+            )
         except Exception as e:  # noqa: BLE001 - a render failure must not crash verify
             return CheckResult(
                 name="Boot script",

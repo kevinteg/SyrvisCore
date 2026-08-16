@@ -688,7 +688,14 @@ def doctor_cmd(as_json, path):
     )
 
     click.echo()
-    click.echo("Volume roots (/volume*/{}*):".format(paths.PACKAGE_NAME))
+    click.echo(
+        "Volume roots ({}):".format(
+            ", ".join(
+                "/volume*/{}*".format(n)
+                for n in sorted({paths.PACKAGE_NAME, doctor_mod.apps_root_name()})
+            )
+        )
+    )
     if not report["volume_roots"]:
         click.echo("  (none found — not a DSM volume layout, or nothing installed)")
     for row in report["volume_roots"]:

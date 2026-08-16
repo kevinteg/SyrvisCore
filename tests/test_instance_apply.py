@@ -171,6 +171,22 @@ class TestApplyEnv:
         with pytest.raises(InstanceBundleError, match="SYRVIS_HOME"):
             self._apply(tmp_path, make_env(SYRVIS_HOME="/volume9/elsewhere"))
 
+    @pytest.mark.parametrize("bad", ["with/slash", "..", "syrviscore_1"])
+    def test_bad_apps_root_segment_rejected_at_apply(self, tmp_path, bad):
+        """It is a PATH COMPONENT every located app home derives from — refuse it
+        here, not at the next reconcile."""
+        with pytest.raises(InstanceBundleError, match="SYRVIS_APPS_ROOT_NAME"):
+            self._apply(tmp_path, make_env(SYRVIS_APPS_ROOT_NAME=bad))
+
+    def test_a_valid_apps_root_segment_is_written(self, tmp_path):
+        report = self._apply(tmp_path, make_env(SYRVIS_APPS_ROOT_NAME="syrviscore-apps"))
+        assert report["env"]["action"] == "create"
+        assert "SYRVIS_APPS_ROOT_NAME=syrviscore-apps" in (tmp_path / "config" / ".env").read_text()
+
+    def test_a_blank_apps_root_segment_means_the_default(self, tmp_path):
+        report = self._apply(tmp_path, make_env(SYRVIS_APPS_ROOT_NAME=""))
+        assert report["env"]["action"] == "create"
+
     def test_update_reports_key_names_only(self, tmp_path):
         (tmp_path / "config").mkdir(parents=True)
         (tmp_path / "config" / ".env").write_text("DOMAIN=old.example\nGONE=1\n")

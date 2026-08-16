@@ -488,6 +488,10 @@ def generate_env_file(config: dict, install_dir: Path, username: str) -> Path:
 # Installation
 SYRVIS_HOME={install_dir}
 SYRVIS_DATA_DIR={install_dir}/data
+# Directory name a LOCATED app's home derives under: <location>/<name>/apps/<app>.
+# Blank = 'syrviscore'. Emitted blank so _preserve_existing_values carries an
+# operator-set value across setup re-runs.
+SYRVIS_APPS_ROOT_NAME=
 
 # Network (macvlan)
 NETWORK_INTERFACE={config['interface']}

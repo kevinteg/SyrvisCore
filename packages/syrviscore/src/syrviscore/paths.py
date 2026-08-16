@@ -17,6 +17,7 @@ Directory Structure (v3, split packages):
 
 import os
 import json
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -31,6 +32,12 @@ class SyrvisHomeError(SyrvisError):
     code = "home_not_found"
 
 
+class AppsRootNameError(SyrvisError):
+    """Raised when ``SYRVIS_APPS_ROOT_NAME`` is set to an unusable segment."""
+
+    code = "apps_root_name_invalid"
+
+
 # Schema version for manifest compatibility
 # Must match syrviscore_manager.manifest.MANIFEST_SCHEMA_VERSION
 MANIFEST_SCHEMA_VERSION = 3
@@ -40,7 +47,25 @@ MANIFEST_SCHEMA_VERSION = 3
 # DSM SHARE-name namespace: a shared folder of this name anywhere on the box
 # collides with every plain volume root of the same name at the next cold boot
 # (incident 2026-08-16), which is what `check_home_collision` looks for.
+#
+# This is the INSTALL root's name (SYRVIS_HOME = `<volume>/syrviscore`) and it is
+# NOT configurable — the wrapper, the sudoers policy and the SPK all bake it. The
+# APP-HOME root segment (`<volume>/<segment>/apps/<name>`) is a separate, now
+# configurable name; see `get_apps_root_name`.
 PACKAGE_NAME = "syrviscore"
+
+# Instance-config key for the APP-HOME root segment (owner ruling 2026-08-16).
+# Unset/blank == PACKAGE_NAME, so every existing install keeps deriving
+# `<volume>/syrviscore/apps/<name>` byte-for-byte until the key is written.
+APPS_ROOT_NAME_ENV = "SYRVIS_APPS_ROOT_NAME"
+
+# One path segment: no separators, no traversal, no leading dot. The trailing
+# `_<digits>` shape is REFUSED on purpose — that is exactly the suffix DSM hangs
+# on a collision-renamed root, so a segment wearing it would make the boot
+# reclaim guard and `check_home_collision` unable to tell configuration from
+# damage.
+_APPS_ROOT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_RENAME_SUFFIX_RE = re.compile(r"_\d+$")
 
 
 # =============================================================================
@@ -207,7 +232,7 @@ def get_syrvis_home() -> Path:
         return default
 
     # Strategy 3: Search other volumes. NB per-service app homes now materialize
-    # a real `<location>/syrviscore/apps/` tree on secondary volumes (design/26),
+    # a real `<location>/<apps-root>/apps/` tree on secondary volumes (design/26),
     # so a bare `.syrviscore-manifest.json` marker is no longer sufficient proof
     # of an install root — a stray/mis-scoped copy under a location root would
     # otherwise mis-root the whole CLI. Require the manifest to self-identify.
@@ -320,6 +345,86 @@ def get_config_dir() -> Path:
 def get_env_path() -> Path:
     """Get path to .env configuration file."""
     return get_config_dir() / ".env"
+
+
+def read_env_value(env_path, key: str) -> str:
+    """Best-effort read of ``KEY=value`` from a ``.env``-style file. Never raises.
+
+    Deliberately dumb (no shell, no sourcing, no dotenv dependency): it exists so
+    the lowest layers — this module, and the ROOT-only boot-hook writer in
+    ``privileged_ops`` (which re-exports it) — can read one scalar out of the
+    instance config without importing the CLI's dotenv stack or mutating
+    ``os.environ``. Returns "" when the file or key is absent or unreadable.
+    """
+    try:
+        text = Path(env_path).read_text()
+    except OSError:
+        return ""
+    prefix = "{}=".format(key)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if not line.startswith(prefix):
+            continue
+        value = line[len(prefix) :].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        return value
+    return ""
+
+
+def validate_apps_root_name(value: str) -> str:
+    """Validate one apps-root segment, raising :class:`AppsRootNameError`. Pure."""
+    if value in (".", "..") or not _APPS_ROOT_NAME_RE.match(value):
+        raise AppsRootNameError(
+            "{} must be a single path segment matching [A-Za-z0-9][A-Za-z0-9._-]* "
+            "(got {!r})".format(APPS_ROOT_NAME_ENV, value)
+        )
+    if _RENAME_SUFFIX_RE.search(value):
+        raise AppsRootNameError(
+            "{} may not end in '_<digits>' (got {!r}) — that is the suffix DSM "
+            "hangs on a collision-renamed volume root, and a segment wearing it "
+            "would make the boot reclaim guard unable to tell configuration from "
+            "damage".format(APPS_ROOT_NAME_ENV, value)
+        )
+    return value
+
+
+def get_apps_root_name(syrvis_home: Optional[Path] = None) -> str:
+    """The configured APP-HOME root segment — the ``X`` in ``<volume>/X/apps/<name>``.
+
+    Owner ruling 2026-08-16: the DSM share that made the cold-boot collision class
+    possible is renamed ``syrviscore`` -> ``syrviscore-apps``, which only works if
+    the platform stops hardcoding the segment it derives located app homes from.
+
+    Resolution order, matching how every other instance-config value is read
+    (``get_domain_from_env``): the process environment first (the CLI's
+    ``load_dotenv`` and an explicit export both land there), then
+    ``$SYRVIS_HOME/config/.env`` directly — the platform wrapper exports only
+    SYRVIS_HOME, so a seam invocation reads the file. Blank or absent yields
+    :data:`PACKAGE_NAME`, so nothing changes for an install that never sets it.
+
+    A SET-BUT-INVALID value raises rather than falling back: silently deriving a
+    different tree than the operator configured is how empty databases get
+    started over real ones. An UNREADABLE ``.env`` (the 0600 file seen by the
+    unprivileged ``syrvis-reader`` identity) still falls back to the default —
+    ``InstallationValidator.check_apps_root`` detects that case explicitly and
+    reports the segment as UNKNOWN rather than asserting either way.
+    """
+    raw = (os.environ.get(APPS_ROOT_NAME_ENV) or "").strip()
+    if not raw:
+        base = Path(syrvis_home) if syrvis_home is not None else None
+        if base is None:
+            try:
+                base = get_syrvis_home()
+            except Exception:  # noqa: BLE001 - unresolvable home: use the default
+                base = None
+        if base is not None:
+            raw = read_env_value(base / "config" / ".env", APPS_ROOT_NAME_ENV).strip()
+    if not raw:
+        return PACKAGE_NAME
+    return validate_apps_root_name(raw)
 
 
 def get_docker_compose_path() -> Path:
