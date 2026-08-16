@@ -93,9 +93,17 @@ class TestCheckHomeCollision:
 
         result = validators.InstallationValidator().check_home_collision()
 
-        assert result.passed is False
-        assert "armed for a cold-boot rename" in result.message
-        assert "Rename the SHARE" in result.details
+        # passed=True as of 0.5.13: the armed precondition is the PERMANENT
+        # design/53 state (the share name is load-bearing for location:
+        # derivation) with the boot guard as accepted mitigation. Grading it
+        # passed=False put the smoke tier — and the nas-heartbeat dead-man
+        # gating on it — permanently red (observed live 2026-08-16, hours
+        # after the check shipped). The truth stays in the message; only an
+        # ACTUAL syrviscore_N rename fails the check.
+        assert result.passed is True
+        assert "ARMED" in result.message
+        assert "cold boot renames" in result.message
+        assert "boot hook reclaims" in result.details or "boot-integrity" in result.details
         assert result.fixable is False
 
     def test_an_unrelated_share_name_is_fine(self, volumes, monkeypatch):

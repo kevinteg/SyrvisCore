@@ -507,11 +507,25 @@ class InstallationValidator:
 
         armed = self._colliding_share_names()
         if armed and plain_roots:
+            # passed=True DELIBERATELY (0.5.13): this is the PERMANENT armed
+            # precondition — design/53 names the share 'syrviscore' on purpose
+            # so location: derivation lands inside it, and the design/61/63
+            # boot guard is the accepted mitigation. CheckResult is binary, and
+            # encoding this standing fact as passed=False put the smoke tier —
+            # and therefore the nas-heartbeat dead-man that gates on it —
+            # permanently red within hours of the check shipping (observed
+            # 2026-08-16: `verify rc=1 failed=[Home collision]` in every
+            # fail-ping). A liveness gate must only go red for states someone
+            # can FIX; the armed landmine is a design decision, carried here as
+            # message truth, in design/53, and by check_boot_script's guard —
+            # not as a perpetual alarm. An ACTUAL rename (branch above) still
+            # fails hard.
             return CheckResult(
                 name=name,
-                passed=False,
-                message="DSM share named '{}' declared ({}) while {} plain platform "
-                "root(s) exist — armed for a cold-boot rename".format(
+                passed=True,
+                message="⚠ ARMED (by design/53): DSM share '{}' ({}) coexists with {} "
+                "plain platform root(s) — a cold boot renames them; the boot guard "
+                "reclaims".format(
                     paths.PACKAGE_NAME,
                     ", ".join(armed),
                     len(plain_roots),
@@ -519,8 +533,10 @@ class InstallationValidator:
                 details=(
                     "A shared folder and a plain volume directory of the same name coexist "
                     "fine until the next COLD boot, when DSM renames the plain ones to "
-                    "'{}_1'. Rename the SHARE (the platform roots cannot move without "
-                    "stranding every located service).".format(paths.PACKAGE_NAME)
+                    "'{}_1'. The 0.5.9+ rootfs boot hook reclaims the rename at the next "
+                    "boot and the boot-integrity gate detects it within 10 minutes; the "
+                    "standing fix would be renaming the SHARE, rejected while location: "
+                    "derivation depends on the name (design/62/63).".format(paths.PACKAGE_NAME)
                 ),
                 fixable=False,
             )
