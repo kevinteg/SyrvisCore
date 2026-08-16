@@ -7,6 +7,8 @@ import pytest
 from syrviscore import dashboard as d
 from syrviscore.service_schema import ServiceDefinition, ServiceValidationError
 
+from conftest import stamp_install_root
+
 
 # ---------------------------------------------------------------------------
 # build_dashboard — the pure projection (no SYRVIS_HOME needed)
@@ -118,6 +120,7 @@ def home(tmp_path, monkeypatch):
     h = tmp_path / "syrviscore"
     (h / "config").mkdir(parents=True)
     monkeypatch.setenv("SYRVIS_HOME", str(h))
+    stamp_install_root(h)
     return h
 
 

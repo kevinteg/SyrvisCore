@@ -68,10 +68,25 @@ case "$1" in
             exit 1
         fi
 
-        # Check if any service version is installed
+        # Check if any service version is installed.
+        #
+        # A FAILED home scan is an ERROR, not "nothing installed yet" (incident
+        # 2026-08-16): when DSM renamed /volume4/syrviscore to syrviscore_1 at a
+        # cold boot, this scan found nothing and the old code still exit 0'd, so
+        # DSM's own package status stayed green through a fully decapitated
+        # install. Exit 1 - a red package status is the cheapest out-of-band
+        # signal this failure can produce.
         SYRVIS_HOME=$(find_syrvis_home)
 
-        if [ -n "$SYRVIS_HOME" ] && [ -L "${SYRVIS_HOME}/current" ]; then
+        if [ -z "$SYRVIS_HOME" ]; then
+            log_msg "ERROR" "Status: no SyrvisCore install root found on any volume"
+            log_msg "ERROR" "If this box HAD an install, it was renamed or unmounted, not lost:"
+            log_msg "ERROR" "  ls -d /volume*/${PACKAGE_NAME}*   # a '${PACKAGE_NAME}_1' sibling means DSM renamed it at boot"
+            log_msg "ERROR" "Do NOT run 'syrvisctl install' before checking - that installs a SECOND tree."
+            exit 1
+        fi
+
+        if [ -L "${SYRVIS_HOME}/current" ]; then
             # Service is installed, check if setup is complete
             if grep -q '"setup_complete": true' "${SYRVIS_HOME}/.syrviscore-manifest.json" 2>/dev/null; then
                 log_info "Status: Running (setup complete)"

@@ -13,6 +13,8 @@ from click.testing import CliRunner
 from syrviscore import catalog, profiles
 from syrviscore.services_d import declaration_path
 
+from conftest import stamp_install_root
+
 
 class TestCatalogTemplates:
     def test_every_bundled_template_resolves(self, monkeypatch):
@@ -86,6 +88,7 @@ class TestCli:
         from syrviscore.cli import cli
 
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         r = CliRunner().invoke(cli, ["profile", "list", "--json"])
         assert r.exit_code == 0, r.output
         names = [p["name"] for p in json.loads(r.output)["profiles"]]
@@ -99,6 +102,7 @@ class TestCli:
 
         monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         r = CliRunner().invoke(cli, ["profile", "enable", "monitoring", "--json"])
         assert r.exit_code == 0, r.output
         report = json.loads(r.output)

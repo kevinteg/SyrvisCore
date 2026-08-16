@@ -176,6 +176,16 @@ COMMANDS: List[Command] = [
     Command("versions_list", "syrvisctl", ["list"], read_only=True, flags=["--json"]),
     Command("check_updates", "syrvisctl", ["check"], read_only=True, flags=["--json"]),
     Command("info", "syrvisctl", ["info"], read_only=True, flags=["--json"]),
+    # syrvisctl doctor is the ONE verb that still answers when SYRVIS_HOME is
+    # renamed, unmounted or gone: it runs from the SPK's rootfs venv, imports
+    # nothing from the service package (which lives inside the tree under
+    # suspicion) and reports a failed home resolution as a FINDING instead of
+    # exiting. It is therefore the highest-value read on the seam during the
+    # exact failure where `syrvis status`/`verify` cannot run at all — so it is
+    # read_only (no sudo, reader-callable), like versions_list/check_updates.
+    # NB it exits 1 when it finds something; the caller reads the JSON, not the
+    # exit code, to tell "unreachable" from "reachable and broken".
+    Command("doctor", "syrvisctl", ["doctor"], read_only=True, flags=["--json"]),
     Command("backup_list", "syrvisctl", ["backup", "list"], read_only=True, flags=["--json"]),
     Command(
         "cleanup_preview",
@@ -288,6 +298,22 @@ COMMANDS: List[Command] = [
         sudo=True,
         expect_json=False,
         positional=Slot("name", KIND_NAME),
+    ),
+    # service recreate replaces a service's CONTAINER from its already-installed
+    # manifest (`up -d --force-recreate`) and writes no declared intent. It is the
+    # only verb that re-bakes an env_file — Docker fixes a container's environment
+    # at CREATE time, so `restart` cannot (incident 2026-08-16). Same trust class
+    # and argv shape as service_start/service_stop: sudo, one is_name-gated
+    # positional, no operator-supplied content. Longer timeout than start because
+    # a force-recreate stops the old container under its own stop grace first.
+    Command(
+        "service_recreate",
+        "syrvis",
+        ["service", "recreate"],
+        sudo=True,
+        expect_json=False,
+        positional=Slot("name", KIND_NAME),
+        timeout_s=300,
     ),
     # service task runs a DECLARED, schema-audited one-shot argv inside the
     # service's own RUNNING container (docker exec) — the encapsulated

@@ -320,7 +320,44 @@ def compute_plan(syrvis_home: Path) -> Dict[str, Any]:
     plan["invalid"] = invalid
     plan["source"] = get_configured_source(syrvis_home)
     plan["scripts"] = _script_integrity(declarations, jobs_dir)
+    plan["confs"] = _conf_integrity(declarations, syrvis_home / "config")
     return plan
+
+
+def _conf_integrity(declarations: Dict[str, Any], config_dir: Path) -> Dict[str, Any]:
+    """Per-job installed-CONF state: presence + size. NEVER content, never a hash.
+
+    The exact twin of :func:`_script_integrity`, for the THIRD artifact a job
+    needs. ``schedule sync`` installs the declaration and the script; a separate
+    operator step (``config set``) installs ``config/<name>.conf`` — the ntfy
+    slug, the Healthchecks ping URL, an API token, a generated list. Nothing
+    reported whether that step had ever run, and because a conf-consuming job
+    treats a missing conf as ``exit 0`` plus a stderr line (correctly — a cron
+    job must never page), a confless job is indistinguishable from a healthy one
+    on every other plane: declared, scheduled, script present and hash-clean,
+    exit 0, silent.
+
+    NO sha256, unlike the script twin, and the asymmetry is deliberate: a job
+    SCRIPT is public code whose digest is the whole point, while a conf holds
+    live credentials and a digest of a short low-entropy value is a
+    brute-forceable oracle over the seam. Presence and size answer "did the
+    install step run" and nothing more, which is the question.
+
+    Unreadable is reported as an ``error`` string rather than as absent —
+    "never installed" and "installed but the operator cannot stat it" are
+    different problems with different fixes.
+    """
+    out: Dict[str, Any] = {}
+    for name in sorted(declarations):
+        conf = config_dir / "{}.conf".format(name)
+        entry: Dict[str, Any] = {"present": conf.is_file()}
+        if entry["present"]:
+            try:
+                entry["bytes"] = conf.stat().st_size
+            except OSError as e:
+                entry["error"] = str(e)
+        out[name] = entry
+    return out
 
 
 def _script_integrity(declarations: Dict[str, Any], jobs_dir: Path) -> Dict[str, Any]:

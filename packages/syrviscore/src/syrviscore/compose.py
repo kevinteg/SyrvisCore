@@ -29,10 +29,25 @@ import yaml
 # together (Renovate pinDigests does both). `syrvis images` marks a tag-only core
 # pin as needs-attention; a digest pin from a trusted publisher reads as trusted.
 DEFAULT_DOCKER_IMAGES = {
+    # v3.7 line, NOT v3.6: Traefik ends v3.6 SECURITY support on 2026-08-16, while
+    # v3.7 (GA 2026-05-05) keeps active + security support. v3.7.10 and v3.6.25 both
+    # shipped 2026-07-31 from the same security batch and BOTH carry zero open
+    # advisories; the v3.6.5 we were on carried 17 (10 high), incl. CVE-2026-71324
+    # (unauthenticated CONNECT response poisoning on the shared keep-alive pool) and
+    # CVE-2026-27141 (HTTP/2 frame panic = unauthenticated remote DoS).
+    # Migration surface here is empty: file provider only (no docker socket, no k8s),
+    # one middleware (https-redirect), exact-Host routers only, no tls.options, no
+    # http3 — so every v3.7-only behaviour change (wildcard Host / HostSNI matching,
+    # bare `*` catch-all, TLSOptions on wildcard domains) has nothing to bind to, and
+    # the non-k8s ones that DO apply (StripPrefix 400, underscoreHeadersStrategy,
+    # CONNECT 501) are in v3.6.25 too. NOTE both hops cross v3.6.7, which flipped
+    # entryPoints.*.http.encodedCharacters.allow* to default TRUE — encoded
+    # slash/percent/etc. now reach backends instead of 400ing.
+    # Digest resolved 2026-08-14 from the multi-arch index (contains linux/amd64).
     "traefik": {
         "image": "traefik",
-        "tag": "v3.6.5",
-        "full_image": "traefik:v3.6.5@sha256:67622638cd88dbfcfba40159bc652ecf0aea0e032f8a3c7e3134ae7c037b9910",
+        "tag": "v3.7.10",
+        "full_image": "traefik:v3.7.10@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac",
         "description": "",
     },
     "portainer": {

@@ -159,6 +159,11 @@ syrvisctl activate <version>  # Switch active version
 syrvisctl rollback [version]  # Rollback to previous version (full restore)
 syrvisctl check [--json]      # Check for updates
 syrvisctl info [--json]       # Show installation info
+syrvisctl doctor [--json]     # Diagnose from the DSM rootfs with NO resolvable
+                              # home: boot-hook presence/currency, a
+                              # /volume*/syrviscore* census naming any DSM
+                              # collision rename, and the seam accounts' shells.
+                              # The verb for "the seam is dead after a reboot".
 syrvisctl cleanup [--keep N]  # Remove old versions
 syrvisctl backup <cmd>        # Backup management (list/create/cleanup)
 syrvisctl restore [file]      # Restore from backup (disaster recovery)
@@ -204,7 +209,11 @@ syrvis service run <name>     # Run image-first: --image, --exposure, --port, --
 syrvis service remove <name>  # Remove a service
 syrvis service list           # List installed services
 syrvis service start <name>   # Start a service
-syrvis service stop <name>    # Stop a service
+syrvis service stop <name>    # Stop a service (INTENT: writes enabled: false)
+syrvis service recreate <name>  # Replace the container (up -d --force-recreate),
+                              # writing NO declared intent. The only verb that
+                              # re-reads a changed env_file — Docker bakes env in
+                              # at container CREATE time, so `restart` cannot.
 syrvis service update <name>  # Update from git repo
 syrvis service task --task T -- <name>  # Run a DECLARED one-shot task (tasks: block)
 syrvis service set-image --image REF -- <name>  # Re-pin an L2 image + redeploy (declarative update)

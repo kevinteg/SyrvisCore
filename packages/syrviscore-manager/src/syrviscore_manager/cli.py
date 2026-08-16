@@ -11,6 +11,7 @@ Commands:
     rollback [version]  - Rollback to previous version (full restore)
     check               - Check for updates
     info                - Show installation info
+    doctor              - Diagnose from the rootfs, with no resolvable home
     cleanup             - Remove old versions
     backup              - Backup management commands
     restore             - Restore from backup
@@ -629,6 +630,99 @@ def info(as_json):
                     entry.get("type", "update"),
                 )
             )
+
+
+@cli.command("doctor")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output")
+@click.option("--path", type=click.Path(), help="Installation path (default: auto-detect)")
+def doctor_cmd(as_json, path):
+    """Diagnose the platform from the rootfs, WITHOUT needing a resolvable home.
+
+    The verb for "the seam is dead / nothing came back after a reboot". It runs
+    entirely out of the SPK's own venv and never touches the install tree, so it
+    still answers when SYRVIS_HOME is renamed, unmounted or gone — the exact
+    state in which every other check goes silent (incident 2026-08-16).
+
+    Reports: the rc.d boot hook (present? executable? current?), a
+    /volume*/syrviscore* census naming any collision-renamed sibling, and the
+    operator-seam accounts' login shells.
+
+    Deliberately NOT wrapped in @handle_errors: a home-resolution failure is this
+    command's PRIMARY FINDING, not an error to bail on. Exit 1 when anything is
+    wrong, 0 when clean.
+    """
+    from . import doctor as doctor_mod
+
+    report = doctor_mod.run(Path(path) if path else None)
+
+    if as_json:
+        report["manager_version"] = __version__
+        emit_json(report)
+        sys.exit(0 if report["ok"] else 1)
+
+    click.echo()
+    click.echo("SyrvisCore Doctor (manager {})".format(__version__))
+    click.echo("=" * 60)
+    click.echo()
+
+    home = report["home"]
+    click.echo("Install home:  {}".format(home["resolved"] or "NOT RESOLVED"))
+    if home["error"]:
+        for line in str(home["error"]).splitlines():
+            click.echo("               {}".format(line))
+
+    hook = report["boot_hook"]
+    if not hook["present"]:
+        state = "MISSING"
+    elif hook["stale"]:
+        state = "STALE (contract {} < {})".format(hook["contract"], hook["min_contract"])
+    elif not hook["executable"]:
+        state = "not executable"
+    else:
+        state = "current (contract {})".format(hook["contract"])
+    click.echo("Boot hook:     {}  [{}]".format(hook["path"], state))
+    click.echo(
+        "Boot-env cache:{}  [{}]".format(
+            hook["env_cache"]["path"], "present" if hook["env_cache"]["present"] else "MISSING"
+        )
+    )
+
+    click.echo()
+    click.echo("Volume roots (/volume*/{}*):".format(paths.PACKAGE_NAME))
+    if not report["volume_roots"]:
+        click.echo("  (none found — not a DSM volume layout, or nothing installed)")
+    for row in report["volume_roots"]:
+        marks = []
+        if row["manifest"]:
+            marks.append("manifest")
+        if row["apps"]:
+            marks.append("apps/")
+        if row["current_symlink"]:
+            marks.append("current->")
+        flag = "  <-- RENAMED BY DSM" if row["kind"] == "renamed" else ""
+        click.echo("  {:<40} {}{}".format(row["path"], ",".join(marks) or "-", flag))
+
+    click.echo()
+    click.echo("Seam accounts:")
+    for row in report["seam_accounts"]:
+        if not row["present"]:
+            click.echo("  {:<18} (not provisioned)".format(row["user"]))
+        else:
+            click.echo(
+                "  {:<18} {}{}".format(
+                    row["user"], row["shell"], "" if row["ok"] else "   <-- DENIED (nologin)"
+                )
+            )
+
+    click.echo()
+    if report["ok"]:
+        click.echo("No problems found.")
+        return
+    click.echo("Findings:")
+    for finding in report["findings"]:
+        click.echo("  - {}".format(finding))
+    click.echo()
+    sys.exit(1)
 
 
 @cli.command()

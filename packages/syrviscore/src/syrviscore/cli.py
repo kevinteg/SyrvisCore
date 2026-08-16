@@ -504,6 +504,33 @@ def service_stop(name):
         raise SyrvisError(message)
 
 
+@service.command("recreate")
+@click.argument("name")
+@handle_errors
+def service_recreate(name):
+    """Replace a service's container without changing declared intent.
+
+    The verb to reach for when the CONTENT behind the compose spec changed but
+    the spec did not — above all a rewritten env_file, whose values Docker bakes
+    into the container at CREATE time (a `restart` re-runs the same container
+    with the same baked env and re-reads nothing).
+
+    Unlike `service stop` + `service start`, this writes NO `enabled:` flag, so a
+    failure cannot leave the service declared off and held down by reconcile.
+
+        sudo syrvis service recreate -- onyx-opensearch
+    """
+    privilege.ensure_elevated("Recreating a service container requires elevated privileges.")
+    from syrviscore.service_manager import ServiceManager
+
+    manager = ServiceManager()
+    success, message = manager.recreate(name)
+    if success:
+        click.echo(message)
+    else:
+        raise SyrvisError(message)
+
+
 @service.command("update")
 @click.argument("name")
 @handle_errors

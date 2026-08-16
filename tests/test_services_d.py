@@ -11,12 +11,15 @@ from syrviscore import services_d
 from syrviscore.cli import cli
 from syrviscore.service_manager import ServiceManager
 
+from conftest import stamp_install_root
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     h = tmp_path / "syrviscore"
     (h / "config").mkdir(parents=True)
     monkeypatch.setenv("SYRVIS_HOME", str(h))
+    stamp_install_root(h)
     monkeypatch.setenv("DOMAIN", "example.com")
     monkeypatch.setattr(cli_mod.privilege, "ensure_elevated", lambda reason: None)
     return h
@@ -138,10 +141,15 @@ class TestPlan:
 
     def test_unmanaged_reported_never_touched_without_prune(self, home, monkeypatch):
         sm = _manager(home)
+        # A declared+installed keeper. Without one this is the ZERO-declarations
+        # shape the floor check refuses outright (incident 2026-08-16) — which is
+        # a different assertion, made in TestReconcileFloorCheck below.
+        assert sm.add_image("keeper", "ghcr.io/a/keeper:1.0", start=False)[0]
         assert sm.add_image("legacy", "ghcr.io/a/legacy:1.0", start=False)[0]
         services_d.remove_declaration(home, "legacy")  # dual-write undone -> unmanaged
         monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, name: "running")
-        plan = services_d.build_reconcile_plan(sm, {}, [])
+        declared, _ = services_d.load_declarations(home)
+        plan = services_d.build_reconcile_plan(sm, declared, [])
         assert plan["unmanaged"] == ["legacy"]
         assert plan["actions"] == []
 

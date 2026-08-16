@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -38,6 +39,79 @@ from .traefik_config import ServiceTraefikConfig, get_domain_from_env
 # standalone), so a host with only one of them works for both.
 
 
+# How recently a container must have (re)started for a non-zero RestartCount to
+# read as "still flapping". Two minutes: long enough to catch a crash loop of any
+# realistic period, short enough that a container which restarted once and then
+# settled stops reporting flapping almost immediately.
+FLAP_WINDOW_S = 120
+
+
+def _parse_docker_time(value: str) -> Optional[datetime]:
+    """Parse a Docker RFC3339 timestamp, tolerating nanosecond precision.
+
+    Docker emits 9 fractional digits (``...:12.123456789Z``), which
+    ``datetime.fromisoformat`` rejects outright on Python 3.8 — so a naive parse
+    silently loses every timestamp. Returns None for the zero value Docker uses
+    for "never started" and for anything unparseable.
+    """
+    if not value or value.startswith("0001-01-01"):
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    if "." in text:
+        head, _, tail = text.partition(".")
+        digits = ""
+        rest = ""
+        for i, ch in enumerate(tail):
+            if ch.isdigit():
+                digits += ch
+            else:
+                rest = tail[i:]
+                break
+        text = "{}.{}{}".format(head, digits[:6].ljust(6, "0"), rest)
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def is_flapping(restart_count, started_at, now=None, window_s: int = FLAP_WINDOW_S) -> bool:
+    """True when a container looks like it is restarting RIGHT NOW. Pure.
+
+    The gap this closes (incident 2026-08-16): ``container.status`` for a
+    ``restart: unless-stopped`` container reads "running" in the window between
+    two crashes, so both ``syrvis status`` and the reconcile planner classed six
+    crash-looping services as healthy and in-sync for ~15 minutes. Detection came
+    only from an EXTERNAL alert, 13-18 minutes late by construction.
+
+    Inferred from ONE sample, deliberately: an engine that has to remember a
+    previous observation to notice a crash loop cannot notice one across a
+    restart of itself. A non-zero ``RestartCount`` plus a ``StartedAt`` inside
+    the window means the container has restarted at least once AND restarted
+    again just now — which for a steady-state service is never normal.
+
+    The known false positive is a service that crashed once and recovered: it
+    reads flapping for up to ``window_s`` afterwards. That is the right way to be
+    wrong here — the consequence is that reconcile plans a `start` (an idempotent
+    `up -d`) instead of reporting victory.
+    """
+    try:
+        count = int(restart_count)
+    except (TypeError, ValueError):
+        return False
+    if count <= 0:
+        return False
+    started = _parse_docker_time(started_at) if isinstance(started_at, str) else started_at
+    if started is None:
+        return False
+    reference = now or datetime.now(timezone.utc)
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    age = (reference - started).total_seconds()
+    return 0 <= age <= window_s
+
+
 def _image_tag(image: str) -> str:
     """Best-effort version string from a pinned image reference (for display)."""
     ref = image.split("@", 1)[0]
@@ -65,6 +139,19 @@ LOCATION_CHANGE_REFUSAL = (
     "location change on an installed service requires the app-move procedure "
     "(wiki/runbooks/app-move.md)"
 )
+
+# The per-service app-home HIGH-WATER MARK (incident 2026-08-16). Once an app's
+# home has held content, "the home is now absent-or-empty" can only mean the tree
+# moved — never "this app has no data yet" — so reconcile must refuse to
+# re-scaffold it rather than converge an empty world into existence.
+#
+# Deliberately a SIDECAR beside the effective manifest instead of a key inside
+# it: the manifest is parsed through a trust boundary that rejects unaudited
+# top-level keys, and reconcile diffs declaration-content against
+# manifest-content — a platform-written state key there would either fail to
+# load or make every service plan a spurious `replace`. This file is platform
+# STATE; the manifest is declared INTENT. They do not mix.
+HOME_STATE_FILENAME = ".home-state.json"
 
 
 class ServiceManager:
@@ -280,6 +367,77 @@ class ServiceManager:
         if home is not None:
             return home / "data"
         return self.data_dir / name
+
+    # -------------------------------------------------------------------------
+    # App-home high-water mark (incident 2026-08-16)
+    # -------------------------------------------------------------------------
+
+    def _home_state_path(self, name: str) -> Path:
+        """Sidecar state file for ``name`` (see :data:`HOME_STATE_FILENAME`)."""
+        return self.services_dir / name / HOME_STATE_FILENAME
+
+    def read_home_state(self, name: str) -> Dict[str, Any]:
+        """The recorded app-home state for ``name`` ({} when absent/unreadable).
+
+        Read-only and total: an unreadable or corrupt sidecar reports "nothing
+        recorded" rather than raising, because this is a SAFETY ratchet — a
+        missing mark can only make the platform less cautious than it could be,
+        never more destructive than it already was.
+        """
+        try:
+            import json as _json
+
+            data = _json.loads(self._home_state_path(name).read_text())
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def mark_home_materialized(self, service_or_name) -> bool:
+        """Raise the app-home high-water mark once the home actually has content.
+
+        Called wherever the platform has just written the effective manifest or
+        finished materializing an app. Idempotent and write-once: the mark is
+        never lowered, because "this home once held data" cannot become false —
+        only the FILESYSTEM can lie about it, which is the whole failure mode
+        (:func:`services_d.build_reconcile_plan` refuses to re-scaffold on the
+        strength of this flag).
+
+        Legacy (unlocated) services are skipped: their data lives under
+        SYRVIS_HOME itself, whose disappearance is caught by ``paths``' install-
+        root check instead. Best-effort — never raises into a deploy path.
+        """
+        try:
+            home = self._app_home(service_or_name)
+        except Exception:  # noqa: BLE001 - a tampered manifest fails elsewhere, loudly
+            return False
+        if home is None or not self._dir_nonempty(home):
+            return False
+        name = (
+            service_or_name.name
+            if isinstance(service_or_name, ServiceDefinition)
+            else str(service_or_name)
+        )
+        if self.read_home_state(name).get("home_materialized"):
+            return False  # already marked: no churn
+        try:
+            import json as _json
+
+            path = self._home_state_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                _json.dumps(
+                    {
+                        "home_materialized": True,
+                        "home": str(home),
+                        "at": datetime.now().isoformat(),
+                    },
+                    indent=2,
+                )
+            )
+            os.chmod(str(path), 0o644)
+        except OSError:
+            return False
+        return True
 
     def _location_change_refusal(self, name: str, new_location: str) -> Optional[str]:
         """The design/26 immutability guard, or None when the change may proceed.
@@ -667,6 +825,11 @@ class ServiceManager:
             manifest.chmod(0o640 if service.environment else 0o644)
         except OSError:
             pass
+        # Raise the app-home high-water mark whenever we write the manifest and
+        # the home already has content (incident 2026-08-16). See
+        # :meth:`mark_home_materialized` — this is the write-once ratchet that
+        # lets reconcile tell "vanished tree" from "never deployed".
+        self.mark_home_materialized(service)
 
     def _install_from_definition(
         self,
@@ -810,7 +973,12 @@ class ServiceManager:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src, dest)
 
-            compose_path = self._generate_compose_file(service)
+            # `preserve_data_on_rollback` is set by exactly one caller — the
+            # reconcile REPLACE path — and encodes "this service's data/home
+            # predate this call", i.e. it is already installed. A genuine fresh
+            # add may scaffold an absent env_file; a replace may not (a missing
+            # one there means the tree moved, not that it was never written).
+            compose_path = self._generate_compose_file(service, installed=preserve_data_on_rollback)
 
             try:
                 domain = get_domain_from_env()
@@ -847,6 +1015,12 @@ class ServiceManager:
                     detail=f"Service '{service.name}' not added ({e})",
                 )
             return False, f"Service '{service.name}' not added ({e})"
+
+        # The app home exists (and, for anything with state, has content) only
+        # AFTER materialization — _write_manifest ran before it on a fresh
+        # install, so raise the high-water mark here too. Write-once; a no-op
+        # for legacy services and for a still-empty home.
+        self.mark_home_materialized(service)
 
         # Dual-write: every successful install leaves a services.d declaration,
         # so imperative adds are visible to (and owned by) the declarative
@@ -975,11 +1149,17 @@ class ServiceManager:
             except OSError:
                 pass  # best-effort; a pre-owned dir may already be writable
 
-    def _generate_compose_file(self, service: ServiceDefinition) -> Path:
+    def _generate_compose_file(self, service: ServiceDefinition, installed: bool = True) -> Path:
         """Generate docker-compose file for a service.
 
         Args:
             service: Service definition
+            installed: whether this service is ALREADY installed (the default —
+                fail closed). A fresh install may scaffold the artifacts a first
+                ``up -d`` needs (notably an empty ``env_file``); an already-
+                installed service may NOT, because "the declared file is gone"
+                then means the app's tree vanished, not that it was never made.
+                See the env_file branch below (incident 2026-08-16).
 
         Returns:
             Path to generated compose file
@@ -1152,10 +1332,21 @@ class ServiceManager:
         # compose project cannot depend on another), so it is never emitted here.
 
         # env_file: a secrets file kept out of the manifest (legacy: relative to
-        # data/<name>; v2: relative to home/secrets). Materialize an empty 0600
-        # file if absent so the first `up -d` doesn't fail before the operator
-        # fills it in, and clamp an existing one to 0600 (it holds secrets by
-        # definition).
+        # data/<name>; v2: relative to home/secrets). On a FRESH install only,
+        # materialize an empty 0600 file if absent so the first `up -d` doesn't
+        # fail before the operator fills it in; always clamp an existing one to
+        # 0600 (it holds secrets by definition).
+        #
+        # WHY THE `installed` GATE (incident 2026-08-16): for an ALREADY-INSTALLED
+        # service, an absent env_file does not mean "the operator hasn't filled it
+        # in yet" — it means the app's tree is not where the manifest says it is.
+        # When DSM renamed the app-home volume root at boot, the unconditional
+        # touch() below re-created FOUR empty secrets.env files and started the
+        # containers against them; three Postgres containers came one entrypoint
+        # check away from initdb'ing empty clusters over the real databases. The
+        # platform already refuses this exact state one layer up (write_secret:
+        # "secret content must not be empty"), so compose-gen creating it silently
+        # was a self-contradiction. `start()` fails closed on this exception.
         if service.env_file:
             env_file_path = Path(os.path.realpath(str(secrets_root_dir / service.env_file)))
             env_root = os.path.realpath(str(secrets_root_dir))
@@ -1166,8 +1357,19 @@ class ServiceManager:
                         "secrets" if "secrets" in paths_ else "data",
                     )
                 )
-            env_file_path.parent.mkdir(parents=True, exist_ok=True)
             if not env_file_path.exists():
+                if installed:
+                    raise ServiceValidationError(
+                        "declared env_file {} is MISSING for the already-installed "
+                        "service {!r} — refusing to materialize an empty one and start "
+                        "a container with NO configuration (a database would initialize "
+                        "an empty cluster over the real one). The tree is most likely "
+                        "renamed, not lost: check `ls -d /volume*/syrviscore*` for a "
+                        "'syrviscore_1' sibling before doing anything else; restore the "
+                        "value with `syrvis secret set -- {}` once it is "
+                        "back.".format(env_file_path, service.name, service.name)
+                    )
+                env_file_path.parent.mkdir(parents=True, exist_ok=True)
                 env_file_path.touch()
             env_file_path.chmod(0o600)
             svc["env_file"] = [str(env_file_path)]
@@ -1224,6 +1426,11 @@ class ServiceManager:
     # whatever is still missing, and an already-present image needs neither).
     _PULL_TIMEOUT_S = 900
 
+    # A force-recreate stops the old container (honouring its stop_grace_period,
+    # which a database may set to minutes) before creating the new one, so it
+    # needs more headroom than a plain `up -d`.
+    _RECREATE_TIMEOUT_S = 300
+
     @staticmethod
     def _compose_image(name: str, compose_path: Path) -> Optional[str]:
         """The image ref the generated compose file pins for ``name`` (best-effort)."""
@@ -1270,6 +1477,20 @@ class ServiceManager:
     def _up_service(self, name: str, compose_path: Path) -> Tuple[bool, str]:
         ok, msg = self._compose(name, compose_path, "up", "-d", timeout=120)
         return (True, "Started") if ok else (False, msg)
+
+    def _recreate_containers(self, name: str, compose_path: Path) -> Tuple[bool, str]:
+        """``up -d --force-recreate`` — REPLACE the container, don't restart it.
+
+        The primitive the platform already uses one tier up for the core stack
+        (``docker_manager``, "rather than `compose restart`") and never carried
+        down to Layer 2. It is the only fix-up that re-reads an ``env_file``,
+        because Docker bakes the environment into the container at CREATE time:
+        a restart re-runs the same container with the same baked env.
+        """
+        ok, msg = self._compose(
+            name, compose_path, "up", "-d", "--force-recreate", timeout=self._RECREATE_TIMEOUT_S
+        )
+        return (True, "Recreated") if ok else (False, msg)
 
     def _stop_service(
         self,
@@ -1485,12 +1706,20 @@ class ServiceManager:
             # Manifest loaded — status + URL are best-effort. The unprivileged
             # operator may not reach the docker daemon or read the 0600 .env
             # (for DOMAIN); neither should turn a loadable service into an error.
+            health: Dict[str, Any] = {
+                "status": "unknown",
+                "restart_count": None,
+                "started_at": None,
+                "health": None,
+                "flapping": False,
+            }
             try:
                 # Inspect by container_name — it defaults to the service name but
                 # a manifest may override it, and the container is what has status.
-                status = self._get_service_status(service.container_name or service.name)
+                health = self._container_health(service.container_name or service.name)
             except Exception:
-                status = "unknown"
+                pass
+            status = health["status"]
             url = ""
             if service.traefik.enabled and service.traefik.subdomain:
                 try:
@@ -1515,6 +1744,16 @@ class ServiceManager:
                     # The app's declared home volume ("" = legacy layout on
                     # SYRVIS_HOME). Flows to the seam/dashboard rows as-is.
                     "location": service.location or "",
+                    # Crash-loop visibility (incident 2026-08-16). `status` stays
+                    # Docker's raw string — a restarting container legitimately
+                    # reads "running", and every existing consumer depends on
+                    # that word meaning what Docker means. These say what the
+                    # string cannot: `flapping` true is "running, but not for
+                    # long". Flows to the dashboard and `service list --json`.
+                    "restart_count": health["restart_count"],
+                    "started_at": health["started_at"],
+                    "docker_health": health["health"],
+                    "flapping": health["flapping"],
                 }
             )
 
@@ -1546,6 +1785,49 @@ class ServiceManager:
                 return "stopped"
         except Exception:
             return "unknown"
+
+    def _container_health(self, name: str) -> Dict[str, Any]:
+        """Docker's state for a container, WITH the crash-loop synthesis.
+
+        ``_get_service_status`` returns the raw Docker status string and always
+        will — every caller and the whole seam contract depend on it. But that
+        string is not the whole state: ``RestartCount``, ``StartedAt`` and
+        ``Health`` sit on the same object and were simply never read, which is
+        why a crash-looping container reported "running" (see :func:`is_flapping`).
+
+        Returns ``{status, restart_count, started_at, health, flapping}``. The
+        status field comes from ``_get_service_status`` so a caller (or a test)
+        that overrides that one method still governs it. Everything else degrades
+        to None/False when the daemon is unreachable — the unprivileged operator
+        and the dashboard container both hit that path routinely, and neither may
+        turn a reachable service into an error.
+        """
+        status = self._get_service_status(name)
+        out: Dict[str, Any] = {
+            "status": status,
+            "restart_count": None,
+            "started_at": None,
+            "health": None,
+            "flapping": False,
+        }
+        try:
+            import docker
+
+            state = docker.from_env().containers.get(name).attrs.get("State") or {}
+        except Exception:  # noqa: BLE001 - no daemon / no such container: status only
+            return out
+        out["restart_count"] = state.get("RestartCount")
+        out["started_at"] = state.get("StartedAt")
+        out["health"] = (state.get("Health") or {}).get("Status") or None
+        out["flapping"] = is_flapping(out["restart_count"], out["started_at"])
+        return out
+
+    def is_service_flapping(self, name: str) -> bool:
+        """Cheap boolean form of :meth:`_container_health` for the planner."""
+        try:
+            return bool(self._container_health(name)["flapping"])
+        except Exception:  # noqa: BLE001 - never let a health probe break planning
+            return False
 
     def start(
         self,
@@ -1662,6 +1944,50 @@ class ServiceManager:
             if fire_hooks:
                 self._fire_hooks(svc or name, "post-stop", force=True, timeout=hook_timeout)
         return ok, msg
+
+    def recreate(self, name: str) -> Tuple[bool, str]:
+        """Replace a service's container in place, WITHOUT touching declared intent.
+
+        The missing primitive (incident 2026-08-16). ``docker compose restart``
+        re-runs the SAME container, so it cannot pick up a changed ``env_file``
+        — Docker bakes the environment in at container CREATE time. Until this
+        existed, the only way to re-bake env was ``stop`` + ``start``, and
+        ``stop`` is an INTENT verb: it writes ``enabled: false`` into the
+        declaration, so a ``start`` that then fails leaves the service declared
+        off and reconcile holds it down forever. That is an operational trap
+        hiding inside a repair procedure.
+
+        This regenerates the compose file (self-healing host-side drift exactly
+        as ``start`` does, and failing CLOSED if re-materialization is refused —
+        e.g. an unmounted location or a vanished env_file) and then runs
+        ``up -d --force-recreate``. It writes NO declaration on either side: an
+        already-declared-on service stays on, and a declared-off one is not
+        silently flipped on. Lifecycle hooks are deliberately not fired — this is
+        a container-level repair of an existing deployment, not a deploy.
+        """
+        try:
+            paths_ = self._service_paths(name)
+        except ServiceValidationError as e:
+            return False, str(e)
+        compose_path = paths_["compose"]
+        manifest_path = paths_["service"] / "syrvis-service.yaml"
+        if not compose_path.exists() or not manifest_path.exists():
+            return False, "Service '{}' is not installed".format(name)
+
+        try:
+            svc = load_service_definition(manifest_path)
+            compose_path = self._generate_compose_file(svc, installed=True)
+        except ServiceValidationError as e:
+            # Fail CLOSED, like start(): a REFUSED re-materialization must never
+            # fall through to recreating against a stale compose file.
+            return False, str(e)
+        except Exception as e:  # noqa: BLE001 - unreadable manifest: nothing to recreate from
+            return False, "could not load service {!r}: {}".format(name, e)
+
+        ok, msg = self._recreate_containers(name, compose_path)
+        if ok:
+            return True, "Service '{}' recreated (container replaced; env re-read)".format(name)
+        return False, msg
 
     def update(self, name: str) -> Tuple[bool, str]:
         """Update a service from its git repository.
@@ -2578,19 +2904,36 @@ class ServiceManager:
                 if not ok:
                     raise RuntimeError(msg)
 
-            # 4. Compose + start LAST.
-            compose_path = self._generate_compose_file(service)
+            # 4. Compose + start LAST. `fresh` is authoritative here: only a
+            # first install may scaffold an absent env_file (see the env_file
+            # branch in _generate_compose_file).
+            compose_path = self._generate_compose_file(service, installed=not fresh)
             ok, msg = self._start_service(name, compose_path)
             if not ok:
                 raise RuntimeError(f"failed to start: {msg}")
             # `docker compose up -d` compares the COMPOSE SPEC (image/command/
-            # volumes/env), NOT the CONTENT of bind-mounted files — so on an UPDATE
-            # a changed config/secret would keep serving the OLD content (the
-            # process read it once at start). Restart the container to re-read it.
-            # Only when there IS a config/secret and the compose didn't already
-            # recreate it (fresh installs start with the final content; config-less
-            # services like victoria-metrics need no restart).
-            if not fresh and (bundle.configs or bundle.secrets):
+            # volumes/env_file PATH), NOT the CONTENT behind it — so on an UPDATE
+            # a changed config or secret would keep serving the OLD values. The
+            # correct fix-up differs by artifact, and conflating them was a real
+            # bug (incident 2026-08-16):
+            #
+            #   * a bind-mounted CONFIG file is re-read when the process restarts,
+            #     so `compose restart` (same container, cheap) is enough;
+            #   * an env_file is NOT. Docker bakes env into the container at CREATE
+            #     time; a restart re-runs the same container with the SAME baked
+            #     environment and re-reads nothing. A rotated secret would silently
+            #     not take effect — and a container created against an empty
+            #     env_file stays broken until it is REPLACED (which is why the
+            #     onyx-opensearch repair had to lean on stop+start's side effect of
+            #     removing the container).
+            #
+            # So: force-recreate whenever the bundle carries secrets, plain restart
+            # for a configs-only update, nothing at all when neither is present
+            # (fresh installs already start with the final content; config-less
+            # services like victoria-metrics need no fix-up).
+            if not fresh and bundle.secrets:
+                self._recreate_containers(name, compose_path)
+            elif not fresh and bundle.configs:
                 self._compose(name, compose_path, "restart", timeout=90)
             if traefik_changed:
                 self._reload_traefik()

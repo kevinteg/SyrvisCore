@@ -30,12 +30,22 @@ def _definition(name, *, image_tag="1.0.0", enabled=True, critical=False, exposu
 class FakeManager:
     """Docker-free stand-in: only what the endpoint + planner actually touch."""
 
-    def __init__(self, statuses=None):
+    def __init__(self, statuses=None, flapping=()):
         self.syrvis_home = Path("/nonexistent/syrvis-home")
         self.statuses = statuses or {}
+        self.flapping = set(flapping)
 
     def _get_service_status(self, name):
         return self.statuses.get(name, "unknown")
+
+    def is_service_flapping(self, name):
+        # A "running" container that is actually crash-looping is NOT in sync
+        # (incident 2026-08-16) — the planner asks the manager, not the string.
+        return name in self.flapping
+
+    def read_home_state(self, name):
+        # The app-home high-water mark; nothing was ever materialized here.
+        return {}
 
 
 def _wire(monkeypatch, declared, invalid, installed, statuses):

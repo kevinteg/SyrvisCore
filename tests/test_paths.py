@@ -85,18 +85,54 @@ class TestGetSyrvisHome:
             get_syrvis_home()
 
     def test_get_syrvis_home_does_not_exist(self):
-        """Test that nonexistent path is skipped (env var strategy)."""
+        """An explicit SYRVIS_HOME that does not exist RAISES, naming the path.
+
+        It used to fall through to the volume scan. Silently resolving somewhere
+        else — or, worse, accepting the directory unchecked — is how a mis-rooted
+        CLI reports a clean, empty, ACTIVE homebase (incident 2026-08-16).
+        """
         set_syrvis_home("/nonexistent/path")
-        # This now tries fallback strategies, so it raises different error
-        with pytest.raises(SyrvisHomeError, match="Cannot find SyrvisCore installation"):
+        with pytest.raises(SyrvisHomeError, match="/nonexistent/path"):
             get_syrvis_home()
 
     def test_get_syrvis_home_not_directory(self, tmp_path):
-        """Test that file path is skipped (env var strategy)."""
+        """A SYRVIS_HOME pointing at a FILE raises rather than falling through."""
         file_path = tmp_path / "file.txt"
         file_path.write_text("test")
         set_syrvis_home(str(file_path))
-        with pytest.raises(SyrvisHomeError, match="Cannot find SyrvisCore installation"):
+        with pytest.raises(SyrvisHomeError, match="no SyrvisCore installation exists there"):
+            get_syrvis_home()
+
+    def test_empty_tmpdir_raises_instead_of_a_clean_empty_world(self, tmp_path):
+        """THE regression test for the 2026-08-16 decapitation.
+
+        Strategy 1 accepted any existing directory, so `SYRVIS_HOME=<empty dir>`
+        resolved happily; `load_declarations` then returned empty-and-valid,
+        reconcile planned nothing, and `resume` cleared the runstate at the end
+        regardless — a clean, converged, ACTIVE homebase running nothing. The
+        directory existing is not evidence of anything; the manifest is.
+        """
+        empty = tmp_path / "syrviscore"
+        empty.mkdir()
+        set_syrvis_home(str(empty))
+        with pytest.raises(SyrvisHomeError) as exc:
+            get_syrvis_home()
+        assert str(empty) in str(exc.value)
+        # and it must point at the RENAME hypothesis, not at a reinstall
+        assert "syrviscore*" in str(exc.value)
+        assert "syrvisctl install" in str(exc.value)  # named only to forbid it
+
+    def test_marker_without_self_identification_is_not_enough(self, tmp_path):
+        """A stray manifest that records a DIFFERENT install_path is refused."""
+        import json as _json
+
+        stray = tmp_path / "syrviscore"
+        stray.mkdir()
+        (stray / ".syrviscore-manifest.json").write_text(
+            _json.dumps({"schema_version": 3, "install_path": "/volume4/syrviscore"})
+        )
+        set_syrvis_home(str(stray))
+        with pytest.raises(SyrvisHomeError, match="no SyrvisCore installation exists there"):
             get_syrvis_home()
 
 

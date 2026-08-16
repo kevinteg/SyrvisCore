@@ -13,6 +13,8 @@ from click.testing import CliRunner
 
 from syrviscore.service_schema import ServiceDefinition, ServiceValidationError, dump_definition
 
+from conftest import stamp_install_root
+
 
 def manifest(**over):
     d = {
@@ -70,6 +72,7 @@ class TestTasksSchema:
 class TestRunTask:
     def _mgr(self, tmp_path, monkeypatch, definition=None):
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         from syrviscore.service_manager import ServiceManager
 
         mgr = ServiceManager()
@@ -131,6 +134,7 @@ class TestCli:
 
         monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         seen = {}
 
         def fake_run_task(self, name, task):

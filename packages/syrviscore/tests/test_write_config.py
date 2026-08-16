@@ -5,6 +5,7 @@ config/<name>.conf (root:root 0600) from stdin, exactly mirroring write_secret's
 security contract but gated on config/jobs.d instead of config/services.d.
 """
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -15,10 +16,19 @@ from pathlib import Path
 
 
 def _make_syrvis_home(tmp_path: Path) -> Path:
-    """Return a minimal syrvis_home with the required directory layout."""
+    """Return a minimal syrvis_home with the required directory layout.
+
+    The install manifest is part of the minimum: since the 2026-08-16 hardening,
+    `paths.get_syrvis_home()` requires SYRVIS_HOME to name a real install root
+    (a self-identifying `.syrviscore-manifest.json`), not merely an existing
+    directory — and the CLI verb below resolves through exactly that path.
+    """
     home = tmp_path / "syrviscore"
     (home / "config" / "jobs.d").mkdir(parents=True)
     (home / "jobs").mkdir(parents=True)
+    (home / ".syrviscore-manifest.json").write_text(
+        json.dumps({"schema_version": 3, "install_path": str(home), "versions": {}})
+    )
     return home
 
 

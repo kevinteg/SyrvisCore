@@ -15,16 +15,51 @@ Used by:
 """
 
 import os
+import re
 import socket
 import ssl
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
 
 from . import paths
 from . import privileged_ops
+
+# `/volume<N>` roots and DSM's collision-rename suffix (`syrviscore_1`).
+_VOLUME_RE = re.compile(r"^volume\d+$")
+_COLLISION_RE = re.compile(r"^{}_\d+$".format(re.escape(paths.PACKAGE_NAME)))
+
+
+def _volume_roots() -> List[Path]:
+    """Every ``/volume<N>`` directory on this host (sim-root aware, never raises).
+
+    The census `check_home_collision` runs on. Under the DSM simulator the
+    volumes live under ``DSM_SIM_ROOT``, which is also what makes this testable
+    without a real NAS.
+    """
+    root = paths.get_sim_root() or Path("/")
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        try:
+            if _VOLUME_RE.match(entry.name) and entry.is_dir():
+                out.append(entry)
+        except OSError:  # pragma: no cover - a vanishing/permission-denied entry
+            continue
+    return out
+
+
+def _iter_dirs(directory: Path) -> List[Path]:
+    """Immediate subdirectories of ``directory`` ([] on any error)."""
+    try:
+        return sorted(p for p in directory.iterdir() if p.is_dir())
+    except OSError:
+        return []
 
 
 def resolve_invoking_user() -> str:
@@ -417,6 +452,109 @@ class InstallationValidator:
             details="Run syrvisctl install to set up the service",
         )
 
+    def check_home_collision(self) -> CheckResult:
+        """FAIL when a volume root carries a DSM collision-renamed sibling.
+
+        The single cheapest, most specific signal the 2026-08-16 decapitation
+        produced — and the platform was blind to it by construction, which is
+        why a human found it with ``ls``. DSM renames ``<volume>/syrviscore`` to
+        ``<volume>/syrviscore_1`` at the first COLD boot after a shared folder of
+        the same name is created anywhere on the box. Every control-plane path is
+        absolute into that tree, so one rename takes out the wrapper, the
+        operator seam, and both self-healers at once.
+
+        Two findings, in severity order:
+
+        * FAIL — a ``<volume>/syrviscore_<N>`` sibling EXISTS. The tree is
+          renamed right now; the message carries the exact ``mv``.
+        * WARN — a shares.d declaration claims the platform's own directory name
+          as a DSM share name while plain platform roots exist. Nothing is broken
+          yet; the landmine is ARMED and the next cold boot trips it.
+
+        ``fixable=False`` deliberately: reclaiming a renamed root is the boot
+        guard's job (it can tell an empty scaffold from a real share and refuses
+        when it cannot), never ``verify --fix``'s. A verify that quietly moved
+        directories on a NAS would be far worse than one that tells the truth.
+        """
+        name = "Home collision"
+        renamed: List[Path] = []
+        plain_roots: List[Path] = []
+        for volume in _volume_roots():
+            for entry in _iter_dirs(volume):
+                if entry.name == paths.PACKAGE_NAME:
+                    plain_roots.append(entry)
+                elif _COLLISION_RE.match(entry.name):
+                    renamed.append(entry)
+
+        if renamed:
+            moves = "; ".join(
+                "sudo mv {} {}".format(p, p.parent / paths.PACKAGE_NAME) for p in renamed
+            )
+            return CheckResult(
+                name=name,
+                passed=False,
+                message="{} collision-renamed platform root(s): {}".format(
+                    len(renamed), ", ".join(str(p) for p in renamed)
+                ),
+                details=(
+                    "DSM renamed these at boot because a shared folder shares the name "
+                    "'{}'. Nothing is lost — the data is in the renamed directory. Verify "
+                    "the target is absent or empty FIRST, then: {}. Do NOT run "
+                    "'syrvisctl install'.".format(paths.PACKAGE_NAME, moves)
+                ),
+                fixable=False,
+            )
+
+        armed = self._colliding_share_names()
+        if armed and plain_roots:
+            return CheckResult(
+                name=name,
+                passed=False,
+                message="DSM share named '{}' declared ({}) while {} plain platform "
+                "root(s) exist — armed for a cold-boot rename".format(
+                    paths.PACKAGE_NAME,
+                    ", ".join(armed),
+                    len(plain_roots),
+                ),
+                details=(
+                    "A shared folder and a plain volume directory of the same name coexist "
+                    "fine until the next COLD boot, when DSM renames the plain ones to "
+                    "'{}_1'. Rename the SHARE (the platform roots cannot move without "
+                    "stranding every located service).".format(paths.PACKAGE_NAME)
+                ),
+                fixable=False,
+            )
+
+        if not plain_roots:
+            return CheckResult(
+                name=name,
+                passed=True,
+                message="no volume roots enumerated (not a DSM volume layout)",
+            )
+        return CheckResult(
+            name=name,
+            passed=True,
+            message="{} platform root(s), no '{}_N' sibling".format(
+                len(plain_roots), paths.PACKAGE_NAME
+            ),
+        )
+
+    def _colliding_share_names(self) -> List[str]:
+        """shares.d declarations whose DSM share name IS the platform's own name."""
+        if not self.syrvis_home:
+            return []
+        try:
+            from .shares_registry import load_shares
+
+            shares = load_shares(self.syrvis_home)
+        except Exception:  # noqa: BLE001 - a broken registry fails elsewhere, loudly
+            return []
+        out = []
+        for share_id, decl in sorted(shares.items()):
+            if PurePosixPath(decl.root).name == paths.PACKAGE_NAME:
+                out.append("{} -> {}".format(share_id, decl.root))
+        return out
+
     def check_manifest(self) -> CheckResult:
         """Check if manifest exists and is valid."""
         if not self.syrvis_home:
@@ -504,6 +642,10 @@ class InstallationValidator:
         """Run all installation checks."""
         report = ValidationReport(category="Installation")
         report.checks.append(self.check_syrvis_home())
+        # Runs even when SYRVIS_HOME could NOT be resolved — that is exactly the
+        # state a collision rename produces, and this check's whole job is to say
+        # why. It touches only volume roots, never the install tree.
+        report.checks.append(self.check_home_collision())
 
         if self.syrvis_home:
             report.checks.append(self.check_manifest())

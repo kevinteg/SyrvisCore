@@ -23,6 +23,8 @@ from syrviscore.bundle import (
     DeployBundle,
 )
 
+from conftest import stamp_install_root
+
 
 def base_manifest(**overrides):
     m = {"name": "snmp-exporter", "version": "v0.30.1", "image": "prom/snmp-exporter:v0.30.1"}
@@ -289,16 +291,39 @@ class TestDeployBundleApply:
         decl = tmp_path / "config" / "services.d" / "snmp-exporter.yaml"
         assert decl.exists() and "v0.30.2" in decl.read_text()
 
-    def test_config_carrying_update_restarts_to_apply_change(self, tmp_path):
-        # `up -d` won't recreate an unchanged compose, so a changed bind-mounted
-        # config/secret would keep serving old content — deploy_bundle restarts the
-        # container on a config/secret-carrying UPDATE to re-read it.
+    def test_secret_carrying_update_force_recreates(self, tmp_path):
+        # `up -d` won't recreate an unchanged compose, so a changed secret would
+        # keep serving old values. A RESTART cannot fix that either: Docker bakes
+        # env into the container at CREATE time (incident 2026-08-16), so a
+        # secret-carrying UPDATE must force-recreate, not restart.
         mgr = _manager(tmp_path)
         assert mgr.deploy_bundle(_snmp_bundle())[0]  # fresh install
         calls = []
         mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
         assert mgr.deploy_bundle(_snmp_bundle())[0]  # update (has config + secrets)
+        assert any("--force-recreate" in a for a in calls), f"calls={calls}"
+        assert not any("restart" in a for a in calls), "a restart would NOT re-read env_file"
+
+    def test_config_only_update_restarts(self, tmp_path):
+        # A bind-mounted config IS re-read on restart, so the cheap fix-up stays
+        # the right one when no secret is in play.
+        mgr = _manager(tmp_path)
+        b = DeployBundle.from_dict(
+            {
+                "service": base_manifest(
+                    name="vm",
+                    volumes=["config:/etc/vm:ro"],
+                    networks=["proxy"],
+                ),
+                "configs": [{"dest": "config/vm.yml", "content": "a: 1\n"}],
+            }
+        )
+        assert mgr.deploy_bundle(b)[0]  # fresh install
+        calls = []
+        mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
+        assert mgr.deploy_bundle(b)[0]  # update (config only, no secrets)
         assert any("restart" in a for a in calls), f"expected a restart; calls={calls}"
+        assert not any("--force-recreate" in a for a in calls)
 
     def test_configless_update_does_not_restart(self, tmp_path):
         mgr = _manager(tmp_path)
@@ -377,6 +402,7 @@ class TestDeployCli:
 
         monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         if deploy_impl is not None:
             monkeypatch.setattr(service_manager.ServiceManager, "deploy_bundle", deploy_impl)
         return CliRunner().invoke(cli, argv, input=stdin)

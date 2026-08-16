@@ -6,12 +6,15 @@ import yaml
 from syrviscore.service_manager import ServiceManager, _image_tag
 from syrviscore.service_schema import ServiceDefinition, ServiceValidationError
 
+from conftest import stamp_install_root
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     h = tmp_path / "syrviscore"
     (h / "config").mkdir(parents=True)
     monkeypatch.setenv("SYRVIS_HOME", str(h))
+    stamp_install_root(h)
     monkeypatch.setenv("DOMAIN", "example.com")
     return h
 

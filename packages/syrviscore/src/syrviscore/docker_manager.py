@@ -39,6 +39,21 @@ class DockerError(SyrvisError):
     code = "docker_error"
 
 
+def _flapping(restart_count, started_at) -> bool:
+    """Crash-loop synthesis, shared with the Layer 2 manager. Never raises.
+
+    Lazy import: ``service_manager`` owns the (pure, tested) predicate, and
+    importing it at module scope here would drag the whole L2 stack into every
+    core-status read.
+    """
+    try:
+        from .service_manager import is_flapping
+
+        return is_flapping(restart_count, started_at)
+    except Exception:  # noqa: BLE001 - a status read must never fail on this
+        return False
+
+
 def write_traefik_config_files(syrvis_home: Optional[Path] = None) -> bool:
     """Write Traefik's static + dynamic config; return whether a restart is needed.
 
@@ -589,11 +604,22 @@ class DockerManager:
             if not configured_image:
                 configured_image = container.image.tags[0] if container.image.tags else "Unknown"
 
+            # Crash-loop visibility (incident 2026-08-16): a `restart:
+            # unless-stopped` container reads "running" between crashes, so
+            # `syrvis status` reported six services healthy while they
+            # crash-looped. RestartCount/StartedAt were on this same object the
+            # whole time and simply never read. `status` keeps meaning exactly
+            # what Docker means; `flapping` says "running, but not for long".
+            state = container.attrs.get("State") or {}
+            restart_count = state.get("RestartCount")
+
             status_dict[service_name] = {
                 "name": container.name,
                 "status": container.status,
                 "uptime": uptime,
                 "image": configured_image,
+                "restart_count": restart_count,
+                "flapping": _flapping(restart_count, state.get("StartedAt")),
             }
 
         return status_dict

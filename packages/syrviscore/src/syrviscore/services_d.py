@@ -141,6 +141,52 @@ def _installed_manifests(manager) -> Dict[str, ServiceDefinition]:
     return installed
 
 
+def _vanished_home_refusal(manager, name: str) -> Optional[str]:
+    """Refusal message when an app home that ONCE held content is now gone.
+
+    The pre-flight the convergence engine never had (incident 2026-08-16): the
+    planner diffs declaration against manifest and never stats the filesystem
+    under ``location:``, so a vanished ``<location>/syrviscore/apps/<name>`` was
+    indistinguishable from a healthy one — and the compose generator then
+    MANUFACTURED the tree plus an empty ``secrets.env`` and started a container
+    against it. Absent means CREATE is the correct default for a declarative
+    engine; it is the wrong default for a stateful app whose data is the thing
+    being converged.
+
+    Fires only on the high-water mark (:meth:`ServiceManager.mark_home_materialized`),
+    so a genuinely new service is never blocked. Returns ``None`` when the home
+    is fine, when nothing was ever recorded, or when the recorded state cannot
+    be resolved (the ordinary per-service failure paths handle that, loudly).
+    """
+    try:
+        state = manager.read_home_state(name)
+    except Exception:  # noqa: BLE001 - a state read must never break planning
+        return None
+    if not state.get("home_materialized"):
+        return None
+    try:
+        home = manager._app_home(name)
+    except Exception:  # noqa: BLE001 - tampered manifest: the per-service path fails closed
+        return None
+    if home is None:
+        # The manifest no longer resolves a home (removed location, unreadable
+        # manifest); fall back to the path the mark itself recorded.
+        home_str = state.get("home")
+        if not home_str:
+            return None
+        home = Path(home_str)
+    if manager._dir_nonempty(home):
+        return None
+    return (
+        "app home {} has vanished (it previously held this app's data) — refusing "
+        "to re-scaffold it and start {!r} against an empty tree. Almost certainly "
+        "the volume root was RENAMED, not lost: run `ls -d /volume*/syrviscore*` "
+        "and look for a 'syrviscore_1' sibling (DSM renames a volume root whose "
+        "name collides with a shared folder at the first cold boot). Move it back "
+        "before reconciling; nothing here will do it for you.".format(home, name)
+    )
+
+
 def build_reconcile_plan(
     manager,
     declarations: Dict[str, ServiceDefinition],
@@ -151,9 +197,11 @@ def build_reconcile_plan(
 
     Action kinds: ``add`` (materialize + start), ``replace`` (content differs;
     data dir preserved), ``start`` (declared, matching, not running), ``stop``
-    (declared with ``enabled: false`` but running), and — only under an explicit
-    prune policy — ``prune_stop`` / ``prune_remove`` / ``prune_purge`` for
-    installed services with no declaration.
+    (declared with ``enabled: false`` but running), ``blocked`` (a safety
+    refusal — see :func:`_vanished_home_refusal`; never converted into any other
+    action), and — only under an explicit prune policy — ``prune_stop`` /
+    ``prune_remove`` / ``prune_purge`` for installed services with no
+    declaration.
     """
     if prune is not None and prune not in PRUNE_POLICIES:
         raise ReconcileError(
@@ -165,6 +213,28 @@ def build_reconcile_plan(
     disabled_ok: List[str] = []
     installed = _installed_manifests(manager)
 
+    # FLOOR CHECK (incident 2026-08-16). "Zero declarations" is a legitimate
+    # state only for an instance with nothing installed. Zero declarations while
+    # services ARE installed means the config tree is not where we are looking —
+    # a mis-rooted SYRVIS_HOME, an unmounted volume, a renamed install root — and
+    # `load_declarations` returns empty-and-valid for a missing directory, so the
+    # engine would otherwise report a clean, converged, empty world. Refuse
+    # instead: an empty config is never a reason to act on a populated instance.
+    #
+    # Scoped to the AMBIENT path (no prune policy) on purpose. That is the one
+    # the boot hook, cron and every unattended reconcile take, and the one whose
+    # emptiness is an inference. An explicit `--prune`/`on_undeclared: remove`
+    # is an operator INSTRUCTION carrying its own policy word — it is not
+    # "planning nothing", it is planning exactly what was asked, and it is
+    # destructive-token-gated over the seam.
+    if prune is None and installed and not declarations:
+        raise ReconcileError(
+            "0 declarations but {} installed service(s) — refusing to reconcile "
+            "against an empty config/services.d. Check that SYRVIS_HOME points at "
+            "the real install root (`ls -d /volume*/syrviscore*`) and that "
+            "{} exists.".format(len(installed), get_declarations_dir(manager.syrvis_home))
+        )
+
     for name, declared in declarations.items():
         current = installed.get(name)
         status = manager._get_service_status(declared.container_name or name)
@@ -172,7 +242,9 @@ def build_reconcile_plan(
         if not declared.enabled:
             # Declared-but-off: stop anything alive (running, restarting,
             # paused, created — a crash-looping container is NOT stopped);
-            # never materialize.
+            # never materialize. Reached BEFORE the vanished-home pre-flight on
+            # purpose: stopping is always safe, and a service on its way off is
+            # not a service to block.
             if name in installed and status not in ("stopped", "exited", "unknown"):
                 actions.append(
                     {
@@ -185,6 +257,22 @@ def build_reconcile_plan(
                 )
             else:
                 disabled_ok.append(name)
+            continue
+
+        # PRE-FLIGHT, ahead of every add/replace/start decision: a stateful app
+        # whose home has vanished must be BLOCKED, not converged.
+        refusal = _vanished_home_refusal(manager, name)
+        if refusal:
+            actions.append(
+                {
+                    "kind": "blocked",
+                    "name": name,
+                    "image": declared.image,
+                    "critical": declared.critical,
+                    "destructive": False,
+                    "message": refusal,
+                }
+            )
             continue
 
         if name not in installed:
@@ -210,7 +298,17 @@ def build_reconcile_plan(
                     "destructive": False,  # data dir is preserved across replace
                 }
             )
-        elif status != "running":
+        elif status != "running" or manager.is_service_flapping(declared.container_name or name):
+            # FLAPPING counts as not-in-sync (incident 2026-08-16). A
+            # `restart: unless-stopped` container reads "running" between
+            # crashes, so a crash-looping service was classed in_sync and
+            # reconcile declared victory over six of them for ~15 minutes. The
+            # emitted action is the ordinary `start` — an idempotent `up -d`
+            # that also re-materializes compose (repairing host-side dir/perm
+            # drift, a real cause of crash loops). It deliberately does NOT
+            # force-recreate: repeatedly killing a container that may be slowly
+            # recovering is worse than reporting the truth and letting an
+            # operator run `syrvis service recreate`.
             actions.append(
                 {
                     "kind": "start",
@@ -218,6 +316,7 @@ def build_reconcile_plan(
                     "image": declared.image,
                     "critical": declared.critical,
                     "destructive": False,
+                    "flapping": status == "running",
                 }
             )
         else:
@@ -278,7 +377,15 @@ def apply_reconcile_plan(
     for action in plan.get("actions", []):
         kind, name = action["kind"], action["name"]
         try:
-            if kind == "add":
+            if kind == "blocked":
+                # A planner-level SAFETY REFUSAL, never an instruction. It is
+                # deliberately handled first and can never fall through into
+                # add/start: the whole point is that converging this service
+                # would destroy or shadow its data (incident 2026-08-16). It
+                # reports as a failed action, so a critical service's refusal
+                # fails the reconcile instead of passing silently.
+                ok, msg = False, action.get("message") or "blocked"
+            elif kind == "add":
                 ok, msg = manager.install_declaration(
                     declarations[name], start=True, trigger=trigger
                 )

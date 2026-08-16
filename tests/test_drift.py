@@ -11,6 +11,8 @@ import pytest
 from syrviscore import drift, verify
 from syrviscore.drift import DriftKind
 
+from conftest import stamp_install_root
+
 
 class TestImageNormalization:
     @pytest.mark.parametrize(
@@ -331,6 +333,7 @@ class TestL2Drift:
         home = tmp_path / "syrviscore"
         (home / "config").mkdir(parents=True)
         monkeypatch.setenv("SYRVIS_HOME", str(home))
+        stamp_install_root(home)
         monkeypatch.setenv("DOMAIN", "example.com")
         d = services_d.get_declarations_dir(home)
         d.mkdir(parents=True)

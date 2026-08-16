@@ -3,6 +3,7 @@
 import os
 import stat
 import textwrap
+import json
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,19 @@ import yaml
 
 
 def _make_syrvis_home(tmp_path: Path) -> Path:
-    """Return a minimal syrvis_home with the required directory layout."""
+    """Return a minimal syrvis_home with the required directory layout.
+
+    The install manifest is part of the minimum: since the 2026-08-16 hardening,
+    `paths.get_syrvis_home()` requires SYRVIS_HOME to name a real install root
+    (a self-identifying `.syrviscore-manifest.json`), not merely an existing
+    directory — which is what the CLI path below resolves through.
+    """
     home = tmp_path / "syrviscore"
     (home / "config" / "services.d").mkdir(parents=True)
     (home / "data").mkdir(parents=True)
+    (home / ".syrviscore-manifest.json").write_text(
+        json.dumps({"schema_version": 3, "install_path": str(home), "versions": {}})
+    )
     return home
 
 

@@ -10,6 +10,8 @@ from click.testing import CliRunner
 import syrviscore.cli as cli_mod
 from syrviscore.cli import cli
 
+from conftest import stamp_install_root
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -24,6 +26,7 @@ def home(tmp_path, monkeypatch):
         "  dashboard: {enabled: false}\n"
     )
     monkeypatch.setenv("SYRVIS_HOME", str(h))
+    stamp_install_root(h)
     monkeypatch.setenv("DOMAIN", "example.com")
     monkeypatch.setattr(cli_mod.privilege, "ensure_elevated", lambda reason: None)
     return h

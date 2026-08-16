@@ -6,6 +6,8 @@ import pytest
 
 from syrviscore import image_updates as iu
 
+from conftest import stamp_install_root
+
 
 class TestParseImageRef:
     def test_bare_hub_official(self):
@@ -331,6 +333,7 @@ class TestUpdatesCli:
         from syrviscore.cli import cli
 
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         monkeypatch.setattr(image_updates, "check_updates", lambda **kw: report)
         return CliRunner().invoke(cli, argv)
 
@@ -375,6 +378,7 @@ class TestUpdatesCli:
         from syrviscore.cli import cli
 
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         monkeypatch.setattr(
             image_updates,
             "check_updates",
@@ -406,6 +410,7 @@ class TestInvalidateCache:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text('{"checked_at": 0, "images": []}')
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
 
         class FakeManager:
             def start(self, name):

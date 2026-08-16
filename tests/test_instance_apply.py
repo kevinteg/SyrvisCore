@@ -21,6 +21,8 @@ from syrviscore.instance_bundle import (
     apply_instance_bundle,
 )
 
+from conftest import stamp_install_root
+
 
 def decl(name="web", **over):
     d = {"name": name, "version": "1.0.0", "image": "nginx:1.25.3"}
@@ -331,6 +333,7 @@ class TestApplyCli:
 
         monkeypatch.setattr(privilege, "ensure_elevated", lambda *a, **k: None)
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         return CliRunner().invoke(cli, argv, input=stdin)
 
     def test_registered(self):
@@ -452,6 +455,7 @@ class TestExport:
 
         self._seed(tmp_path)
         monkeypatch.setenv("SYRVIS_HOME", str(tmp_path))
+        stamp_install_root(tmp_path)
         r = CliRunner().invoke(cli, ["export"])
         assert r.exit_code == 0, r.output
         doc = yaml.safe_load(r.output)

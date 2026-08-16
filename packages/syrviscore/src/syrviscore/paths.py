@@ -35,6 +35,13 @@ class SyrvisHomeError(SyrvisError):
 # Must match syrviscore_manager.manifest.MANIFEST_SCHEMA_VERSION
 MANIFEST_SCHEMA_VERSION = 3
 
+# The platform's own directory name under a volume root — `<volume>/syrviscore`.
+# Mirrors syrviscore_manager.paths.PACKAGE_NAME. Named here because it is also a
+# DSM SHARE-name namespace: a shared folder of this name anywhere on the box
+# collides with every plain volume root of the same name at the next cold boot
+# (incident 2026-08-16), which is what `check_home_collision` looks for.
+PACKAGE_NAME = "syrviscore"
+
 
 # =============================================================================
 # Simulation Mode Support
@@ -141,12 +148,32 @@ def get_syrvis_home() -> Path:
     Raises:
         SyrvisHomeError: If SYRVIS_HOME cannot be determined
     """
-    # Strategy 1: Environment variable
+    # Strategy 1: Environment variable.
+    #
+    # HARDENED (incident 2026-08-16): this used to accept ANY existing directory,
+    # with no proof it was an install root — while strategies 2 and 3 below (and
+    # the sibling manager package, which requires the manifest for this very
+    # variable) do check. That was the one unguarded path AND the one the wrapper
+    # exports on every single invocation, so a mis-rooted or renamed home did not
+    # fail: it resolved, `load_declarations` returned empty-and-valid for the
+    # missing directory, and resume cleared the runstate at the end regardless —
+    # a clean, empty, ACTIVE homebase that had converged nothing. Fail LOUD here;
+    # an explicit SYRVIS_HOME that is not an install root is always a mistake, and
+    # saying so by name is what turns a 50-minute outage into one `ls`.
     syrvis_home = os.environ.get("SYRVIS_HOME")
     if syrvis_home:
         syrvis_path = Path(syrvis_home)
-        if syrvis_path.exists() and syrvis_path.is_dir():
+        if _is_install_root(syrvis_path):
             return syrvis_path
+        raise SyrvisHomeError(
+            "SYRVIS_HOME is set to {} but no SyrvisCore installation exists there "
+            "(missing or mismatched .syrviscore-manifest.json).\n"
+            "The install is far more likely RENAMED than gone — check "
+            "`ls -d /volume*/syrviscore*` for a 'syrviscore_1' sibling (DSM renames "
+            "a volume root whose name collides with a shared folder at the first cold "
+            "boot) and move it back. Do NOT run 'syrvisctl install': that would "
+            "create a SECOND tree beside the intact one.".format(syrvis_path)
+        )
 
     # Strategy 2: Default location
     default = Path("/volume1/syrviscore")

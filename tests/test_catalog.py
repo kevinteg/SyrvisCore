@@ -6,12 +6,15 @@ import yaml
 from syrviscore.catalog import CatalogError, list_templates, resolve
 from syrviscore.service_manager import ServiceManager
 
+from conftest import stamp_install_root
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     h = tmp_path / "syrviscore"
     (h / "config").mkdir(parents=True)
     monkeypatch.setenv("SYRVIS_HOME", str(h))
+    stamp_install_root(h)
     monkeypatch.setenv("DOMAIN", "example.com")
     return h
 
