@@ -607,11 +607,18 @@ class DockerManager:
             # Crash-loop visibility (incident 2026-08-16): a `restart:
             # unless-stopped` container reads "running" between crashes, so
             # `syrvis status` reported six services healthy while they
-            # crash-looped. RestartCount/StartedAt were on this same object the
-            # whole time and simply never read. `status` keeps meaning exactly
-            # what Docker means; `flapping` says "running, but not for long".
+            # crash-looped. `status` keeps meaning exactly what Docker means;
+            # `flapping` says "running, but not for long".
+            #
+            # The two fields live at DIFFERENT depths of the inspect document:
+            # RestartCount is top-level (Docker's ContainerJSONBase — the same
+            # place images/docker-state-exporter reads `info.RestartCount`),
+            # while StartedAt/Health sit under State. Reading RestartCount off
+            # State — as this did through 0.5.11 — returns None for every
+            # container, which makes `flapping` false BY CONSTRUCTION and
+            # silently re-opens the incident this code was written to close.
             state = container.attrs.get("State") or {}
-            restart_count = state.get("RestartCount")
+            restart_count = container.attrs.get("RestartCount")
 
             status_dict[service_name] = {
                 "name": container.name,

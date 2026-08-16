@@ -7,8 +7,17 @@ Docker state string that a ``restart: unless-stopped`` container reports as
 minutes while the platform called them running and in-sync; detection came only
 from an external alert, 13-18 minutes late by construction.
 
-``RestartCount``, ``StartedAt`` and ``Health`` were on the same object the whole
-time and were never read.
+``RestartCount``, ``StartedAt`` and ``Health`` were on the inspect document the
+whole time and were never read.
+
+They are NOT at the same depth, and these fixtures used to pretend they were:
+``RestartCount`` is top-level on the inspect document, while ``StartedAt`` and
+``Health`` are nested under ``State``. Both call sites read
+``State["RestartCount"]`` through 0.5.11 and every test agreed with them, because
+every fixture fabricated a ``State.RestartCount`` that Docker has never emitted.
+Live proof from the NAS: every service reported ``"restart_count": null`` with
+``"flapping": false``. ``_FakeContainer`` now mirrors the real shape, so a
+wrong-depth read fails here instead of on the box.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -67,9 +76,34 @@ class TestIsFlappingPredicate:
 
 
 class _FakeContainer:
-    def __init__(self, state):
+    """A container whose ``attrs`` mirror the REAL ``docker inspect`` document.
+
+    ``restart_count`` is written TOP-LEVEL (and omitted entirely when None, the
+    way an absent key really behaves); ``state`` holds only what Docker nests
+    under ``State``. Passing a ``RestartCount`` inside ``state`` therefore builds
+    a deliberately WRONG document — which is precisely what the regression tests
+    in :class:`TestInspectDocumentDepth` need.
+    """
+
+    def __init__(self, state, restart_count=None):
         self.attrs = {"State": state}
+        if restart_count is not None:
+            self.attrs["RestartCount"] = restart_count
         self.status = state.get("Status", "running")
+
+
+def _core_container(state, restart_count=None, name="traefik"):
+    """A ``get_core_containers`` row: a fake container with the compose labels."""
+    container = _FakeContainer(state, restart_count=restart_count)
+    container.name = name
+    container.labels = {"com.docker.compose.service": name}
+    container.attrs["Created"] = "2026-08-16T05:00:00.000000000Z"
+    container.attrs["Config"] = {"Image": "traefik:v3.7.10"}
+    return container
+
+
+def _just_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
 
 
 @pytest.fixture
@@ -82,8 +116,8 @@ def home(tmp_path, monkeypatch):
     return h
 
 
-def _stub_docker(monkeypatch, state):
-    """Make ``_container_health``'s lazy docker read return ``state``."""
+def _stub_docker(monkeypatch, state, restart_count=None):
+    """Make ``_container_health``'s lazy docker read return that inspect doc."""
     import sys
     import types
 
@@ -95,7 +129,9 @@ def _stub_docker(monkeypatch, state):
 
     fake.errors = _Errors
     fake.from_env = lambda: types.SimpleNamespace(
-        containers=types.SimpleNamespace(get=lambda name: _FakeContainer(state))
+        containers=types.SimpleNamespace(
+            get=lambda name: _FakeContainer(state, restart_count=restart_count)
+        )
     )
     monkeypatch.setitem(sys.modules, "docker", fake)
 
@@ -106,11 +142,8 @@ class TestContainerHealth:
         monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
         _stub_docker(
             monkeypatch,
-            {
-                "RestartCount": 5,
-                "StartedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
-                "Health": {"Status": "unhealthy"},
-            },
+            {"StartedAt": _just_now(), "Health": {"Status": "unhealthy"}},
+            restart_count=5,
         )
 
         health = sm._container_health("immich_postgres")
@@ -123,7 +156,7 @@ class TestContainerHealth:
     def test_a_steady_container_is_not_flapping(self, home, monkeypatch):
         sm = ServiceManager(syrvis_home=home)
         monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
-        _stub_docker(monkeypatch, {"RestartCount": 0, "StartedAt": "2026-08-01T00:00:00.000Z"})
+        _stub_docker(monkeypatch, {"StartedAt": "2026-08-01T00:00:00.000Z"}, restart_count=0)
         assert sm._container_health("vm")["flapping"] is False
 
     def test_unreachable_daemon_degrades_to_status_only(self, home, monkeypatch):
@@ -147,11 +180,8 @@ class TestSurfacedInListServices:
         monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
         _stub_docker(
             monkeypatch,
-            {
-                "RestartCount": 4,
-                "StartedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
-                "Health": {"Status": "starting"},
-            },
+            {"StartedAt": _just_now(), "Health": {"Status": "starting"}},
+            restart_count=4,
         )
 
         (row,) = sm.list()
@@ -234,16 +264,7 @@ class TestCoreStatusCarriesIt:
         from syrviscore import docker_manager
 
         mgr = docker_manager.DockerManager.__new__(docker_manager.DockerManager)
-        container = _FakeContainer(
-            {
-                "RestartCount": 9,
-                "StartedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
-            }
-        )
-        container.name = "traefik"
-        container.labels = {"com.docker.compose.service": "traefik"}
-        container.attrs["Created"] = "2026-08-16T05:00:00.000000000Z"
-        container.attrs["Config"] = {"Image": "traefik:v3.7.10"}
+        container = _core_container({"StartedAt": _just_now()}, restart_count=9)
         monkeypatch.setattr(
             docker_manager.DockerManager, "get_core_containers", lambda self: [container]
         )
@@ -253,3 +274,51 @@ class TestCoreStatusCarriesIt:
         assert out["traefik"]["restart_count"] == 9
         assert out["traefik"]["flapping"] is True
         assert out["traefik"]["status"] == "running"
+
+
+class TestInspectDocumentDepth:
+    """The bug the old fixtures hid: RestartCount is TOP-LEVEL, not under State.
+
+    Both call sites read ``State["RestartCount"]`` through 0.5.11, so on the real
+    NAS every service reported ``restart_count: null`` / ``flapping: false`` and
+    the reconcile planner's flapping gate was inert BY CONSTRUCTION. These tests
+    pin the depth from both directions: the wrong depth must NOT be read (no
+    silent fallback that would re-hide a regression), and the right depth must
+    drive ``flapping``.
+    """
+
+    def test_service_health_ignores_restart_count_nested_under_state(self, home, monkeypatch):
+        """A doc with RestartCount ONLY under State is not a real inspect doc —
+        reading it would mean the top-level read had regressed to a fallback."""
+        sm = ServiceManager(syrvis_home=home)
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
+        _stub_docker(monkeypatch, {"RestartCount": 5, "StartedAt": _just_now()})
+
+        health = sm._container_health("immich_postgres")
+
+        assert health["restart_count"] is None
+        assert health["flapping"] is False
+
+    def test_service_health_reads_top_level_restart_count(self, home, monkeypatch):
+        sm = ServiceManager(syrvis_home=home)
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
+        _stub_docker(monkeypatch, {"StartedAt": _just_now()}, restart_count=5)
+
+        health = sm._container_health("immich_postgres")
+
+        assert health["restart_count"] == 5
+        assert health["flapping"] is True
+
+    def test_core_status_ignores_restart_count_nested_under_state(self, monkeypatch):
+        from syrviscore import docker_manager
+
+        mgr = docker_manager.DockerManager.__new__(docker_manager.DockerManager)
+        container = _core_container({"RestartCount": 5, "StartedAt": _just_now()})
+        monkeypatch.setattr(
+            docker_manager.DockerManager, "get_core_containers", lambda self: [container]
+        )
+
+        out = mgr.get_container_status()
+
+        assert out["traefik"]["restart_count"] is None
+        assert out["traefik"]["flapping"] is False

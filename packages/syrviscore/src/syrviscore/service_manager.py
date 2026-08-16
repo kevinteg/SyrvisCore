@@ -1792,8 +1792,15 @@ class ServiceManager:
         ``_get_service_status`` returns the raw Docker status string and always
         will — every caller and the whole seam contract depend on it. But that
         string is not the whole state: ``RestartCount``, ``StartedAt`` and
-        ``Health`` sit on the same object and were simply never read, which is
-        why a crash-looping container reported "running" (see :func:`is_flapping`).
+        ``Health`` were on the inspect document the whole time and were simply
+        never read, which is why a crash-looping container reported "running"
+        (see :func:`is_flapping`).
+
+        Mind the DEPTHS — they differ, and getting it wrong fails silently:
+        ``RestartCount`` is TOP-LEVEL on the inspect document, while
+        ``StartedAt`` and ``Health`` are nested under ``State``. Through 0.5.11
+        this read ``State["RestartCount"]``, so restart_count was None for every
+        container on the box and ``flapping`` could never be true.
 
         Returns ``{status, restart_count, started_at, health, flapping}``. The
         status field comes from ``_get_service_status`` so a caller (or a test)
@@ -1813,10 +1820,11 @@ class ServiceManager:
         try:
             import docker
 
-            state = docker.from_env().containers.get(name).attrs.get("State") or {}
+            attrs = docker.from_env().containers.get(name).attrs or {}
         except Exception:  # noqa: BLE001 - no daemon / no such container: status only
             return out
-        out["restart_count"] = state.get("RestartCount")
+        state = attrs.get("State") or {}
+        out["restart_count"] = attrs.get("RestartCount")
         out["started_at"] = state.get("StartedAt")
         out["health"] = (state.get("Health") or {}).get("Status") or None
         out["flapping"] = is_flapping(out["restart_count"], out["started_at"])
