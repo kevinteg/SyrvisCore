@@ -459,15 +459,37 @@ def service_list(as_json):
         click.echo("Add a service with: syrvis service add <git-url>")
         return
 
-    widths = (20, 10, 12, 0)
+    widths = (20, 10, 12, 10, 0)
     click.echo()
-    click.echo(format_row(list(zip(("NAME", "VERSION", "STATUS", "URL"), widths))))
-    click.echo("-" * 70)
+    click.echo(format_row(list(zip(("NAME", "VERSION", "STATUS", "INTENT", "URL"), widths))))
+    click.echo("-" * 78)
 
     for svc in services:
         glyph = status_glyph(svc["status"])
-        cells = (f"{glyph} {svc['name']}", svc["version"], svc["status"], svc["url"])
+        # "shed" beside "stopped" is the whole point: a not-running service that
+        # is SUPPOSED to be down must not read like one that fell over.
+        cells = (
+            f"{glyph} {svc['name']}",
+            svc["version"],
+            svc["status"],
+            svc.get("intent") or "-",
+            svc["url"],
+        )
         click.echo(format_row(list(zip(cells, widths))))
+
+    shed = [s for s in services if s.get("intent") == "shed"]
+    if shed:
+        click.echo()
+        click.echo("Shed ({}), deliberately down:".format(len(shed)))
+        for svc in shed:
+            click.echo(
+                "  - {}: {}{}".format(
+                    svc["name"],
+                    svc.get("shed_reason") or "unspecified",
+                    " (until {})".format(svc["shed_until"]) if svc.get("shed_until") else "",
+                )
+            )
+        click.echo("  Lift with: sudo syrvis service unshed -- <name>")
 
     click.echo()
 
@@ -492,7 +514,17 @@ def service_start(name):
 @click.argument("name")
 @handle_errors
 def service_stop(name):
-    """Stop a service."""
+    """Stop a service (EPHEMERAL intent: writes `enabled: false`).
+
+    The right verb for a short, local stop. It writes `enabled: false` into the
+    service's declaration, which reconcile honors — but that file is exactly
+    what the next GitOps `syrvis apply` overwrites from the repo, so the stop
+    lasts only until the next apply.
+
+    For a stop that must OUTLIVE an apply — a load-shed, a vendor outage, a
+    deliberate multi-day degradation — use `syrvis service shed --reason R`,
+    which records the decision outside the declaration set.
+    """
     privilege.ensure_elevated("Stopping services requires elevated privileges.")
     from syrviscore.service_manager import ServiceManager
 
@@ -502,6 +534,124 @@ def service_stop(name):
         click.echo(f"Service '{name}' stopped")
     else:
         raise SyrvisError(message)
+
+
+@service.command("shed")
+@click.argument("name")
+@click.option(
+    "--reason",
+    required=True,
+    help="Short token recording WHY (e.g. md6-resync). Becomes a metric label.",
+)
+@click.option("--until", default=None, help="YYYY-MM-DD or YYYY-MM-DDThh:mm:ssZ (review date)")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def service_shed(name, reason, until, as_json):
+    """Declare a service DELIBERATELY DOWN, durably, and stop it.
+
+    `service stop` is the EPHEMERAL verb: it flips `enabled: false` in the
+    service's declaration — the very file the next GitOps `syrvis apply`
+    overwrites from the repo. That is fine for a five-minute stop and wrong for
+    a five-day load-shed: it is how fourteen deliberately-stopped services got
+    resurrected mid-array-rebuild by a runbook whose own text said they would
+    stay down (incident 2026-08-16).
+
+    `service shed` is the DURABLE verb. It records the decision — with a reason,
+    a timestamp and an optional review date — in data/state/intent.json, which
+    lives outside the declaration set and therefore survives apply, deploy,
+    reconcile, resume and boot. While a service is shed:
+
+      * reconcile/resume never start it and never call it drift;
+      * an incoming bundle can never re-enable it (it is pinned enabled: false);
+      * `service start` / `service recreate` refuse, naming the shed;
+      * `deploy` still lands new bits — it just does not start them;
+      * `service list --json` and `status --json` report it as `shed`, with the
+        reason, instead of as one more unhealthy container.
+
+    Lift it with `service unshed`. Idempotent; re-shedding keeps the original
+    `since` and updates the reason/until.
+
+        sudo syrvis service shed --reason md6-resync --until 2026-08-24 -- onyx-api
+    """
+    privilege.ensure_elevated("Shedding a service requires elevated privileges.")
+    from syrviscore import intent as intent_mod
+    from syrviscore import services_d
+    from syrviscore.service_manager import ServiceManager
+
+    manager = ServiceManager()
+    home = manager.syrvis_home
+    # Gate on a KNOWN service (declared or installed), like secret/config set:
+    # a typo must not manufacture a durable intent row for a service that will
+    # never exist — nothing would ever clear it.
+    declared, _invalid = services_d.load_declarations(home, tolerant=True)
+    installed = (manager.services_dir / name).is_dir()
+    if name not in declared and not installed:
+        raise SyrvisError(
+            "no such service {!r} (not declared in config/services.d and not "
+            "installed) — shed records intent about a real workload".format(name)
+        )
+
+    row = intent_mod.shed(home, name, reason, until=until, by="cli")
+    # Stop WITHOUT touching the declaration: the shed row is the intent now, so
+    # lifting it must restore the service exactly as the declaration describes.
+    stop_ok, stop_msg = True, "already stopped"
+    container = declared[name].container_name or name if name in declared else name
+    if manager._get_service_status(container) not in ("stopped", "exited", "unknown"):
+        stop_ok, stop_msg = manager.stop(name, set_intent=False)
+
+    if as_json:
+        click.echo(
+            jsonlib.dumps(
+                {"shed": row, "stopped": stop_ok, "detail": stop_msg, "ok": stop_ok}, indent=2
+            )
+        )
+        if not stop_ok:
+            raise SystemExit(1)
+        return
+    click.echo(
+        "Shed '{}' (reason: {}{}). Intent recorded — it survives apply/reconcile.".format(
+            name, row["reason"], ", until {}".format(row["until"]) if row["until"] else ""
+        )
+    )
+    click.echo("  stop: {}".format(stop_msg))
+    if not stop_ok:
+        # The INTENT is what had to be durable and it is written; a failed stop
+        # is a separate, retryable problem (and reconcile will stop it anyway).
+        raise SyrvisError("intent recorded, but the container could not be stopped: " + stop_msg)
+
+
+@service.command("unshed")
+@click.argument("name")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def service_unshed(name, as_json):
+    """Lift a service's shed — it may run again (nothing is started here).
+
+    Deliberately does NOT start the service: the declaration underneath was
+    never touched, so `syrvis reconcile` (or `service start`) is the one
+    bring-up path, with the ordering, hooks and health handling that path
+    already has.
+
+        sudo syrvis service unshed -- onyx-api
+    """
+    privilege.ensure_elevated("Lifting a shed requires elevated privileges.")
+    from syrviscore import intent as intent_mod
+    from syrviscore.paths import get_syrvis_home
+
+    home = get_syrvis_home()
+    row = intent_mod.unshed(home, name)
+    if as_json:
+        click.echo(jsonlib.dumps({"unshed": row, "changed": row is not None}, indent=2))
+        return
+    if row is None:
+        click.echo("Service '{}' was not shed — nothing to lift.".format(name))
+        return
+    click.echo(
+        "Lifted the shed on '{}' (was: {}, since {}).".format(
+            name, row.get("reason", "?"), row.get("since", "?")
+        )
+    )
+    click.echo("Nothing was started — run 'sudo syrvis reconcile' to bring it back.")
 
 
 @service.command("recreate")
@@ -922,8 +1072,13 @@ def secret_set(name):
 
 @cli.command("deploy")
 @click.argument("name")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Deploy even while a RAID array is rebuilding (the override is journaled)",
+)
 @handle_errors
-def deploy(name):
+def deploy(name, force):
     """Apply a resolved deployment bundle (JSON on STDIN) to service NAME (root-only).
 
     The encapsulated services-plane apply (design/21): one syrvis-bundle — the
@@ -937,8 +1092,13 @@ def deploy(name):
     scripts/deploy-stack) and streams it over the operator seam:
 
         <bundle.json> | sudo syrvis deploy -- snmp-exporter
+
+    While a RAID array is rebuilding, deploying is REFUSED (a deploy pulls
+    images and recreates containers against the spindles the rebuild is using).
+    Override with --force; the override is recorded in logs/overrides.log.
     """
     privilege.ensure_elevated("Deploying a service requires elevated privileges.")
+    from syrviscore import guards
     from syrviscore.bundle import BundleValidationError, DeployBundle
     from syrviscore.service_manager import ServiceManager
 
@@ -956,6 +1116,7 @@ def deploy(name):
         )
 
     manager = ServiceManager()
+    guards.guard_bulk_degraded("deploy", force=force, home=manager.syrvis_home, services=[name])
     success, message = manager.deploy_bundle(bundle)
     if success:
         click.echo(message)
@@ -971,8 +1132,13 @@ def deploy(name):
     is_flag=True,
     help="Permit changing an existing secret value in .env (deliberate rotation)",
 )
+@click.option(
+    "--allow-enable-change",
+    is_flag=True,
+    help="Permit re-enabling declared-off services (deliberate resurrection)",
+)
 @handle_errors
-def apply_cmd(as_json, dry_run, allow_secret_change):
+def apply_cmd(as_json, dry_run, allow_secret_change, allow_enable_change):
     """Apply a core-tier instance bundle (JSON on STDIN) to this install (root-only).
 
     The core-tier sibling of `syrvis deploy`: one syrvis-instance bundle — the
@@ -987,6 +1153,14 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
     requires --allow-secret-change (deliberate rotation):
 
         <instance.json> | sudo syrvis apply --json
+
+    Two intent guards apply to the declaration set. A SHED service is always
+    written `enabled: false`, whatever the bundle says (its shed is the
+    operator's decision and the bundle cannot express it). Any OTHER service
+    the bundle would flip from declared-off to declared-on is REFUSED by name
+    unless --allow-enable-change — the guard that would have stopped fourteen
+    load-shed services from being resurrected mid-rebuild (incident
+    2026-08-16). Overrides are recorded in logs/overrides.log.
     """
     privilege.ensure_elevated("Applying an instance bundle requires elevated privileges.")
     from syrviscore.instance_bundle import InstanceBundle, apply_instance_bundle
@@ -1001,6 +1175,7 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
             get_syrvis_home(),
             allow_secret_change=allow_secret_change,
             dry_run=dry_run,
+            allow_enable_change=allow_enable_change,
         )
     except SyrvisError as e:
         if as_json:
@@ -1020,6 +1195,18 @@ def apply_cmd(as_json, dry_run, allow_secret_change):
                     len(entry["written"]), len(entry["removed"]), len(entry["unchanged"])
                 )
             )
+            if entry.get("shed_pinned"):
+                click.echo(
+                    "  shed (pinned enabled: false, bundle overridden): {}".format(
+                        ", ".join(entry["shed_pinned"])
+                    )
+                )
+            if entry.get("enable_changes"):
+                click.echo(
+                    "  re-enabled declared-off service(s): {}".format(
+                        ", ".join(entry["enable_changes"])
+                    )
+                )
         elif section == "env":
             click.echo(
                 "env: {} (+{} ~{} -{})".format(
@@ -1303,12 +1490,29 @@ def status(as_json):
         except Exception:  # noqa: BLE001
             runstate = {"state": "active"}
 
+        # Declared intent: the same distinction one level down. `halted` says
+        # the INSTANCE is deliberately down; `shed` says these SERVICES are.
+        try:
+            from syrviscore import intent as intent_mod
+
+            intent_block = intent_mod.summary(_home)
+        except Exception:  # noqa: BLE001 - no home / unreadable intent
+            intent_block = {
+                "device": "in-service",
+                "drained": False,
+                "shed": [],
+                "shed_count": 0,
+                "shed_reasons": {},
+                "shed_expired": [],
+            }
+
         if as_json:
             click.echo(
                 jsonlib.dumps(
                     {
                         "version": active,
                         "runstate": runstate,
+                        "intent": intent_block,
                         "services": statuses,
                         "images": trust_summary,
                     },
@@ -1330,6 +1534,26 @@ def status(as_json):
                 runstate.get("reason", "?"), runstate.get("at", "?")
             )
         )
+
+    if intent_block.get("drained"):
+        click.echo()
+        click.echo("DEVICE INTENT: drained — workloads are deliberately not running.")
+    if intent_block.get("shed_count"):
+        click.echo()
+        reasons = ", ".join(
+            "{} x{}".format(r, n) for r, n in sorted(intent_block["shed_reasons"].items())
+        )
+        click.echo(
+            "SHED: {} service(s) deliberately down ({}). 'syrvis service list' names them.".format(
+                intent_block["shed_count"], reasons
+            )
+        )
+        if intent_block.get("shed_expired"):
+            click.echo(
+                "  [!] past their review date: {} — unshed or extend.".format(
+                    ", ".join(intent_block["shed_expired"])
+                )
+            )
 
     if not statuses:
         click.echo("No services found")
@@ -1778,8 +2002,13 @@ def hello():
     help="Boot mode: best-effort (always exits 0), never prunes, never prompts",
 )
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation of destructive prune actions")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Converge even while a RAID array is rebuilding (the override is journaled)",
+)
 @handle_errors
-def reconcile(dry_run, as_json, prune, strict, boot, yes):
+def reconcile(dry_run, as_json, prune, strict, boot, yes, force):
     """Converge to the declared services in config/services.d/.
 
     Loads every declaration with per-file failure isolation (a broken file
@@ -1787,11 +2016,21 @@ def reconcile(dry_run, as_json, prune, strict, boot, yes):
     independently (one failure never blocks the rest). Installed services with
     no declaration are reported as unmanaged and never touched unless --prune.
 
+    SHED services (data/state/intent.json) are planned exactly as if they were
+    declared `enabled: false`, whatever their declaration says — that overlay
+    is how a deliberate load-shed survives a GitOps apply. They are reported
+    separately from `disabled`, and a shed service found RUNNING is stopped.
+
+    While a RAID array is rebuilding, a mutating reconcile is REFUSED (it pulls
+    images and recreates containers against the rebuilding spindles). Override
+    with --force; the override is recorded in logs/overrides.log. --dry-run and
+    --boot are never blocked: planning is free, and boot recovery must proceed.
+
     Exit code: non-zero for any INVALID declaration file (corrupted intent
     must never pass silently) or a CRITICAL service's failure; any failure
     with --strict. --boot is always best-effort and exits 0.
     """
-    from syrviscore import lifecycle, services_d
+    from syrviscore import guards, lifecycle, services_d
     from syrviscore.service_manager import ServiceManager
 
     if boot:
@@ -1846,6 +2085,22 @@ def reconcile(dry_run, as_json, prune, strict, boot, yes):
             _render_reconcile_plan(plan)
             click.echo("(dry run — nothing applied)")
         return
+
+    # Only a plan with WORK to do is worth refusing: a no-op converge against a
+    # rebuilding array costs nothing and refusing it would just train operators
+    # to pass --force reflexively. --boot is exempt entirely (recovery first).
+    if not boot and plan["actions"]:
+        try:
+            guards.guard_bulk_degraded(
+                "reconcile",
+                force=force,
+                home=manager.syrvis_home,
+                services=[a["name"] for a in plan["actions"]],
+            )
+        except SyrvisError as e:
+            if as_json:
+                json_error(e, indent=2)
+            raise
 
     destructive = [a for a in plan["actions"] if a["destructive"]]
     if destructive and not yes and not boot:
@@ -1908,14 +2163,17 @@ def _render_reconcile_plan(plan):
     click.echo()
     summary = plan["summary"]
     click.echo(
-        "Declared: {}  in sync: {}  disabled: {}  unmanaged: {}  invalid: {}".format(
+        "Declared: {}  in sync: {}  disabled: {}  shed: {}  unmanaged: {}  invalid: {}".format(
             summary["declared"],
             len(plan["in_sync"]),
             len(plan["disabled"]),
+            len(plan.get("shed") or []),
             len(plan["unmanaged"]),
             summary["invalid"],
         )
     )
+    for name in plan.get("shed") or []:
+        click.echo("  [~] shed (declared, deliberately down): {}".format(name))
     for row in plan["invalid"]:
         click.echo("  [!] invalid declaration {}: {}".format(row["file"], row["error"]))
     for name in plan["unmanaged"]:

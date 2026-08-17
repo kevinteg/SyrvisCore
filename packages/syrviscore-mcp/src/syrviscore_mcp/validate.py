@@ -273,6 +273,38 @@ def validate_halt_reason(reason: str) -> str:
     return reason
 
 
+def validate_shed_reason(reason: str) -> str:
+    """A shed reason: a short machine TOKEN, never prose (mirrors the shim).
+
+    Free text would be rejected by the forced-command shim's character
+    allowlist and word-split by its argv parse anyway; more importantly the
+    value becomes a Prometheus label. Narrative belongs in the runbook the
+    token names.
+    """
+    from syrviscore.intent import SHED_REASON_RE
+
+    _reject_metachars(reason, "shed reason")
+    if not SHED_REASON_RE.match(reason):
+        raise ValidationError(
+            "invalid shed reason {!r}: must match {} (e.g. 'md6-resync')".format(
+                reason, SHED_REASON_RE.pattern
+            )
+        )
+    return reason
+
+
+def validate_timestamp(value: str) -> str:
+    """A shed review date: ``YYYY-MM-DD`` or ``YYYY-MM-DDThh:mm[:ss]Z``."""
+    from syrviscore.intent import SHED_UNTIL_RE
+
+    _reject_metachars(value, "timestamp")
+    if not SHED_UNTIL_RE.match(value):
+        raise ValidationError(
+            "invalid timestamp {!r}: use YYYY-MM-DD or YYYY-MM-DDThh:mm:ssZ".format(value)
+        )
+    return value
+
+
 def validate_stack_service(name: str, disable: bool = False) -> str:
     """Fail-closed gate for stack_enable/stack_disable slots: only the
     platform's core-tier service set, and never disabling a primordial one.

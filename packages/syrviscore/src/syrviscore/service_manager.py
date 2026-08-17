@@ -154,6 +154,31 @@ LOCATION_CHANGE_REFUSAL = (
 HOME_STATE_FILENAME = ".home-state.json"
 
 
+def _intent_columns(name, declared, shed_rows) -> Dict[str, Any]:
+    """The declared-intent columns every :meth:`ServiceManager.list` row carries.
+
+    Module-level and pure so the fold — "shed outranks the enabled flag" — is
+    stated exactly once, and so a caller assembling rows from another source
+    (a test, a future read model) can reuse it verbatim.
+    """
+    row = shed_rows.get(name)
+    definition = declared.get(name)
+    declared_enabled = None if definition is None else bool(definition.enabled)
+    if row is not None:
+        state = "shed"
+    elif declared_enabled is None:
+        state = "undeclared"
+    else:
+        state = "enabled" if declared_enabled else "disabled"
+    return {
+        "declared_enabled": declared_enabled,
+        "intent": state,
+        "shed_reason": (row or {}).get("reason"),
+        "shed_since": (row or {}).get("since"),
+        "shed_until": (row or {}).get("until"),
+    }
+
+
 class ServiceManager:
     """Manage Layer 2 services for SyrvisCore."""
 
@@ -1681,7 +1706,24 @@ class ServiceManager:
         return True, f"Service '{name}' removed (data preserved)"
 
     def list(self) -> List[Dict[str, Any]]:
-        """List all installed services.
+        """List all installed services, with DECLARED INTENT beside live status.
+
+        Status alone cannot answer the only question that matters during a
+        deliberate degradation — "is this down on purpose?" — so every row also
+        carries what the instance has DECLARED about the service:
+
+        - ``declared_enabled`` — the ``services.d`` flag (``None``: undeclared).
+        - ``intent`` — the folded verdict: ``shed`` | ``enabled`` |
+          ``disabled`` | ``undeclared``. ``shed`` OUTRANKS the flag, because the
+          overlay outranks it everywhere else too.
+        - ``shed_reason`` / ``shed_since`` / ``shed_until`` — the row from
+          ``intent.json``, or ``None``.
+
+        Consumers (the dashboard fold, ``service list --json``, home-tech's
+        enabled-drift check) can then separate "14 unhealthy" from "14 shed"
+        without a second call. Both reads degrade to the previous behavior:
+        an unreadable declaration set or intent file leaves ``intent``
+        ``undeclared`` rather than failing the listing.
 
         Returns:
             List of service info dictionaries
@@ -1690,6 +1732,20 @@ class ServiceManager:
 
         if not self.services_dir.exists():
             return services
+
+        from . import intent as intent_mod
+
+        # tolerant: this is a READ-ONLY view — a declaration written for a newer
+        # schema than this (possibly image-baked) reader must still show its
+        # enabled flag rather than vanishing from the intent column.
+        try:
+            declared, _invalid = services_d.load_declarations(self.syrvis_home, tolerant=True)
+        except Exception:  # noqa: BLE001 - unreadable config: intent unknown, list on
+            declared = {}
+        try:
+            shed_rows = intent_mod.shed_map(self.syrvis_home)
+        except Exception:  # noqa: BLE001
+            shed_rows = {}
 
         for service_dir in self.services_dir.iterdir():
             if not service_dir.is_dir():
@@ -1702,16 +1758,22 @@ class ServiceManager:
             try:
                 service = load_service_definition(yaml_path)
             except Exception:
-                # Only a genuine manifest-load failure is "error".
+                # Only a genuine manifest-load failure is "error". It still
+                # carries the intent columns: a broken manifest on a SHED
+                # service is a much smaller problem than on a live one, and the
+                # consumer can only know that if the columns are always there.
                 services.append(
-                    {
-                        "name": service_dir.name,
-                        "version": "unknown",
-                        "status": "error",
-                        "url": "",
-                        "description": "Failed to load service definition",
-                        "location": "",
-                    }
+                    dict(
+                        {
+                            "name": service_dir.name,
+                            "version": "unknown",
+                            "status": "error",
+                            "url": "",
+                            "description": "Failed to load service definition",
+                            "location": "",
+                        },
+                        **_intent_columns(service_dir.name, declared, shed_rows),
+                    )
                 )
                 continue
 
@@ -1766,6 +1828,7 @@ class ServiceManager:
                     "started_at": health["started_at"],
                     "docker_health": health["health"],
                     "flapping": health["flapping"],
+                    **_intent_columns(service.name, declared, shed_rows),
                 }
             )
 
@@ -1842,6 +1905,39 @@ class ServiceManager:
         out["flapping"] = is_flapping(out["restart_count"], out["started_at"])
         return out
 
+    def _shed_refusal(self, name: str, verb: str) -> Optional[str]:
+        """Refusal message when ``verb`` would bring up a deliberately-shed service.
+
+        The bring-up half of the shed overlay. The planner already refuses to
+        EMIT a start for a shed service; this covers the imperative verbs an
+        operator (or an agent following a repair runbook) reaches for directly.
+        Both ``start`` and ``recreate`` are covered: recreate writes no
+        declaration, but it does put a running container on the box, which is
+        exactly what the shed says must not happen. ``stop`` is never guarded —
+        you must always be able to stop.
+        """
+        from . import intent as intent_mod
+
+        try:
+            row = intent_mod.shed_map(self.syrvis_home).get(name)
+        except Exception:  # noqa: BLE001 - a state read must never break a verb
+            return None
+        if not row:
+            return None
+        return (
+            "refusing to {} {!r}: it is SHED (reason: {}, since {}{}). Shed is a "
+            "durable decision recorded in data/state/intent.json — it survives "
+            "apply, deploy and reconcile on purpose. Lift it first: "
+            "`sudo syrvis service unshed -- {}`.".format(
+                verb,
+                name,
+                row.get("reason") or "unspecified",
+                row.get("since") or "?",
+                ", until {}".format(row["until"]) if row.get("until") else "",
+                name,
+            )
+        )
+
     def is_service_flapping(self, name: str) -> bool:
         """Cheap boolean form of :meth:`_container_health` for the planner."""
         try:
@@ -1867,6 +1963,9 @@ class ServiceManager:
         Returns:
             Tuple of (success, message)
         """
+        refusal = self._shed_refusal(name, "start")
+        if refusal:
+            return False, refusal
         try:
             paths_ = self._service_paths(name)
         except ServiceValidationError as e:
@@ -1985,6 +2084,9 @@ class ServiceManager:
         silently flipped on. Lifecycle hooks are deliberately not fired — this is
         a container-level repair of an existing deployment, not a deploy.
         """
+        refusal = self._shed_refusal(name, "recreate")
+        if refusal:
+            return False, refusal
         try:
             paths_ = self._service_paths(name)
         except ServiceValidationError as e:
@@ -2795,12 +2897,19 @@ class ServiceManager:
         TARGETED: never touches another service (unlike reconcile, which
         converges/prunes the whole set). Caller (CLI) runs as root.
         """
+        from . import intent as intent_mod
+
         service = bundle.service
         name = service.name
         try:
             self._service_paths(name)  # re-validate name as a path component
         except ServiceValidationError as e:
             return False, str(e)
+
+        try:
+            shed = intent_mod.is_shed(self.syrvis_home, name)
+        except Exception:  # noqa: BLE001 - a state read never blocks a deploy
+            shed = False
 
         self._ensure_directories()
         service_path = self.services_dir / name
@@ -2886,7 +2995,14 @@ class ServiceManager:
             except Exception:  # noqa: BLE001 - unreadable prior manifest
                 pass
             try:
-                services_d.write_declaration(self.syrvis_home, service)
+                # ORCHESTRATION-PRESERVING (incident 2026-08-16). This wrote the
+                # bundle's declaration VERBATIM, so a repo that still said
+                # `enabled: true` silently re-enabled a service the operator had
+                # deliberately stopped — and the next converge started it. The
+                # safe helper already existed and was simply not used on this
+                # path: it keeps the live enabled/critical and pins `enabled:
+                # false` for anything in the shed set.
+                services_d.write_declaration_from_install(self.syrvis_home, service)
             except Exception as e:  # noqa: BLE001
                 return False, f"could not write declaration for {name!r}: {e}"
             self._write_manifest(service, service_path)
@@ -2928,7 +3044,16 @@ class ServiceManager:
             # first install may scaffold an absent env_file (see the env_file
             # branch in _generate_compose_file).
             compose_path = self._generate_compose_file(service, installed=not fresh)
-            ok, msg = self._start_service(name, compose_path)
+            # A SHED service is deployed but NOT started. This is the useful
+            # half of the shed contract, not a limitation: staging fixed bits
+            # (a corrected env_file, a new image) on a service that must stay
+            # down is exactly what an operator wants mid-degradation, and the
+            # start is what the shed forbids. `service unshed` + reconcile is
+            # the one bring-up path.
+            if shed:
+                ok, msg = True, "shed — not started"
+            else:
+                ok, msg = self._start_service(name, compose_path)
             if not ok:
                 raise RuntimeError(f"failed to start: {msg}")
             # `docker compose up -d` compares the COMPOSE SPEC (image/command/
@@ -2951,7 +3076,9 @@ class ServiceManager:
             # for a configs-only update, nothing at all when neither is present
             # (fresh installs already start with the final content; config-less
             # services like victoria-metrics need no fix-up).
-            if not fresh and bundle.secrets:
+            if shed:
+                pass  # nothing is running to re-bake; the shed holds it down
+            elif not fresh and bundle.secrets:
                 self._recreate_containers(name, compose_path)
             elif not fresh and bundle.configs:
                 self._compose(name, compose_path, "restart", timeout=90)
@@ -2995,7 +3122,7 @@ class ServiceManager:
         )
         return True, (
             f"deployed {name} ({verb}; {len(bundle.configs)} config(s), "
-            f"{len(bundle.secrets)} secret(s))"
+            f"{len(bundle.secrets)} secret(s))" + (" — SHED, not started" if shed else "")
         )
 
     def _place_config(

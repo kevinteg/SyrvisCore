@@ -48,6 +48,8 @@ _KIND_VALIDATORS = {
     "stack_service": lambda v, cfg: validate.validate_stack_service(v),
     "revision": lambda v, cfg: str(validate.validate_revision(v)),
     "halt_reason": lambda v, cfg: validate.validate_halt_reason(v),
+    "shed_reason": lambda v, cfg: validate.validate_shed_reason(v),
+    "timestamp": lambda v, cfg: validate.validate_timestamp(v),
 }
 
 

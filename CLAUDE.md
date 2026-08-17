@@ -209,7 +209,19 @@ syrvis service run <name>     # Run image-first: --image, --exposure, --port, --
 syrvis service remove <name>  # Remove a service
 syrvis service list           # List installed services
 syrvis service start <name>   # Start a service
-syrvis service stop <name>    # Stop a service (INTENT: writes enabled: false)
+syrvis service stop <name>    # Stop a service (EPHEMERAL intent: writes
+                              # enabled: false — the next GitOps `apply`
+                              # overwrites it from the repo)
+syrvis service shed --reason R [--until D] -- <name>
+                              # DURABLE intent: records {reason, since, until}
+                              # in data/state/intent.json (OUTSIDE the
+                              # declaration set, so it survives apply/deploy/
+                              # reconcile/resume/boot) and stops the container
+                              # without touching the declaration. Reconcile
+                              # treats shed as an enabled:false overlay; start/
+                              # recreate refuse; deploy lands bits but does not
+                              # start. The verb for a load-shed.
+syrvis service unshed <name>  # Lift the shed (starts nothing — reconcile does)
 syrvis service recreate <name>  # Replace the container (up -d --force-recreate),
                               # writing NO declared intent. The only verb that
                               # re-reads a changed env_file — Docker bakes env in

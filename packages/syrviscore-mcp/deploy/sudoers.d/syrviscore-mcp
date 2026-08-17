@@ -12,6 +12,7 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis schedule list --json, \
     /volume1/syrviscore/bin/syrvis reconcile --dry-run --json, \
     /volume1/syrviscore/bin/syrvis reconcile --json -y, \
+    /volume1/syrviscore/bin/syrvis reconcile --json -y --force, \
     /volume1/syrviscore/bin/syrvis start, \
     /volume1/syrviscore/bin/syrvis stop, \
     /volume1/syrviscore/bin/syrvis restart, \
@@ -30,6 +31,9 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis service recreate -- *, \
     /volume1/syrviscore/bin/syrvis service task --task * -- *, \
     /volume1/syrviscore/bin/syrvis service update -- *, \
+    /volume1/syrviscore/bin/syrvis service shed --reason * --json -- *, \
+    /volume1/syrviscore/bin/syrvis service shed --reason * --until * --json -- *, \
+    /volume1/syrviscore/bin/syrvis service unshed --json -- *, \
     /volume1/syrviscore/bin/syrvis vm list --json, \
     /volume1/syrviscore/bin/syrvis vm status --json -- *, \
     /volume1/syrviscore/bin/syrvis vm start -- *, \
@@ -56,6 +60,8 @@ syrvis-operator ALL=(root) NOPASSWD: \
     /volume1/syrviscore/bin/syrvis secret set -- *, \
     /volume1/syrviscore/bin/syrvis config set -- *, \
     /volume1/syrviscore/bin/syrvis deploy -- *, \
+    /volume1/syrviscore/bin/syrvis deploy --force -- *, \
     /volume1/syrviscore/bin/syrvis apply --dry-run --json, \
     /volume1/syrviscore/bin/syrvis apply --json, \
-    /volume1/syrviscore/bin/syrvis apply --allow-secret-change --json
+    /volume1/syrviscore/bin/syrvis apply --allow-secret-change --json, \
+    /volume1/syrviscore/bin/syrvis apply --allow-enable-change --json

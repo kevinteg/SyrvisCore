@@ -104,30 +104,39 @@ def gather_l2_drift() -> Optional[drift.DriftReport]:
     and each item carries the declaration's ``critical`` flag so the caller
     can distinguish unhealthy from merely degraded.
 
+    SHED services are skipped for exactly the same reason (incident
+    2026-08-16): a deliberate load-shed is not drift. Without this, fourteen
+    intentionally-stopped services read as fourteen MISSING containers on every
+    poll for a week, which is how a drift signal gets ignored.
+
     Returns None when there is nothing to check or docker is unreachable
     (core drift already reports docker-down).
     """
     try:
+        from . import intent as intent_mod
         from . import services_d
         from .service_manager import ServiceManager
 
         manager = ServiceManager()
         declarations, _invalid = services_d.load_declarations(manager.syrvis_home)
         installed = services_d._installed_manifests(manager)
+        shed = intent_mod.shed_names(manager.syrvis_home)
 
         expected: Dict[str, str] = {}
         container_names: Dict[str, str] = {}
         critical_map: Dict[str, bool] = {}
 
         for name, declared in declarations.items():
-            if not declared.enabled:
-                continue  # declared-off: stopped IS the desired state
+            if not declared.enabled or name in shed:
+                continue  # declared-off or shed: stopped IS the desired state
             expected[name] = declared.image
             container_names[name] = declared.container_name or name
             critical_map[name] = declared.critical
 
         for name, manifest in installed.items():
-            if name in expected or (name in declarations and not declarations[name].enabled):
+            if name in expected or name in shed:
+                continue
+            if name in declarations and not declarations[name].enabled:
                 continue
             if manifest is None:
                 expected[name] = "unloadable-manifest"

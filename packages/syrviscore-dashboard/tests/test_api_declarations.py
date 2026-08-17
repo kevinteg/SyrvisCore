@@ -77,7 +77,13 @@ def test_declarations_mixed_states(client, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["invalid"] == invalid
-    assert body["summary"] == {"declared": 3, "invalid": 1, "total_actions": 2, "destructive": 0}
+    assert body["summary"] == {
+        "declared": 3,
+        "invalid": 1,
+        "shed": 0,
+        "total_actions": 2,
+        "destructive": 0,
+    }
 
     by_name = {s["name"]: s for s in body["services"]}
     # The UNION of declared + installed, sorted for a stable UI.

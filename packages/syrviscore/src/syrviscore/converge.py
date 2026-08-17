@@ -44,6 +44,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from . import exposure as exposure_mod
+from . import intent
 from . import stack as stack_mod
 from .errors import SyrvisError
 from .service_manager import ServiceManager
@@ -332,9 +333,20 @@ def apply_plan(
                 )
                 record(action, True, "{}d".format(kind.replace("_", " ")))
             elif kind in ("declare", "declare_update"):
-                path = services_d.write_declaration(
-                    manager.syrvis_home, declarations[action["name"]]
-                )
+                # The shed overlay applies to EVERY declaration writer, not just
+                # the bundle path: a desired-state doc that still says
+                # `enabled: true` must not be able to write intent that
+                # contradicts an operator's shed. The reconcile engine would
+                # hold the service down anyway, but leaving the declaration
+                # saying "on" is exactly the two-sources-of-truth split that
+                # made the 2026-08-16 resurrection possible.
+                to_write = declarations[action["name"]]
+                if intent.is_shed(manager.syrvis_home, action["name"]) and to_write.enabled:
+                    import copy as _copy
+
+                    to_write = _copy.copy(to_write)
+                    to_write.enabled = False
+                path = services_d.write_declaration(manager.syrvis_home, to_write)
                 record(action, True, "declaration written: {}".format(path))
             elif kind == "declare_disable":
                 services_d.set_declared_enabled(manager.syrvis_home, action["name"], False)

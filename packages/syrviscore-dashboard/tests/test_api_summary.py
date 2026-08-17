@@ -15,6 +15,7 @@ CONTRACT_KEYS = {
     "state",
     "detail",
     "runstate",
+    "intent",
     "version",
     "containers",
     "drift",
@@ -27,8 +28,13 @@ CONTRACT_KEYS = {
 # --- helpers ------------------------------------------------------------------
 
 
-def _counts(desired, running, unhealthy=()):
-    return {"desired": desired, "running": running, "unhealthy": list(unhealthy)}
+def _counts(desired, running, unhealthy=(), shed=()):
+    return {
+        "desired": desired,
+        "running": running,
+        "unhealthy": list(unhealthy),
+        "shed": list(shed),
+    }
 
 
 def _blocks(**overrides):
@@ -100,6 +106,7 @@ def _client_with(make_settings, monkeypatch, components=None, **sources):
 
     defaults = {
         "_runstate_sync": lambda: {"state": "active"},
+        "_intent_sync": lambda: dict(summary_api._EMPTY_INTENT),
         "_layer2_sync": lambda: _counts(26, 26),
         "_layer2_drift_sync": lambda: (True, 0),
         "_last_deploy_sync": lambda: {
@@ -237,7 +244,32 @@ def test_count_containers_folds_states():
     counts = summary_api.count_containers(
         {"a": "running", "b": "exited", "c": "running", "d": "restarting"}
     )
-    assert counts == {"desired": 4, "running": 2, "unhealthy": ["b", "d"]}
+    assert counts == {"desired": 4, "running": 2, "unhealthy": ["b", "d"], "shed": []}
+
+
+def test_count_containers_separates_shed_from_unhealthy():
+    """A deliberately-stopped service is `shed`, never `unhealthy` — the whole
+    point of the split (a week of amber "14 unhealthy" that was all deliberate)."""
+    counts = summary_api.count_containers(
+        {"a": "running", "b": "exited", "c": "exited", "d": "restarting"},
+        shed=["b", "c"],
+    )
+    assert counts == {"desired": 4, "running": 1, "unhealthy": ["d"], "shed": ["b", "c"]}
+
+
+def test_count_containers_shed_but_running_is_not_shed_down():
+    """A shed service that is somehow RUNNING is not reported as shed-down —
+    it is running, and the resurrection is the enabled-drift check's finding."""
+    counts = summary_api.count_containers({"a": "running"}, shed=["a"])
+    assert counts == {"desired": 1, "running": 1, "unhealthy": [], "shed": []}
+
+
+def test_fold_shed_is_stated_but_never_degrades():
+    state, detail = summary_api.fold(
+        **_blocks(containers={"core": _counts(4, 4), "l2": _counts(40, 26, shed=["x"] * 14)})
+    )
+    assert state == "ok"
+    assert detail == "4/4 core · 26/40 L2 running · 14 shed · no drift"
 
 
 # --- the endpoint -------------------------------------------------------------
@@ -261,8 +293,19 @@ def test_summary_contract_shape(make_settings, monkeypatch):
         "update_available": False,
         "image_updates": 7,
     }
-    assert body["containers"]["core"] == {"desired": 4, "running": 4, "unhealthy": []}
-    assert body["containers"]["l2"] == {"desired": 26, "running": 26, "unhealthy": []}
+    assert body["containers"]["core"] == {
+        "desired": 4,
+        "running": 4,
+        "unhealthy": [],
+        "shed": [],
+    }
+    assert body["containers"]["l2"] == {
+        "desired": 26,
+        "running": 26,
+        "unhealthy": [],
+        "shed": [],
+    }
+    assert body["intent"] == summary_api._EMPTY_INTENT
     assert body["drift"] == {"core_in_sync": True, "l2_in_sync": True, "items": 0}
     assert body["tunnel"] == {"enabled": True, "ready_connections": 4}
     assert body["traefik"] == {"routers": 26, "errors": 0}

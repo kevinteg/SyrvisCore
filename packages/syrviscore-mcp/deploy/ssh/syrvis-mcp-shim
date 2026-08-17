@@ -17,6 +17,8 @@ is_exposure()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(internal|tunnel)$'; }
 is_stacksvc()  { printf '%s' "$1" | LC_ALL=C grep -Eq '^(traefik|portainer|cloudflared|dashboard)$'; }
 is_prune()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }
 is_reason()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^(ups|maintenance)$'; }
+is_shedreason() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'; }
+is_timestamp() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)?$'; }
 is_bool()      { printf '%s' "$1" | LC_ALL=C grep -Eq '^(true|false)$'; }
 is_image()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }
 
@@ -118,6 +120,9 @@ fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "reconcile" ] && [ "${5}" = "--json" ] && [ "${6}" = "-y" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "reconcile" ] && [ "${5}" = "--json" ] && [ "${6}" = "-y" ] && [ "${7}" = "--force" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 4 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "start" ]; then
   set -f; exec "$@"
 fi
@@ -170,6 +175,15 @@ if [ $# -eq 9 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "update" ] && [ "${6}" = "--" ] && is_name "${7}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 10 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "shed" ] && [ "${6}" = "--reason" ] && is_shedreason "${7}" && [ "${8}" = "--json" ] && [ "${9}" = "--" ] && is_name "${10}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 12 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "shed" ] && [ "${6}" = "--reason" ] && is_shedreason "${7}" && [ "${8}" = "--until" ] && is_timestamp "${9}" && [ "${10}" = "--json" ] && [ "${11}" = "--" ] && is_name "${12}"; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 8 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "service" ] && [ "${5}" = "unshed" ] && [ "${6}" = "--json" ] && [ "${7}" = "--" ] && is_name "${8}"; then
   set -f; exec "$@"
 fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "vm" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
@@ -250,6 +264,9 @@ fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "deploy" ] && [ "${5}" = "--" ] && is_name "${6}"; then
   set -f; exec "$@"
 fi
+if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "deploy" ] && [ "${5}" = "--force" ] && [ "${6}" = "--" ] && is_name "${7}"; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--dry-run" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
@@ -257,6 +274,9 @@ if [ $# -eq 5 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--allow-secret-change" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "apply" ] && [ "${5}" = "--allow-enable-change" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
 echo "syrvis-mcp-shim: command not on allowlist" >&2

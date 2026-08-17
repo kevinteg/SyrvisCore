@@ -351,6 +351,8 @@ syrvis service run app --image ghcr.io/o/app:1.0  # image-first
 syrvis service add https://github.com/o/repo.git  # git manifest
 syrvis service list [--json]
 syrvis service start|stop|update|remove NAME      # stop/start flip `enabled`
+syrvis service shed --reason R [--until D] NAME   # DURABLE "deliberately down"
+syrvis service unshed NAME                        # lift it (starts nothing)
 syrvis service catalog [--json]                   # vetted templates
 
 # Declarative:
@@ -358,10 +360,53 @@ syrvis service declare NAME --image IMG [--subdomain S] [--exposure internal|tun
                      [--port N] [--enabled BOOL] [--critical BOOL] [--json]
                                                   # author intent only — applies nothing
 syrvis service adopt NAME | --all [--json]        # existing install -> declaration
-sudo syrvis reconcile [--dry-run] [--json] [--strict]
+sudo syrvis reconcile [--dry-run] [--json] [--strict] [--force]
                       [--prune stop|remove|purge] [-y]
                                                   # converge to services.d
 ```
+
+### Shed — durable "deliberately down" (0.5.15)
+
+`service stop` is EPHEMERAL intent: it writes `enabled: false` into the
+declaration, which is exactly the file the next GitOps `syrvis apply`
+overwrites from the repo. That is right for a five-minute stop and wrong for a
+five-day load-shed — it is how fourteen deliberately-stopped services were
+resurrected mid-array-rebuild (home-tech incident 2026-08-16).
+
+`service shed` is DURABLE intent. It records `{service, reason, since, until}`
+in `data/state/intent.json` — outside the declaration set, so nothing in the
+bundle path can address it — and stops the container without touching the
+declaration. The composition rule every consumer implements: **a workload runs
+iff the device is `in-service` AND the service is `enabled` AND it is not
+shed.** While shed:
+
+| surface | behavior |
+|---|---|
+| `reconcile` / `resume` | plans it exactly as `enabled: false`; a shed service found RUNNING is stopped; reported in its own `shed` bucket, never `disabled` |
+| `apply` (instance bundle) | pins the written declaration `enabled: false` whatever the bundle says (reported as `shed_pinned`) |
+| `deploy` (service bundle) | lands manifest/configs/secrets, then does **not** start — staging fixed bits on a down service is the point |
+| `service start` / `service recreate` | refuse, naming the reason and the lift verb |
+| `verify` / L2 drift | not drift |
+| `service list --json` | `intent: shed` + `shed_reason`/`shed_since`/`shed_until` |
+| `status --json` | an `intent` block: `device`, `shed[]`, `shed_count`, `shed_reasons`, `shed_expired` |
+
+`service unshed` removes the row and starts nothing — the declaration
+underneath was never touched, so `reconcile` is the one bring-up path.
+
+### Guards (0.5.15)
+
+Two refusals, both overridable, both journaling the override to
+`logs/overrides.log`:
+
+- **`guard_enable_change`** — `syrvis apply` refuses, BY NAME, to flip any
+  service from declared-off to declared-on. Override: `--allow-enable-change`.
+  (A shed service is not refused; it is pinned off — see above.) Not enforced
+  on `--dry-run`, which writes nothing and reports the names either way.
+- **`guard_bulk_degraded`** — `reconcile` (with work to do) and `deploy` refuse
+  while `/proc/mdstat` shows a resync/recovery/reshape/check, naming the array
+  and its progress. Override: `--force`. `reconcile --dry-run` and
+  `reconcile --boot` are never blocked — planning is free and boot recovery
+  must proceed.
 
 Reconcile semantics: every declaration file loads independently (a broken file
 marks only itself invalid — but any invalid file fails the run, since corrupted

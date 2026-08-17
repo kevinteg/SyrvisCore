@@ -119,6 +119,8 @@ _SLOT_PREDICATE = {
     "stack_service": "is_stacksvc",
     "revision": "is_revision",
     "halt_reason": "is_reason",
+    "shed_reason": "is_shedreason",
+    "timestamp": "is_timestamp",
 }
 
 
@@ -204,6 +206,13 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         + ")$'; }",
         "is_prune()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(stop|remove|purge)$'; }",
         "is_reason()    { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(ups|maintenance)$'; }",
+        # A shed reason is a short token, not prose (it becomes a metric label);
+        # mirrors syrviscore.intent.SHED_REASON_RE.
+        "is_shedreason() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
+        "'^[a-z0-9][a-z0-9._-]{0,63}$'; }",
+        # A date or UTC timestamp (shed --until); mirrors intent.SHED_UNTIL_RE.
+        "is_timestamp() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
+        "'^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)?$'; }",
         "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
         "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"

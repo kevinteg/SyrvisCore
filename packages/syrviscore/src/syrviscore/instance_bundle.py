@@ -240,12 +240,14 @@ def apply_instance_bundle(
     home: Path,
     allow_secret_change: bool = False,
     dry_run: bool = False,
+    allow_enable_change: bool = False,
 ) -> Dict[str, Any]:
     """Apply (or plan) an instance bundle against ``$SYRVIS_HOME``.
 
     Returns a report dict naming what changed — env/declaration KEY NAMES only,
     never values. Raises :class:`InstanceBundleError` on a guard violation
-    (secret change without ``allow_secret_change``, SYRVIS_HOME mismatch).
+    (secret change without ``allow_secret_change``, an enable change without
+    ``allow_enable_change``, SYRVIS_HOME mismatch).
     """
     report: Dict[str, Any] = {"dry_run": dry_run, "env": None, "stack": None, "declarations": None}
 
@@ -253,7 +255,11 @@ def apply_instance_bundle(
         _plan_env(bundle, home, allow_secret_change, dry_run) if bundle.env is not None else None
     )
     stack_plan = _plan_stack(bundle, home) if bundle.stack is not None else None
-    decl_plan = _plan_declarations(bundle, home) if bundle.has_declarations else None
+    decl_plan = (
+        _plan_declarations(bundle, home, allow_enable_change, dry_run)
+        if bundle.has_declarations
+        else None
+    )
 
     if env_plan:
         report["env"] = env_plan["report"]
@@ -401,13 +407,74 @@ def _plan_stack(bundle: InstanceBundle, home: Path) -> Dict[str, Any]:
 # --- declarations ------------------------------------------------------------
 
 
-def _plan_declarations(bundle: InstanceBundle, home: Path) -> Dict[str, Any]:
+def _live_enabled(home: Path, name: str) -> Optional[bool]:
+    """The ``enabled`` flag currently on disk for ``name`` (None: no declaration).
+
+    Read straight from the YAML rather than through ``ServiceDefinition`` on
+    purpose: a declaration this reader cannot fully parse (written for a newer
+    schema, or hand-damaged) must still be able to say "I am turned off". A
+    guard that fails OPEN on an unreadable file would be no guard at all — a
+    missing key defaults to the schema default (``true``), and only a genuinely
+    unreadable file yields None.
+    """
+    path = declaration_path(home, name)
+    if not path.exists():
+        return None
+    try:
+        data = yaml.safe_load(path.read_text())
+    except Exception:  # noqa: BLE001 - unparseable: intent unknown, not "on"
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("enabled", True)
+    return bool(value) if isinstance(value, bool) else None
+
+
+def _plan_declarations(
+    bundle: InstanceBundle,
+    home: Path,
+    allow_enable_change: bool = False,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Plan the declaration replace set, honoring shed and the enable guard.
+
+    Two intent protections layered on the replace set (incident 2026-08-16 —
+    a GitOps apply resurrected fourteen deliberately-stopped services):
+
+    1. **Shed overlay.** A service in ``intent.json``'s shed set is written
+       ``enabled: false`` no matter what the bundle says. Not a refusal — a
+       correction: the shed IS the operator's decision, and the bundle simply
+       has no way to express it. Reported as ``shed_pinned``.
+    2. **Enable guard.** Any OTHER service the bundle would flip from
+       declared-off to declared-on is collected and refused by
+       :func:`syrviscore.guards.guard_enable_change` unless
+       ``allow_enable_change``. Skipped on a dry run (which writes nothing)
+       exactly as the secret guard is, so a plan can safely PREVIEW the
+       resurrection it would cause — the names are in the report either way.
+    """
+    from . import guards
+    from . import intent as intent_mod
+
     directory = get_declarations_dir(home)
     existing = {p.stem: p for p in sorted(directory.glob("*.yaml"))} if directory.exists() else {}
+    shed = intent_mod.shed_names(home)
+
+    incoming = {name: bool(svc.enabled) for name, svc in bundle.declarations.items()}
+    live = {name: _live_enabled(home, name) for name in bundle.declarations}
+    changes = guards.enable_changes(incoming, live, shed=shed)
+    if changes and not dry_run:
+        guards.guard_enable_change(changes, allow=allow_enable_change, home=home, action="apply")
 
     writes: List[Dict[str, Any]] = []
     unchanged: List[str] = []
+    shed_pinned: List[str] = []
     for name, service in bundle.declarations.items():
+        if name in shed and service.enabled:
+            import copy
+
+            service = copy.copy(service)
+            service.enabled = False
+            shed_pinned.append(name)
         data = service.to_dict()
         content = yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
         path = declaration_path(home, name)
@@ -433,6 +500,8 @@ def _plan_declarations(bundle: InstanceBundle, home: Path) -> Dict[str, Any]:
             "written": sorted(w["name"] for w in writes),
             "unchanged": sorted(unchanged),
             "removed": sorted(p.stem for p in removals),
+            "enable_changes": changes,
+            "shed_pinned": sorted(shed_pinned),
         },
     }
 

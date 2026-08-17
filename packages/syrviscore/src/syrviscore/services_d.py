@@ -202,15 +202,30 @@ def build_reconcile_plan(
     action), and — only under an explicit prune policy — ``prune_stop`` /
     ``prune_remove`` / ``prune_purge`` for installed services with no
     declaration.
+
+    THE SHED OVERLAY (design/65 D8, pulled forward): a service named in
+    ``data/state/intent.json``'s ``shed[]`` is planned exactly as if its
+    declaration said ``enabled: false``, whatever the declaration actually
+    says. That is the whole mechanism by which a deliberate load-shed survives
+    a GitOps apply: the apply rewrites ``enabled:``, the overlay outranks it,
+    and the planner never emits a start for a shed service. A shed service that
+    is somehow RUNNING is stopped — reconcile re-asserting the operator's
+    decision is the point, not an accident. Shed names are reported in their
+    own ``shed`` bucket rather than folded into ``disabled``, so "14 shed" and
+    "14 turned off in git" never read the same.
     """
     if prune is not None and prune not in PRUNE_POLICIES:
         raise ReconcileError(
             "prune policy must be one of {} (got {!r})".format(", ".join(PRUNE_POLICIES), prune)
         )
 
+    from . import intent as intent_mod
+
     actions: List[Dict[str, Any]] = []
     in_sync: List[str] = []
     disabled_ok: List[str] = []
+    shed_ok: List[str] = []
+    shed = intent_mod.shed_map(manager.syrvis_home)
     installed = _installed_manifests(manager)
 
     # FLOOR CHECK (incident 2026-08-16). "Zero declarations" is a legitimate
@@ -239,22 +254,31 @@ def build_reconcile_plan(
         current = installed.get(name)
         status = manager._get_service_status(declared.container_name or name)
 
-        if not declared.enabled:
-            # Declared-but-off: stop anything alive (running, restarting,
-            # paused, created — a crash-looping container is NOT stopped);
-            # never materialize. Reached BEFORE the vanished-home pre-flight on
+        is_shed = name in shed
+        if is_shed or not declared.enabled:
+            # Declared-but-off (or SHED — the overlay is indistinguishable here
+            # by design): stop anything alive (running, restarting, paused,
+            # created — a crash-looping container is NOT stopped); never
+            # materialize. Reached BEFORE the vanished-home pre-flight on
             # purpose: stopping is always safe, and a service on its way off is
             # not a service to block.
             if name in installed and status not in ("stopped", "exited", "unknown"):
-                actions.append(
-                    {
-                        "kind": "stop",
-                        "name": name,
-                        "image": declared.image,
-                        "critical": declared.critical,
-                        "destructive": False,
-                    }
-                )
+                action = {
+                    "kind": "stop",
+                    "name": name,
+                    "image": declared.image,
+                    "critical": declared.critical,
+                    "destructive": False,
+                }
+                if is_shed:
+                    # A shed service found ALIVE is a resurrection — say so in
+                    # the plan, because the interesting question is not "stop
+                    # it" but "what started it".
+                    action["shed"] = True
+                    action["shed_reason"] = shed[name].get("reason")
+                actions.append(action)
+            elif is_shed:
+                shed_ok.append(name)
             else:
                 disabled_ok.append(name)
             continue
@@ -341,11 +365,14 @@ def build_reconcile_plan(
         "actions": actions,
         "in_sync": in_sync,
         "disabled": disabled_ok,
+        # Declared, but held down by intent.json — NOT drift, NOT "disabled".
+        "shed": sorted(shed_ok),
         "unmanaged": unmanaged,
         "invalid": invalid,
         "summary": {
             "declared": len(declarations),
             "invalid": len(invalid),
+            "shed": len(shed_ok),
             "total_actions": len(actions),
             "destructive": sum(1 for a in actions if a["destructive"]),
         },
@@ -554,13 +581,22 @@ def write_declaration(syrvis_home: Path, service: ServiceDefinition) -> Path:
 
 
 def write_declaration_from_install(syrvis_home: Path, service: ServiceDefinition) -> Path:
-    """The dual-write used by imperative installs/updates.
+    """The dual-write used by imperative installs/updates AND bundle deploys.
 
     Writes the service CONTENT while preserving the operator's orchestration
     keys from any existing declaration — a git/catalog manifest can therefore
     never set or reset ``enabled``/``critical``; only the operator (editing the
     declaration) or the reconcile layer owns them.
+
+    SHED wins over both (incident 2026-08-16): if the service is in
+    ``intent.json``'s shed set, the declaration is written ``enabled: false``
+    regardless of what the incoming manifest or the prior file said. A
+    per-service deploy of a shed service is legitimate — you often want the new
+    bits staged while the service stays down — but it must not be able to write
+    intent that contradicts the shed.
     """
+    from . import intent as intent_mod
+
     existing_path = declaration_path(syrvis_home, service.name)
     enabled, critical = True, False
     if existing_path.exists():
@@ -569,6 +605,8 @@ def write_declaration_from_install(syrvis_home: Path, service: ServiceDefinition
             enabled, critical = existing.enabled, existing.critical
         except Exception:  # noqa: BLE001 - unreadable prior declaration: defaults
             pass
+    if intent_mod.is_shed(syrvis_home, service.name):
+        enabled = False
     import copy
 
     to_write = copy.copy(service)

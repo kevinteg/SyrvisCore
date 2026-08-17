@@ -50,7 +50,7 @@ drift test asserts it).
 |---|---|---|
 | Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs`, `history` | All support `--json`; `updates` queries registries (report-only); `history` is always env-redacted |
 | Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export` | sudo only to read 0600 config; `export` is always redacted over the seam |
-| Converge (sudo) | `start/stop/restart`, `shutdown`, `resume`, `restart --graceful`, `stack apply`, `reconcile`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle. `shutdown`/`resume` are deliberately token-free (reversible; an unattended NUT low-battery hook must be able to fire `shutdown --reason ups`) |
+| Converge (sudo) | `start/stop/restart`, `shutdown`, `resume`, `restart --graceful`, `stack apply`, `reconcile`, `reconcile --force`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/shed/unshed/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle. `shutdown`/`resume` are deliberately token-free (reversible; an unattended NUT low-battery hook must be able to fire `shutdown --reason ups`) — and so are `service shed`/`unshed`, so an unattended degradation response can declare a load-shed with no human in the loop |
 | Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `service rollback --to N`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake; `service rollback` requires an EXPLICIT `--to` over the seam |
 | Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context |
 
@@ -141,7 +141,17 @@ Semantics:
   runs the full `syrvis-service.yaml` trust boundary.
 - Changing an **existing** secret value in `.env` requires
   `--allow-secret-change` (token rotation stays a deliberate act).
+- Flipping an **existing** declaration from `enabled: false` to `enabled: true`
+  requires `--allow-enable-change` — the same shape, for the same reason
+  (0.5.15; home-tech incident 2026-08-16, where a repo apply re-enabled
+  fourteen deliberately-stopped services mid-array-rebuild). The refusal names
+  every affected service; the override is journaled to `logs/overrides.log`.
+  A **shed** service is not refused — its declaration is written
+  `enabled: false` regardless of the bundle, reported as `shed_pinned`.
 - `--dry-run --json` plans without writing; reports name keys, never values.
+  Neither the secret nor the enable guard is enforced on a dry run (nothing is
+  written), so a plan can safely preview what it would refuse — `enable_changes`
+  and `shed_pinned` are in the report either way.
 - Apply only **writes** configuration. Converge afterwards:
   `stack apply` (+ `start`) for the core tier, `reconcile` for L2.
 

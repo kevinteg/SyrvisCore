@@ -38,7 +38,6 @@ def test_sudoers_has_no_dangerous_entries():
         "syrvis restore",
         "--wheel",
         "--no-verify",
-        "--force",
         "--clean",
         "/bin/sh",
         " docker ",
@@ -48,6 +47,20 @@ def test_sudoers_has_no_dangerous_entries():
     # env_reset present, no SYRVIS_HOME= carried through
     assert "env_reset" in text
     assert "SYRVIS_HOME=" not in text
+
+
+def test_force_is_confined_to_the_two_degraded_overrides():
+    """`--force` is no longer blanket-forbidden — 0.5.15 added it as the
+    documented override for guard_bulk_degraded (converging against a
+    rebuilding array) — so pin it to EXACTLY the two commands that may carry
+    it. A `--force` appearing anywhere else in the enumerated boundary is a
+    new, unreviewed forcing verb and must fail this test."""
+    lines = [ln.strip().rstrip(", \\") for ln in SUDOERS.read_text().splitlines()]
+    forcing = sorted(ln for ln in lines if "--force" in ln)
+    assert forcing == [
+        "/volume1/syrviscore/bin/syrvis deploy --force -- *",
+        "/volume1/syrviscore/bin/syrvis reconcile --json -y --force",
+    ]
 
 
 def _run_shim(original_command: str):
@@ -75,6 +88,15 @@ DENY = [
     "sudo -n /volume1/syrviscore/bin/syrvis config set login-alert",  # missing '--' separator
     "sudo -n /volume1/syrviscore/bin/syrvis config set",  # missing positional entirely
     "/volume1/syrviscore/bin/syrvis config set -- login-alert",  # missing sudo -> wrong shape
+    # shed red-team: prose reason (space -> extra argv tokens), uppercase
+    # reason, a bad --until shape, and the flag order the shim does not accept.
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason the array is slow "
+    "--json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason MD6_RESYNC --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason r --until soon --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --json -- onyx-api",
+    "/volume1/syrviscore/bin/syrvis service shed --reason r --json -- onyx-api",  # no sudo
+    "sudo -n /volume1/syrviscore/bin/syrvis service unshed onyx-api",  # missing '--'
     "id",
     "sudo -n /bin/sh",
     "docker ps",
@@ -138,6 +160,18 @@ ALLOW = [
     "--image ghcr.io/acme/cyberquill:1.4.0 --subdomain cyberquill "
     "--exposure tunnel --port 8080 --enabled true --critical false --json -- cyberquill",
     "sudo -n /volume1/syrviscore/bin/syrvis service adopt --json -- gollum",
+    # 0.5.15 intent verbs: both shed arities + unshed, and the two degraded
+    # overrides. A ':' in the --until timestamp must survive the shim's
+    # character allowlist (it is on it) and its word split (no spaces).
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason md6-resync --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason md6-resync "
+    "--until 2026-08-24 --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service shed --reason md6-resync "
+    "--until 2026-08-24T00:00:00Z --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis service unshed --json -- onyx-api",
+    "sudo -n /volume1/syrviscore/bin/syrvis reconcile --json -y --force",
+    "sudo -n /volume1/syrviscore/bin/syrvis deploy --force -- vector",
+    "sudo -n /volume1/syrviscore/bin/syrvis apply --allow-enable-change --json",
 ]
 
 

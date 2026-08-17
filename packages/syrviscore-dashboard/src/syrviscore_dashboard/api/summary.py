@@ -17,9 +17,15 @@ different thing and are used here; the validator suite is not.)
 What the numbers mean:
 
 - ``unhealthy`` is the list of declared containers whose Docker state is not
-  ``running``. This data path carries container state, not Docker healthcheck
-  results, so "unhealthy" means "not running as declared" — nothing finer is
-  claimed.
+  ``running`` AND that are not deliberately shed. This data path carries
+  container state, not Docker healthcheck results, so "unhealthy" means "not
+  running as declared" — nothing finer is claimed.
+- ``shed`` is the list of containers that are not running BECAUSE AN OPERATOR
+  SAID SO (``intent.json``, surfaced per-service by ``ServiceManager.list``).
+  Before this split, stopping fourteen services for a load-shed rendered as
+  "14 unhealthy" in amber on every console screen for a week — factually false
+  (they were healthy and deliberately stopped) and corrosive: an amber that
+  never clears is an amber nobody reads. Shed never degrades the fold.
 - ``drift.items`` counts **failing** drift items only, so ``items == 0`` always
   agrees with ``in_sync``.
 - Any block whose source is unavailable is ``null`` rather than a fabricated
@@ -42,7 +48,7 @@ domain, hostnames, tokens and env values are all left behind in the sources.
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from fastapi import APIRouter, Depends
 
@@ -69,13 +75,29 @@ def _phrase(prefix: str, names: List[str], total: int) -> str:
     return "{}: {} of {}".format(prefix, len(names), total)
 
 
-def count_containers(statuses: Mapping[str, str]) -> Dict[str, Any]:
-    """Fold a ``{name: docker_state}`` map into the contract's counts block."""
-    unhealthy = sorted(name for name, state in statuses.items() if state != "running")
+def count_containers(
+    statuses: Mapping[str, str], shed: Optional[Iterable[str]] = None
+) -> Dict[str, Any]:
+    """Fold a ``{name: docker_state}`` map into the contract's counts block.
+
+    ``shed`` names services the operator has declared deliberately down. A shed
+    service that is not running is counted as ``shed``, never ``unhealthy`` —
+    that separation is the whole point. A shed service that IS running counts
+    as running here (a resurrection is real drift, but it is the enabled-drift
+    check's finding, not a container-health one).
+    """
+    shed_set = set(shed or ())
+    unhealthy = sorted(
+        name for name, state in statuses.items() if state != "running" and name not in shed_set
+    )
+    shed_down = sorted(
+        name for name, state in statuses.items() if state != "running" and name in shed_set
+    )
     return {
         "desired": len(statuses),
-        "running": len(statuses) - len(unhealthy),
+        "running": len(statuses) - len(unhealthy) - len(shed_down),
         "unhealthy": unhealthy,
+        "shed": shed_down,
     }
 
 
@@ -131,6 +153,10 @@ def fold(
     )
     if layer2 is not None:
         parts.append("{}/{} L2 running".format(layer2["running"], layer2["desired"]))
+        # Stated as a FACT beside the counts, never as a problem: it belongs in
+        # the sentence (so "26/40" is explicable) but not in the severity.
+        if layer2.get("shed"):
+            parts.append("{} shed".format(len(layer2["shed"])))
     problems = down + degraded
     if problems:
         parts.extend(problems)
@@ -187,15 +213,50 @@ def _runstate_sync() -> Dict[str, Any]:
         return {"state": "active"}
 
 
+_EMPTY_INTENT = {
+    "device": "in-service",
+    "drained": False,
+    "shed": [],
+    "shed_count": 0,
+    "shed_reasons": {},
+    "shed_expired": [],
+}
+
+
+def _intent_sync() -> Dict[str, Any]:
+    """Declared intent — device state + the shed set WITH REASONS.
+
+    The counts alone say fourteen services are down; only the reasons say why,
+    and a console that cannot show the why has to choose between alarming and
+    lying. Absent on an older platform library (or an instance that has never
+    shed anything) degrades to the empty intent, which renders as nothing.
+    """
+    try:
+        from syrviscore import intent as intent_mod
+
+        return intent_mod.summary()
+    except Exception:  # noqa: BLE001 - older lib / no home: nothing declared
+        return dict(_EMPTY_INTENT)
+
+
 def _layer2_sync() -> Optional[Dict[str, Any]]:
-    """L2 counts from the services model (the same view ``/api/services`` shows)."""
+    """L2 counts from the services model (the same view ``/api/services`` shows).
+
+    ``ServiceManager.list`` carries each service's declared ``intent`` beside
+    its Docker status, so the shed split costs no extra call. An older platform
+    library that predates the column simply reports no shed — the counts then
+    behave exactly as they did before.
+    """
     from .services import _layer2_services
 
     data = _layer2_services()
     if data.get("error"):
         return None
     items = data.get("items") or []
-    return count_containers({item.get("name", "?"): item.get("status", "") for item in items})
+    return count_containers(
+        {item.get("name", "?"): item.get("status", "") for item in items},
+        shed=[item.get("name", "?") for item in items if item.get("intent") == "shed"],
+    )
 
 
 def _layer2_drift_sync() -> Tuple[Optional[bool], int]:
@@ -286,8 +347,9 @@ async def summary(agg: HealthAggregator = Depends(get_aggregator)) -> dict:
     config_extra = (components.get("config") or {}).get("extra") or {}
 
     # The library reads are synchronous; run them off the event loop, together.
-    runstate, layer2, l2_drift, last_deploy, version = await asyncio.gather(
+    runstate, intent, layer2, l2_drift, last_deploy, version = await asyncio.gather(
         asyncio.to_thread(_runstate_sync),
+        asyncio.to_thread(_intent_sync),
         asyncio.to_thread(_layer2_sync),
         asyncio.to_thread(_layer2_drift_sync),
         asyncio.to_thread(_last_deploy_sync),
@@ -312,6 +374,9 @@ async def summary(agg: HealthAggregator = Depends(get_aggregator)) -> dict:
         "state": state,
         "detail": detail,
         "runstate": runstate.get("state") or "active",
+        # Declared intent beside observed state — the console renders `shed`
+        # as a grey chip with its reason, never as an amber failure.
+        "intent": intent,
         "version": version,
         "containers": containers,
         "drift": drift,

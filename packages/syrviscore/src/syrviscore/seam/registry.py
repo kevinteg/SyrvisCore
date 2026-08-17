@@ -38,6 +38,13 @@ KIND_BOOLEAN = "boolean"
 KIND_STACK_SERVICE = "stack_service"
 KIND_REVISION = "revision"
 KIND_HALT_REASON = "halt_reason"
+# A shed reason is a short machine token (`md6-resync`), never prose — it rides
+# argv through the shim's char-allowlist and becomes a metric label. Mirrors
+# syrviscore.intent.SHED_REASON_RE.
+KIND_SHED_REASON = "shed_reason"
+# A review date/timestamp for a shed row. Mirrors intent.SHED_UNTIL_RE; both
+# accepted shapes use only characters already on the shim's allowlist.
+KIND_TIMESTAMP = "timestamp"
 
 # The core-tier service set for KIND_STACK_SERVICE slots. Duplicated from
 # syrviscore.stack (ALL_SERVICES / PRIMORDIAL) so the generator stays
@@ -210,6 +217,19 @@ COMMANDS: List[Command] = [
     # WITHOUT --prune, reconcile never removes anything (non-destructive, like
     # verify_fix): it converges to config/services.d declarations only.
     Command("reconcile", "syrvis", ["reconcile"], sudo=True, flags=["--json", "-y"], timeout_s=600),
+    # The same reconcile, but overriding guard_bulk_degraded (a rebuilding RAID
+    # array). Its own argv shape because the shim matches exactly; a separate
+    # command id so an MCP client has to ASK for the override rather than
+    # inherit it, and so the audit line names which one ran. The override is
+    # additionally journaled NAS-side in logs/overrides.log.
+    Command(
+        "reconcile_force",
+        "syrvis",
+        ["reconcile"],
+        sudo=True,
+        flags=["--json", "-y", "--force"],
+        timeout_s=600,
+    ),
     Command("start", "syrvis", ["start"], sudo=True, expect_json=False),
     Command("stop", "syrvis", ["stop"], sudo=True, expect_json=False),
     Command("restart", "syrvis", ["restart"], sudo=True, expect_json=False),
@@ -337,6 +357,45 @@ COMMANDS: List[Command] = [
         ["service", "update"],
         sudo=True,
         expect_json=False,
+        positional=Slot("name", KIND_NAME),
+    ),
+    # service shed/unshed write DECLARED INTENT to data/state/intent.json — the
+    # durable "this service is deliberately down" that lives outside the
+    # declaration set and therefore survives a GitOps apply (incident
+    # 2026-08-16: a repo apply resurrected 14 load-shed services mid-rebuild).
+    # Mutating (sudo), non-destructive: shedding stops a container, which is
+    # reversible and loses no data — the same trust class as service_stop, and
+    # deliberately token-free so an unattended degradation response can shed
+    # without a human in the loop. TWO shed shapes because the shim matches
+    # exact argv: with and without the optional --until.
+    Command(
+        "service_shed",
+        "syrvis",
+        ["service", "shed"],
+        sudo=True,
+        flags=["--reason", FlagValue(Slot("reason", KIND_SHED_REASON)), "--json"],
+        positional=Slot("name", KIND_NAME),
+    ),
+    Command(
+        "service_shed_until",
+        "syrvis",
+        ["service", "shed"],
+        sudo=True,
+        flags=[
+            "--reason",
+            FlagValue(Slot("reason", KIND_SHED_REASON)),
+            "--until",
+            FlagValue(Slot("until", KIND_TIMESTAMP)),
+            "--json",
+        ],
+        positional=Slot("name", KIND_NAME),
+    ),
+    Command(
+        "service_unshed",
+        "syrvis",
+        ["service", "unshed"],
+        sudo=True,
+        flags=["--json"],
         positional=Slot("name", KIND_NAME),
     ),
     # VM workloads (config/vms.d/*.yaml → Synology VMM via synowebapi, which is
@@ -637,6 +696,20 @@ COMMANDS: List[Command] = [
         positional=Slot("name", KIND_NAME),
         timeout_s=600,
     ),
+    # deploy overriding guard_bulk_degraded — same reasoning as reconcile_force:
+    # a distinct argv shape for the shim, a distinct id so the override is
+    # requested and audited rather than inherited.
+    Command(
+        "deploy_force",
+        "syrvis",
+        ["deploy"],
+        sudo=True,
+        destructive=False,
+        expect_json=False,
+        flags=["--force"],
+        positional=Slot("name", KIND_NAME),
+        timeout_s=600,
+    ),
     # apply writes the core-tier configuration from a syrvis-instance bundle
     # (.env + stack.yaml + the services.d declaration set) atomically — the
     # core-tier sibling of deploy. The whole bundle arrives on stdin ONLY
@@ -660,6 +733,19 @@ COMMANDS: List[Command] = [
         ["apply"],
         sudo=True,
         flags=["--allow-secret-change", "--json"],
+    ),
+    # The deliberate-resurrection apply: permits the bundle to re-enable
+    # services that are declared OFF on this instance. Its own shape and id for
+    # the same reason as apply_secrets — the override must be asked for, not
+    # inherited, and the audit line must say which one ran. NB there is
+    # deliberately NO combined secret+enable shape: two overrides in one call
+    # is two decisions in one, and the operator can run them in sequence.
+    Command(
+        "apply_enable_change",
+        "syrvis",
+        ["apply"],
+        sudo=True,
+        flags=["--allow-enable-change", "--json"],
     ),
 ]
 
