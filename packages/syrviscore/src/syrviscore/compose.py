@@ -72,18 +72,20 @@ DEFAULT_DOCKER_IMAGES = {
     # syrviscore-lib freshness tradeoff — is a separate, still-open decision.)
     "dashboard": {
         "image": "ghcr.io/kevinteg/syrviscore-dashboard",
-        "tag": "0.5.10",
+        "tag": "0.5.11",
         # 0.5.8 and not 0.5.2: ghcr already holds 0.5.2-0.5.7 — 0.5.2-0.5.6 are
         # relics of the pre-2026-07-31 force-sync era when every service release
         # pushed a dashboard image, and 0.5.7 is a real published build — so a
         # dashboard bump lands on the first free tag. The invariant (test_compose
         # TestImagePinLockstep) is pin == the DASHBOARD package __version__,
         # which advances only on a real dashboard change.
-        # Digest resolved 2026-08-16 from the CI-published 0.5.10 index (0.5.9's
-        # bundled lib carried the over-strict SYRVIS_HOME identity check that
-        # emptied the dash's L2 list; 0.5.10 bundles the content-only env-var
-        # check. 0.5.8 predated the ports:/fileplane schema entirely).
-        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.10@sha256:f86ed4368cca5ca8cf22b474cdb315d465c1b4e1e2d0a7d53ed6b146bb9d72af",
+        # Digest resolved 2026-08-16 from the CI-published 0.5.11 index
+        # (0.5.11 bundles the 0.5.16 lib: shed rendering in /api/summary +
+        # blocked/shed buckets in the declarations API — the 0.5.10 image's
+        # bundled lib returned an EMPTY L2 list with error:None against
+        # 0.5.15+ intent state, the lockstep trap's worst variant. 0.5.10 =
+        # /api/summary; 0.5.9 = the over-strict SYRVIS_HOME identity check).
+        "full_image": "ghcr.io/kevinteg/syrviscore-dashboard:0.5.11@sha256:05dfa013dc02be665b732d356e2a1a90c74fb1bd1c0309ed7a8cf295bba4dd81",
         "description": "SyrvisCore web dashboard",
     },
 }
