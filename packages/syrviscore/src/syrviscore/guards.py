@@ -198,14 +198,23 @@ def guard_bulk_degraded(
     home: Optional[Path] = None,
     mdstat_path: str = MDSTAT_PATH,
     services: Optional[Iterable[str]] = None,
+    by: str = "cli:force",
 ) -> Optional[List[Dict[str, Any]]]:
     """Refuse (or journal) a bulk mutating verb while an array is rebuilding.
 
     Returns the busy-array rows when there ARE any (so the caller can report
     the override it just made), else ``None``. ``services`` is the optional
-    list of workloads the verb would touch — it is named in both the refusal
-    and the journal line, because "which services was this override for" is the
-    first question anyone asks afterwards.
+    list of workloads the verb would touch — it is named in the refusal, in the
+    journal line, and in the breaker reset, because "which services was this
+    override for" is the first question anyone asks afterwards.
+
+    ``--force`` is OPERATOR INTENT, so it also **closes the breakers in its
+    scope** (design/60 §11.1 point 5 and point 6's "a close closes all"): a
+    human who has looked at a rebuilding array and said "do it anyway" is
+    exactly the signal the breaker was holding out for, and leaving it armed
+    would make the next automatic pass skip the work the operator just
+    authorized. ``by`` carries WHICH surface said so — only ``cli:``/``seam:``/
+    ``mcp:`` values close, and the store fails safe on anything else.
     """
     arrays = busy_arrays(mdstat_path)
     if not arrays:
@@ -223,5 +232,45 @@ def guard_bulk_degraded(
                 "Affected: {}. ".format(", ".join(names)) if names else "",
             )
         )
-    intent_mod.log_override(home, action, "--force", {"arrays": arrays, "services": names})
+    cleared = close_breakers_in_scope(home, names, by=by)
+    intent_mod.log_override(
+        home,
+        action,
+        "--force",
+        {
+            "arrays": arrays,
+            "services": names,
+            "breakers_closed": [r["context"] for r in cleared],
+        },
+    )
     return arrays
+
+
+def close_breakers_in_scope(
+    home: Optional[Path], services: Iterable[str], by: str = "cli:force"
+) -> List[Dict[str, Any]]:
+    """Close every plane's breaker for ``services`` — the operator reset path.
+
+    One helper so every overriding verb resets the same way (design/60 §11.1
+    point 6: ONE reset path, so ``deploy-stack --only X`` and ``syrvis up`` stop
+    being half-measures that each leave the other's breaker armed).
+
+    ``by`` decides, and it FAILS SAFE: only ``cli:``/``seam:``/``mcp:`` values
+    represent operator intent and close anything; ``hostd``/``s99``/``cron`` (and
+    an absent value) inherit the breakers instead — so a scheduled job that
+    passes ``--force`` cannot quietly reset a breaker a human never saw
+    (``opc:F2``). Best-effort and non-raising: a reset must never be the thing
+    that fails the verb the operator already authorized. Returns the rows that
+    were actually live.
+    """
+    names = sorted(set(services or ()))
+    if not names:
+        return []
+    try:
+        from . import breakers
+
+        if not breakers.closes_breakers(by):
+            return []
+        return breakers.close_scope(home, names, by=by)
+    except Exception:  # noqa: BLE001 - a reset never blocks the verb
+        return []

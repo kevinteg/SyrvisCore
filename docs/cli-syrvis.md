@@ -184,13 +184,28 @@ sudo syrvis shutdown [--reason ups|maintenance] [--timeout N] [--vm-deadline N] 
   (`start`, `restart`, `reconcile`) refuse until `resume`. Config-only verbs
   (`stack apply`, declarations) still work — they start nothing.
 
+**Reserve-first budget (0.5.16).** The `--timeout` budget is no longer spent
+front-to-back. Before the first consumer is stopped, the walk holds back what
+the tail still needs — the stores' own declared `stop_timeout` (band ≥ 90), the
+VM ACPI drain (each guest's `vms.d` `stop_timeout`, decaying in real time since
+the guests drain concurrently with the L2 stops) and 30 s for the core phase —
+and clamps everything earlier into what remains, floor 5 s. A store therefore
+keeps its declared grace even when the budget is already overspent: a consumer
+force-killed at 5 s is an inconvenience, a Postgres force-killed at 5 s is a WAL
+replay. `--json` reports the arithmetic under `budget`
+(`store_reserve_s`/`vm_reserve_s`/`core_reserve_s`/`reserve_s`/`clamped[]`) and
+each service's `grace_s` beside its `declared_s`, so a 5-second stop is
+explainable. An instance that declares no band ≥ 90 reserves nothing for L2 and
+behaves exactly as before.
+
 ---
 
 ### syrvis resume
 
 Bring a halted instance back: core stack first, then VMs, then Layer 2 via the
-reconcile engine. Clears the halted state; a no-op when the instance is
-active.
+reconcile engine (which since 0.5.16 orders bring-up by REVERSED shutdown
+bands — stores before consumers; see "Terminal services and bring-up order").
+Clears the halted state; a no-op when the instance is active.
 
 ```bash
 sudo syrvis resume [--json]
@@ -407,6 +422,125 @@ Two refusals, both overridable, both journaling the override to
   and its progress. Override: `--force`. `reconcile --dry-run` and
   `reconcile --boot` are never blocked — planning is free and boot recovery
   must proceed.
+
+### Terminal services and bring-up order (0.5.16)
+
+Two reconcile refinements, both driven by declarations already in the schema:
+
+- **`restart: no` + exited = TERMINAL, not drift.** The planner used to emit a
+  `start` for anything not running, so a service declared "when this exits it
+  stays exited" was restarted by every reconcile, every boot converge and every
+  `resume`; the only way to hold it down was `enabled: false`, the field a
+  GitOps apply overwrites. It now lands in its own `terminal` bucket beside
+  `disabled` and `shed` — no action, not drift, and not a failure. A container
+  that does not exist (`stopped`) or a Docker the CLI cannot reach (`unknown`)
+  is NOT terminal: those are absence and ignorance, and `restart: no` says
+  nothing about the first start. A content change still plans a `replace`.
+- **Bring-up is TOPOLOGICAL, with the shutdown band as the tie-breaker.**
+  Actions sort by the `depends_on` graph's depth first — ascending for
+  add/replace/start (a store at depth 0 is issued before the consumer at depth
+  1), descending for stop/prune (dependents drain before the store they use) —
+  and, WITHIN a wave, by declared `shutdown.priority` (descending for bring-up,
+  ascending for bring-down), ties by name. One sort, not two.
+
+  Bands are not retired: they still order the standalones and are the migration
+  bridge, so an instance with **no declared edges sorts exactly as the
+  band-only interim did** (which itself replaced alphabetical-by-filename order,
+  the one that started `docker-health-exporter` before `docker-socket-proxy` and
+  `onyx-api` before all three of its stores). Where an edge and a band disagree,
+  **the edge wins** — `grafana` (band 50) declaring an edge onto `vmalert`
+  (band 20) now starts second, which band ordering alone got backwards.
+
+### `depends_on` and the `blocked` bucket (0.5.16, design/63 M1)
+
+Declared per service as strings, `name[:readiness]`:
+
+```yaml
+depends_on:
+  - romm-db:healthy              # gate on the target's docker healthcheck
+  - romm-valkey                  # default: started
+  - immich-machine-learning:soft # order when cheap, never gate, never block
+```
+
+Solved by the platform and **never emitted into compose** (a single-service
+compose project still cannot depend on another). Validation is a whole-set
+stage after the per-file load, and it invalidates the **declaring file only**:
+
+| condition | verdict |
+|---|---|
+| a cycle (soft edges included — a soft edge still orders) | every member invalid, message names the ring |
+| target not declared anywhere on this instance | the dependant's file is invalid (a typo, not a deliberately-down dependency) |
+| `healthy` onto a target with no `healthcheck:` | the dependant's file is invalid — never a silent downgrade to `started` |
+| self-edge, duplicate target, unknown readiness suffix, >12 edges | invalid at parse |
+| hard edge onto a **disabled / shed / invalid-file** target | **plan-time `blocked` bucket** — the declaration stays VALID |
+
+That last row is the point: a partial load-shed must not make a *running*
+service's declaration invalid (which would reclassify it `unmanaged`) during
+exactly the window when the fleet is already degraded. `blocked` is a bucket
+beside `disabled`/`shed`/`terminal` — no action, not drift, **not a failure** —
+and only BRING-UP is withheld. A blocked service that is already running is left
+alone; a `stop` is never withheld. Blocking propagates transitively over hard
+edges; soft edges never block.
+
+> **Two different things are called `blocked`.** `plan["blocked"]` is this
+> bucket. An action with `kind: blocked` is the vanished-app-home SAFETY
+> REFUSAL, which IS a failed action, on purpose — converging it would destroy
+> data.
+
+M1 is **ordering only**: no readiness gates, no waits, no `syrvis up`. A
+`healthy` edge is validated but not yet awaited; that is design/63 M2.
+
+**Rollout order is load-bearing** (design/63 D2): a declaration carrying a
+non-empty `depends_on` is invalid to every reader below 0.5.16, and the
+dashboard bundles its own copy of the platform lib. Release → NAS active →
+**dashboard image rebuilt + repinned** → only then may edges land in
+`services.d`. While any edge exists, platform rollback below 0.5.16 is
+forbidden.
+
+### `volume_locations:` — per-volume placement (0.5.16, design/37 Phase 1)
+
+`location:` places a whole SERVICE. `volume_locations:` places one named VOLUME,
+for the case that model cannot express — a bulk tree and a hot tree inside **one**
+container:
+
+```yaml
+# services.d/immich-server.yaml
+location: /volume5               # the app home: config, secrets, logs, manifest
+volumes:
+  - "upload:/usr/src/app/upload:rw"
+  - "thumbs:/usr/src/app/upload/thumbs:rw"
+  - "encoded-video:/usr/src/app/upload/encoded-video:rw"
+volume_locations:                # only these two subtrees move
+  thumbs: /volume6
+  encoded-video: /volume6
+```
+
+An overridden volume binds from `<override>/<apps-root>/apps/<name>/data/<vol>`;
+**the app home does not move**. Absent ⇒ byte-for-byte today's compose.
+
+Deliberately **mechanical, not semantic**: it places named volumes and knows
+nothing about what they hold — semantics stay in `data.d`. Refusals, each
+mirroring an existing `location:` behavior and all failing CLOSED (a typo must
+never silently leave data on the slow volume):
+
+- the key must name a **declared** volume — unknown key is a parse error;
+- the semantic `config`/`logs`/`secrets` slots, `tier: infra` host mounts and
+  file-plane binds are never overridable — data volumes only;
+- the value revalidates `^/volume\d+$`, and **`is_mounted_volume` is enforced
+  per override at every materialize/start path**, not install-time only (an
+  unmounted override would otherwise materialize an empty tree on the bare
+  mountpoint and hide under the real volume when it mounts later);
+- overlapping keys (one a path prefix of another) are refused;
+- an override requires `location:` — a legacy app adopts a home first;
+- **adding, removing or changing** an override while that volume's current dir
+  is non-empty is refused, naming the volume and the directory to move. Nothing
+  here copies data, and a nested bind SHADOWS what is underneath rather than
+  merging it. The bypass is the single-volume app-move: stop → copy → clear the
+  old dir → re-declare → deploy.
+
+`remove --purge` removes the override trees too — leaving them would orphan
+bytes on another volume that nothing names. The generated compose file carries a
+comment naming each override, so drift inspection stays legible.
 
 Reconcile semantics: every declaration file loads independently (a broken file
 marks only itself invalid — but any invalid file fails the run, since corrupted

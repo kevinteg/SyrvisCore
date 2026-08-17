@@ -367,11 +367,20 @@ class TestRunstate:
         assert services_d.apply_reconcile_plan(sm, {}, {"actions": []}, allow_halted=True) == []
 
 
+class _FakeVm:
+    """A vms.d declaration as far as the shutdown budget is concerned."""
+
+    def __init__(self, name, stop_timeout=90):
+        self.name = name
+        self.stop_timeout = stop_timeout
+
+
 class _FakeVms:
-    def __init__(self, rows=None, power_sequence=None):
+    def __init__(self, rows=None, power_sequence=None, declarations=None):
         self.rows = rows or []
         self.calls = []
         self._power = dict(power_sequence or {})
+        self._declarations = declarations or []
 
     def list(self):
         return self.rows
@@ -392,7 +401,7 @@ class _FakeVms:
         return collections.namedtuple("S", "power")(power)
 
     def declarations(self):
-        return []
+        return self._declarations
 
 
 class _FakeDm:
@@ -524,6 +533,141 @@ class TestShutdownOrchestration:
     def test_resume_noop_when_active(self, home):
         report = lifecycle.resume_instance(home)
         assert report["ok"] and not report["changed"]
+
+
+class TestReserveFirstClamping:
+    """design/63 D6 / dep:F3 — the stores' grace is reserved, consumers clamp.
+
+    The old walk spent the budget front-to-back (`min(declared, remaining)`), so
+    the services whose grace period actually matters — the ones that stop LAST by
+    design — were the ones squeezed toward the 5s floor. These tests pin the
+    inversion: a consumer force-killed at 5s is an inconvenience, a postgres
+    force-killed at 5s is a WAL replay.
+    """
+
+    def _stops(self, home, monkeypatch, services, **kw):
+        sm, calls = TestShutdownOrchestration()._sm_with(home, monkeypatch, services)
+        report = lifecycle.shutdown_instance(
+            home,
+            reason="ups",
+            service_manager=sm,
+            docker_manager=kw.pop("docker_manager", _FakeDm(running=())),
+            vm_manager=kw.pop("vm_manager", _FakeVms()),
+            **kw,
+        )
+        graces = {
+            i["name"]: i["grace_s"]
+            for p in report["phases"]
+            if p["phase"] == "services"
+            for i in p["items"]
+        }
+        return report, graces
+
+    _WEB_AND_STORE = {
+        "web": {"shutdown": {"stop_timeout": 60, "priority": 20}},
+        "postgres": {"shutdown": {"stop_timeout": 120, "priority": 90}},
+    }
+
+    def test_tight_budget_clamps_the_consumer_not_the_store(self, home, monkeypatch):
+        report, graces = self._stops(home, monkeypatch, self._WEB_AND_STORE, budget_s=60)
+        assert graces["postgres"] == 120, "the store keeps its declared grace"
+        assert graces["web"] == lifecycle.STOP_FLOOR_S, "the consumer takes the floor"
+        assert report["budget"]["clamped"] == ["web"]
+
+    def test_generous_budget_clamps_nobody(self, home, monkeypatch):
+        report, graces = self._stops(home, monkeypatch, self._WEB_AND_STORE, budget_s=600)
+        assert graces == {"web": 60, "postgres": 120}
+        assert report["budget"]["clamped"] == []
+
+    def test_the_vm_drain_is_part_of_the_reserve(self, home, monkeypatch):
+        # 180s budget: store 120 + VM 90 = 210 reserved, so the consumer floors
+        # even though 180 - 120 alone would have left it 60.
+        vms = _FakeVms(
+            rows=[{"name": "haos", "power": "running"}],
+            power_sequence={"haos": ["stopped"]},
+            declarations=[_FakeVm("haos", stop_timeout=90)],
+        )
+        report, graces = self._stops(
+            home, monkeypatch, self._WEB_AND_STORE, budget_s=180, vm_manager=vms
+        )
+        assert graces["web"] == lifecycle.STOP_FLOOR_S
+        assert report["budget"]["vm_reserve_s"] == 90
+        assert report["budget"]["reserve_s"] == 210
+
+    def test_the_core_phase_is_part_of_the_reserve(self, home, monkeypatch):
+        report, graces = self._stops(
+            home,
+            monkeypatch,
+            self._WEB_AND_STORE,
+            budget_s=181,
+            docker_manager=_FakeDm(),
+        )
+        # 181 - (store 120 + core 30) = 31 -> the consumer clamps to ~31, not 60.
+        # The allowance is computed against a live clock, so a whole second of
+        # walk time is legitimate slack.
+        assert 30 <= graces["web"] <= 31
+        assert report["budget"]["core_reserve_s"] == lifecycle.CORE_STOP_RESERVE_S
+
+    def test_every_store_ahead_is_reserved_for(self, home, monkeypatch):
+        services = {
+            "web": {"shutdown": {"stop_timeout": 60, "priority": 20}},
+            "pg-a": {"shutdown": {"stop_timeout": 120, "priority": 90}},
+            "pg-b": {"shutdown": {"stop_timeout": 60, "priority": 95}},
+        }
+        report, graces = self._stops(home, monkeypatch, services, budget_s=200)
+        assert (graces["pg-a"], graces["pg-b"]) == (120, 60)
+        assert 19 <= graces["web"] <= 20  # 200 - (120 + 60), minus walk time
+        assert report["budget"]["store_reserve_s"] == 180
+
+    def test_an_instance_with_no_stores_reserves_nothing_for_l2(self, home, monkeypatch):
+        # Undeclared bands = today's behavior, exactly as design/63 D8 promises.
+        report, graces = self._stops(home, monkeypatch, {"web": {}, "api": {}}, budget_s=600)
+        assert graces == {"web": 30, "api": 30}
+        assert report["budget"]["store_reserve_s"] == 0
+
+    def test_report_carries_the_whole_arithmetic(self, home, monkeypatch):
+        vms = _FakeVms(
+            rows=[{"name": "haos", "power": "running"}],
+            power_sequence={"haos": ["stopped"]},
+            declarations=[_FakeVm("haos", stop_timeout=90)],
+        )
+        report, _ = self._stops(
+            home,
+            monkeypatch,
+            self._WEB_AND_STORE,
+            budget_s=150,
+            vm_manager=vms,
+            docker_manager=_FakeDm(),
+        )
+        assert report["budget"] == {
+            "budget_s": 150,
+            "store_reserve_s": 120,
+            "vm_reserve_s": 90,
+            "core_reserve_s": 30,
+            "reserve_s": 240,  # design/63 D6's number, from the declarations
+            "clamped": ["web"],
+        }
+
+
+class TestVmWindows:
+    """fnd:F37 / dep:F24 — the VM's claim on the budget is DECLARED, not assumed."""
+
+    def test_declared_stop_timeout_wins(self):
+        vms = _FakeVms(declarations=[_FakeVm("haos", stop_timeout=120)])
+        assert lifecycle._vm_windows(vms, [{"name": "haos"}], None) == {"haos": 120}
+
+    def test_undeclared_guest_falls_back_to_the_default(self):
+        assert lifecycle._vm_windows(_FakeVms(), [{"name": "haos"}], None) == {
+            "haos": lifecycle.DEFAULT_VM_DEADLINE_S
+        }
+
+    def test_explicit_deadline_caps_every_guest(self):
+        vms = _FakeVms(declarations=[_FakeVm("a", 120), _FakeVm("b", 20)])
+        windows = lifecycle._vm_windows(vms, [{"name": "a"}, {"name": "b"}], 30)
+        assert windows == {"a": 30, "b": 20}
+
+    def test_no_running_guests_reserve_nothing(self):
+        assert lifecycle._vm_windows(_FakeVms(), [], None) == {}
 
 
 class TestCliWiring:

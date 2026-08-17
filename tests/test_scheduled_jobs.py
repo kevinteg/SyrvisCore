@@ -616,3 +616,183 @@ def test_compute_plan_reports_script_integrity(tmp_path, monkeypatch):
     assert scripts["aaa-present"]["present"] is True
     assert scripts["aaa-present"]["sha256"] == hashlib.sha256(b"#!/bin/sh\necho hi\n").hexdigest()
     assert scripts["bbb-missing"] == {"present": False}
+
+
+# ---------------------------------------------------------------------------
+# conf integrity in the plan (the dark-job gate's seam plane) — ops:F11
+# ---------------------------------------------------------------------------
+
+
+def test_compute_plan_reports_conf_integrity(tmp_path, monkeypatch):
+    """`schedule list --json` carries `plan.confs` — {job: {present, bytes}}.
+
+    THE THIRD ARTIFACT a job needs. `schedule sync` installs the declaration and
+    the SCRIPT; `config set` installs `config/<name>.conf`. Nothing reported
+    whether that step had ever run, and a conf-consuming job treats a missing
+    conf as exit 0 plus a stderr line — so a confless job is indistinguishable
+    from a healthy one on every other plane (declared, scheduled, script present
+    and hash-clean, exit 0, silent). Two jobs were dark for hours that way on
+    2026-08-16 with a green homebase.
+
+    NO sha256, unlike the script twin: a conf holds live credentials, and a
+    digest of a short low-entropy value is a brute-forceable oracle over the
+    seam. Presence and size answer "did the install step run" — the question.
+    """
+    home = _jobs_home(tmp_path)
+    (home / "config" / "backup-drill-metrics.conf").write_text("HC_URL=https://example\n")
+    _declare(home, "backup-drill-metrics", "schedule: '0 3 * * *'\nenabled: true\n")
+    _declare(home, "share-metrics", "schedule: '0 4 * * *'\nenabled: true\n")
+    monkeypatch.setattr(schedule, "read_crontab", lambda *a, **k: _DSM_CRONTAB)
+
+    confs = schedule.compute_plan(home)["confs"]
+    assert confs["backup-drill-metrics"]["present"] is True
+    assert confs["backup-drill-metrics"]["bytes"] == len("HC_URL=https://example\n")
+    assert confs["share-metrics"] == {"present": False}
+    assert "sha256" not in confs["backup-drill-metrics"]
+
+
+def test_conf_integrity_covers_disabled_declarations_too(tmp_path, monkeypatch):
+    # A job unscheduled today is still a job whose conf must be installed before
+    # it is re-enabled; the census follows DECLARATIONS, not the crontab block.
+    home = _jobs_home(tmp_path)
+    _declare(home, "paused", "schedule: '0 3 * * *'\nenabled: false\n")
+    monkeypatch.setattr(schedule, "read_crontab", lambda *a, **k: _DSM_CRONTAB)
+    assert schedule.compute_plan(home)["confs"] == {"paused": {"present": False}}
+
+
+# ---------------------------------------------------------------------------
+# DSM Task Scheduler census (ops:F20) — read-only, never a manager
+# ---------------------------------------------------------------------------
+
+_SYNOSCHEDTASK_OUTPUT = """\
+Task ID: [1]
+Task name: [login-alert]
+Owner: [root]
+State: [enabled]
+Type: [script]
+Run command: [/volume4/syrviscore/bin/login-alert]
+
+Task ID: [2]
+Task name: [Off-book backup]
+Owner: [admin]
+State: [disabled]
+Type: [script]
+Run command: [/volume1/scripts/backup.sh]
+"""
+
+
+def _fake_runner(stdout="", stderr="", rc=0):
+    return lambda path: (stdout, stderr, rc)
+
+
+def test_dsm_task_census_parses_records():
+    out = schedule.dsm_task_census(run=_fake_runner(_SYNOSCHEDTASK_OUTPUT))
+    assert out["ok"] and out["count"] == 2
+    first, second = out["tasks"]
+    assert first["id"] == "1" and first["name"] == "login-alert" and first["state"] == "enabled"
+    assert first["command"] == "/volume4/syrviscore/bin/login-alert"
+    assert second["name"] == "Off-book backup" and second["owner"] == "admin"
+    # every raw field survives, aliased or not
+    assert second["fields"]["run_command"] == "/volume1/scripts/backup.sh"
+
+
+def test_dsm_task_census_splits_on_a_repeated_key_without_blank_lines():
+    text = "Task name: [a]\nRun command: [/x]\nTask name: [b]\nRun command: [/y]\n"
+    tasks = schedule.parse_dsm_tasks(text)
+    assert [t["name"] for t in tasks] == ["a", "b"]
+    assert [t["command"] for t in tasks] == ["/x", "/y"]
+
+
+def test_dsm_task_census_missing_tool_is_data_not_an_exception(tmp_path):
+    out = schedule.dsm_task_census(binary=tmp_path / "nope")
+    assert out["available"] is False and out["ok"] is False
+    assert "not present" in out["error"] and out["tasks"] == []
+
+
+def test_dsm_task_census_permission_failure_is_reported(tmp_path):
+    tool = tmp_path / "synoschedtask"
+    tool.write_text("")
+    out = schedule.dsm_task_census(
+        binary=tool, run=_fake_runner(stderr="Operation not permitted", rc=13)
+    )
+    assert out["ok"] is False and "13" in out["error"] and "not permitted" in out["error"]
+
+
+def test_dsm_task_census_unparseable_output_is_unknown_not_empty(tmp_path):
+    # The failure mode that matters: DSM changes its format and the census
+    # quietly reports "no other tasks scheduled", i.e. exactly the blind spot.
+    out = schedule.dsm_task_census(run=_fake_runner("<xml><task/></xml>\n"))
+    assert out["ok"] is False and out["count"] == 0
+    assert "did not recognise" in out["error"]
+
+
+def test_dsm_task_census_genuinely_empty_is_ok(tmp_path):
+    out = schedule.dsm_task_census(run=_fake_runner("   \n"))
+    assert out["ok"] is True and out["count"] == 0 and out["error"] is None
+
+
+def test_dsm_task_census_is_bounded(tmp_path):
+    text = "".join("Task name: [t{}]\n\n".format(i) for i in range(schedule.MAX_DSM_TASKS + 50))
+    out = schedule.dsm_task_census(run=_fake_runner(text))
+    assert out["count"] == schedule.MAX_DSM_TASKS
+    long_value = "x" * (schedule.MAX_DSM_FIELD_CHARS + 100)
+    (task,) = schedule.parse_dsm_tasks("Run command: [{}]\n".format(long_value))
+    assert len(task["command"]) == schedule.MAX_DSM_FIELD_CHARS
+
+
+def test_dsm_task_census_never_raises_when_the_runner_explodes():
+    def boom(path):
+        raise OSError("no such host")
+
+    out = schedule.dsm_task_census(run=boom)
+    assert out["ok"] is False and "no such host" in out["error"]
+
+
+def test_seam_registry_carries_the_dsm_task_census():
+    from syrviscore.seam import registry
+
+    cmd = registry.get_command("schedule_dsm_tasks")
+    assert cmd.subcommand == ["schedule", "dsm-tasks"]
+    assert cmd.read_only and cmd.sudo and not cmd.destructive
+    assert cmd.positional is None  # no operator-supplied argv at all
+
+
+def test_schedule_dsm_tasks_cli_json(monkeypatch):
+    import json as _json
+
+    from click.testing import CliRunner
+
+    from syrviscore.cli import cli
+
+    monkeypatch.setattr(
+        schedule,
+        "dsm_task_census",
+        lambda **kw: {
+            "tool": "/usr/syno/bin/synoschedtask",
+            "available": True,
+            "ok": True,
+            "error": None,
+            "count": 1,
+            "tasks": [{"id": "1", "name": "login-alert", "state": "enabled", "command": "/x"}],
+        },
+    )
+    result = CliRunner().invoke(cli, ["schedule", "dsm-tasks", "--json"])
+    assert result.exit_code == 0, result.output
+    assert _json.loads(result.output)["tasks"][0]["name"] == "login-alert"
+
+    human = CliRunner().invoke(cli, ["schedule", "dsm-tasks"])
+    assert human.exit_code == 0 and "login-alert" in human.output
+
+
+def test_schedule_dsm_tasks_cli_needs_no_home(monkeypatch, tmp_path):
+    """The census reads DSM, not SYRVIS_HOME — it must answer on a box whose
+    install root has been renamed out from under it (that is when a stray DSM
+    task matters most)."""
+    from click.testing import CliRunner
+
+    from syrviscore.cli import cli
+
+    monkeypatch.delenv("SYRVIS_HOME", raising=False)
+    monkeypatch.setattr(schedule, "SYNOSCHEDTASK_PATH", tmp_path / "absent")
+    result = CliRunner().invoke(cli, ["schedule", "dsm-tasks", "--json"])
+    assert result.exit_code == 0 and '"available": false' in result.output

@@ -142,6 +142,66 @@ def _run_syrvis(home: Optional[Path], *args, timeout: int = 60):
         return False, str(e)
 
 
+RENAME_RUNBOOK = "wiki/runbooks/seam-dead-after-boot.md"
+
+
+def assert_no_collision_artifacts() -> None:
+    """Refuse to install while a DSM collision-renamed platform root exists.
+
+    THE ONE COMMAND THAT WOULD HAVE SOLVED 2026-08-16 IN SECONDS (fnd:F16). DSM
+    renames ``<volume>/<name>`` to ``<volume>/<name>_1`` at the first cold boot
+    after a shared folder of the same name appears anywhere on the box. Every
+    control-plane path is absolute into that tree, so the platform presents as
+    decapitated — and the reflex that state produces ("reinstall it") is the one
+    action that makes it unrecoverable: ``install`` would scaffold a fresh, empty
+    root beside the renamed real one, and the next reconcile would start
+    databases against empty homes. `syrvisctl doctor` has said "Do NOT run
+    'syrvisctl install'" since 0.5.9; prose is not a guard.
+
+    Both watched names are covered, because the census
+    (``doctor.scan_volume_roots``) already reads the configured apps-root segment
+    from the rootfs boot-env cache — so a ``syrviscore-apps_1`` refuses exactly
+    as loudly as a ``syrviscore_1``.
+
+    Raises :class:`CollisionError`. Override: ``--ignore-collision`` (a deliberate
+    break-glass for the case where the sibling is genuinely not ours).
+    """
+    from . import doctor
+    from .errors import CollisionError
+
+    renamed = [r for r in doctor.scan_volume_roots() if r["kind"] == "renamed"]
+    if not renamed:
+        return
+    lines = []
+    for row in renamed:
+        path = Path(row["path"])
+        what = (
+            "install root (carries the manifest)"
+            if row.get("manifest")
+            else "app-home root (carries apps/)" if row.get("apps") else "unrecognised content"
+        )
+        lines.append(
+            "  {}  — {}\n      fix: sudo mv {} {}".format(path, what, path, _unrenamed(path))
+        )
+    raise CollisionError(
+        "REFUSING to install: {} collision-renamed platform root(s) present.\n{}\n\n"
+        "DSM renamed these at boot because a shared folder shares the name. "
+        "Nothing is lost — the data is in the renamed directory — but installing "
+        "now would scaffold a NEW empty root beside it and the next reconcile "
+        "would start services against empty homes. Verify each target is absent "
+        "or empty, mv it back, then re-run. Runbook: {}.\n"
+        "(`syrvisctl doctor` shows the full census; --ignore-collision overrides "
+        "this refusal.)".format(len(renamed), "\n".join(lines), RENAME_RUNBOOK)
+    )
+
+
+def _unrenamed(path: Path) -> Path:
+    """``/volume4/syrviscore_1`` -> ``/volume4/syrviscore`` (DSM's suffix stripped)."""
+    import re
+
+    return path.parent / re.sub(r"_\d+$", "", path.name)
+
+
 def _progress_bar(downloaded: int, total: int) -> None:
     if total <= 0:
         return
@@ -187,8 +247,24 @@ def _progress_bar(downloaded: int, total: int) -> None:
     is_flag=True,
     help="Skip the pre-upgrade backup entirely (no rollback point is created)",
 )
+@click.option(
+    "--ignore-collision",
+    is_flag=True,
+    help="Install even though a DSM collision-renamed platform root exists (break-glass)",
+)
 @handle_errors
-def install(version, wheel_file, config_file, force, clean, path, yes, no_verify, no_backup):
+def install(
+    version,
+    wheel_file,
+    config_file,
+    force,
+    clean,
+    path,
+    yes,
+    no_verify,
+    no_backup,
+    ignore_collision,
+):
     """Download and install a service version from GitHub.
 
     If VERSION is not specified, installs the latest release.
@@ -197,6 +273,14 @@ def install(version, wheel_file, config_file, force, clean, path, yes, no_verify
     click.echo()
     click.echo("Installing SyrvisCore service...")
     click.echo()
+
+    # PRECHECK, before path resolution and before elevation: installing over a
+    # collision-renamed root is the one action that turns a recoverable rename
+    # into data loss (fnd:F16).
+    if ignore_collision:
+        click.echo("  ! --ignore-collision: skipping the renamed-platform-root precheck")
+    else:
+        assert_no_collision_artifacts()
 
     # Determine installation path BEFORE any elevation, so the decision
     # survives the re-exec (encoded as --path).

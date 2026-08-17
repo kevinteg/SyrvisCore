@@ -113,6 +113,13 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         # install time (only a services.d/deploy declaration may set it — a
         # git/image/catalog manifest can never redirect its home onto a host path).
         "location",
+        # Per-NAMED-VOLUME placement overrides (design/37 §4 Phase 1):
+        # {<declared volume source>: "/volume<N>"}. The app HOME stays where
+        # `location:` puts it; only the named volume's tree moves, to
+        # <override>/<apps-root>/apps/<name>/data/<volume>. Validated here (key
+        # must name a declared data volume, value ^/volume\d+$); mount-checked
+        # per override at every materialize/start path in ServiceManager.
+        "volume_locations",
         # Declared one-shot tasks ({name: {command: [...]}}) the operator can
         # run inside the service's own container via `syrvis service task` —
         # e.g. a DB bootstrap. Same trust class + audit rules as `command`.
@@ -172,6 +179,38 @@ UNIT_RE = re.compile(r"^[A-Za-z0-9/%_.-]{0,32}$")
 _LINK_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 ALLOWED_TIERS = frozenset({"", "infra"})
+
+# ---------------------------------------------------------------------------
+# depends_on (design/63 D1, M1) — ORCHESTRATION-level edges, never compose
+# ---------------------------------------------------------------------------
+# Entry form is a STRING: ``name[:readiness]``. Three readiness classes:
+#   started (default) — the target container is running;
+#   healthy           — the target's DECLARED docker healthcheck reports healthy
+#                       (a `healthy` edge onto a target with no healthcheck is a
+#                       VALIDATION ERROR — never a silent downgrade to started);
+#   soft              — ordering hint only: sequenced when cheap, never a gate,
+#                       never a block (the dotted edges of design/63 §0.1).
+# The key already sat in ALLOWED_TOP_LEVEL_KEYS with a hard reject (compose
+# `depends_on` cannot cross single-service projects). That reject was right for
+# the COMPOSE meaning and is superseded here for the ORCHESTRATION meaning: the
+# solver consumes these edges, and _generate_compose_file still never emits them.
+DEPENDS_ON_STARTED = "started"
+DEPENDS_ON_HEALTHY = "healthy"
+DEPENDS_ON_SOFT = "soft"
+DEPENDS_ON_READINESS = (DEPENDS_ON_STARTED, DEPENDS_ON_HEALTHY, DEPENDS_ON_SOFT)
+DEPENDS_ON_DEFAULT_READINESS = DEPENDS_ON_STARTED
+#: The readiness classes that GATE and BLOCK. `soft` does neither.
+DEPENDS_ON_HARD = frozenset({DEPENDS_ON_STARTED, DEPENDS_ON_HEALTHY})
+#: design/63 D2 — the per-service edge bound.
+MAX_DEPENDS_ON = 12
+
+# ---------------------------------------------------------------------------
+# volume_locations (design/37 §4 Phase 1) — per-NAMED-VOLUME placement
+# ---------------------------------------------------------------------------
+#: Volume sources a located app maps to SEMANTIC slots rather than to
+#: ``home/data/<source>``. They are the app home's own layout, so they may never
+#: carry a placement override (design/37 §4 point 2: "data volumes only").
+SEMANTIC_VOLUME_SLOTS = frozenset({"config", "logs", "secrets"})
 
 # design/22: the ONLY absolute host mounts an `infra`-tier service may declare,
 # each READ-ONLY. Everything else stays refused even for infra. node_exporter
@@ -487,6 +526,167 @@ def _validate_location(value: Any) -> str:
             "^/volume<N>$ (e.g. /volume6)".format(value)
         )
     return value
+
+
+def parse_dependency_entry(entry: Any, of: str = "depends_on entry") -> Dict[str, str]:
+    """Parse one ``depends_on`` string into ``{"on": name, "readiness": class}``.
+
+    **Parse order is load-bearing** (design/63 D1, the first line M1 touches):
+    the ``:readiness`` suffix is split BEFORE ``validate_service_name`` runs,
+    because ``romm-db:healthy`` fails the name charset as written — the old
+    dead-code loop behind the reject branch would have refused every readiness
+    edge on its first day.
+
+    An UNKNOWN suffix (``:helthy``) is an ERROR, never a default-to-``started``:
+    same no-silent-downgrade principle as the ``healthy``-without-healthcheck
+    rule, applied to the syntax. A bare ``name`` means ``started``.
+    """
+    if not isinstance(entry, str) or not entry:
+        raise ServiceValidationError("{} must be a non-empty string".format(of))
+    target, sep, readiness = entry.partition(":")
+    if sep and not readiness:
+        raise ServiceValidationError(
+            "Invalid {} {!r}: empty readiness after ':' — write one of {} or "
+            "drop the suffix".format(of, entry, ", ".join(DEPENDS_ON_READINESS))
+        )
+    readiness = readiness or DEPENDS_ON_DEFAULT_READINESS
+    if readiness not in DEPENDS_ON_READINESS:
+        raise ServiceValidationError(
+            "Invalid readiness {!r} in {} {!r}: must be one of {}".format(
+                readiness, of, entry, ", ".join(DEPENDS_ON_READINESS)
+            )
+        )
+    validate_service_name(target, of)
+    return {"on": target, "readiness": readiness}
+
+
+def _validate_depends_on(data: Any, service_name: str) -> List[str]:
+    """Validate ``depends_on:`` — the per-FILE half of design/63 D2.
+
+    Everything checkable from one declaration alone lands here: shape, the
+    per-edge parse, the edge bound, self-edges and duplicate targets. The
+    WHOLE-SET rules (cycles, unknown targets, ``healthy`` onto a checkless
+    target) need the other declarations and live in
+    ``services_d.build_dependency_graph``.
+
+    Entries are stored VERBATIM (the operator's spelling round-trips through
+    the materialized manifest), and read through :func:`parse_dependency_entry`.
+    """
+    if not isinstance(data, list):
+        raise ServiceValidationError("depends_on must be a list of 'name[:readiness]' strings")
+    if len(data) > MAX_DEPENDS_ON:
+        raise ServiceValidationError(
+            "depends_on declares {} edges: at most {} are permitted".format(
+                len(data), MAX_DEPENDS_ON
+            )
+        )
+    out: List[str] = []
+    seen: Dict[str, str] = {}
+    for entry in data:
+        edge = parse_dependency_entry(entry)
+        if edge["on"] == service_name:
+            raise ServiceValidationError(
+                "depends_on entry {!r}: a service may not depend on itself".format(entry)
+            )
+        if edge["on"] in seen:
+            raise ServiceValidationError(
+                "depends_on names {!r} twice ({!r} and {!r}): one edge per target, "
+                "so the readiness class is unambiguous".format(edge["on"], seen[edge["on"]], entry)
+            )
+        seen[edge["on"]] = entry
+        out.append(entry)
+    return out
+
+
+def _validate_volume_locations(data: Any, volumes: List[str], tier: str, location: str) -> Dict:
+    """Validate ``volume_locations:`` — per-named-volume placement (design/37 §4).
+
+    Mechanical, not semantic: it places named volumes and knows nothing about
+    what they hold. Five refusals, each mirroring an existing ``location:``
+    behavior (§4 point 2), all FAIL CLOSED — a typo must never silently leave
+    data on the slow volume:
+
+    1. the key must name a DECLARED data volume's source (unknown key = error,
+       with the declared sources listed);
+    2. the semantic slots (``config``/``logs``/``secrets``) and ``infra``-tier
+       absolute host mounts and file-plane binds are never overridable;
+    3. the value revalidates ``LOCATION_RE`` (``is_mounted_volume`` is enforced
+       per override at every materialize/start path, in ServiceManager);
+    4. overlapping keys (one source a path prefix of another) are refused — the
+       resulting nesting would be ambiguous on the host side;
+    5. an override requires ``location:``. Per-volume placement materializes the
+       v2 tree ``<override>/<apps-root>/apps/<name>/data/<vol>``; a LEGACY app
+       (data under SYRVIS_HOME) must adopt a home first rather than sprout half
+       a v2 layout on another volume.
+    """
+    if not isinstance(data, dict):
+        raise ServiceValidationError(
+            "volume_locations must be a mapping of '<declared volume>: /volume<N>'"
+        )
+    if not data:
+        return {}
+    if not location:
+        raise ServiceValidationError(
+            "volume_locations requires location: — per-volume placement moves a "
+            "subtree of the app HOME, so the app must declare one first"
+        )
+
+    declarable: Dict[str, str] = {}  # source -> the volume entry it came from
+    unoverridable: Dict[str, str] = {}
+    for vol in volumes:
+        if vol.startswith(FILEPLANE_PREFIX):
+            continue  # a share reference has no app-home tree to place
+        source = vol.split(":", 1)[0]
+        if source in SEMANTIC_VOLUME_SLOTS or (tier == "infra" and source in INFRA_HOST_MOUNTS):
+            unoverridable[source] = vol
+        else:
+            declarable[source] = vol
+
+    out: Dict[str, str] = {}
+    for key, value in data.items():
+        if not isinstance(key, str) or not key:
+            raise ServiceValidationError("volume_locations keys must be non-empty strings")
+        if key in unoverridable:
+            raise ServiceValidationError(
+                "volume_locations key {!r}: {} are not overridable — data volumes "
+                "only (design/37 §4)".format(
+                    key,
+                    (
+                        "the semantic config/logs/secrets slots"
+                        if key in SEMANTIC_VOLUME_SLOTS
+                        else "infra-tier host mounts"
+                    ),
+                )
+            )
+        if key not in declarable:
+            raise ServiceValidationError(
+                "volume_locations key {!r} does not name a declared volume "
+                "(declared: {}) — refusing a placement override that would "
+                "silently do nothing".format(key, ", ".join(sorted(declarable)) or "none")
+            )
+        _validate_relative_subpath(key, "volume_locations key")
+        if not isinstance(value, str) or not LOCATION_RE.fullmatch(value):
+            raise ServiceValidationError(
+                "volume_locations[{!r}] = {!r}: must be a DSM volume root "
+                "matching ^/volume<N>$".format(key, value)
+            )
+        out[key] = value
+
+    for a in out:
+        for b in out:
+            if a != b and _is_subpath(b, a):
+                raise ServiceValidationError(
+                    "volume_locations keys {!r} and {!r} overlap: one placement "
+                    "override may not nest inside another".format(a, b)
+                )
+    return dict(sorted(out.items()))
+
+
+def _is_subpath(child: str, parent: str) -> bool:
+    """True iff POSIX path ``child`` lies strictly under ``parent``."""
+    parts_c = PurePosixPath(child).parts
+    parts_p = PurePosixPath(parent).parts
+    return len(parts_c) > len(parts_p) and parts_c[: len(parts_p)] == parts_p
 
 
 def _no_control_chars(value: str) -> bool:
@@ -903,12 +1103,19 @@ class ServiceDefinition:
     # trust anchor as `tier` — only an operator-authored declaration may set it
     # (install-time authorship gate + mount check in ServiceManager).
     location: str = ""
+    # Per-named-volume placement overrides (design/37 §4): {volume: "/volume<N>"}.
+    # The app home does NOT move; the named volume's tree binds from
+    # <override>/<apps-root>/apps/<name>/data/<volume> instead. Empty == today's
+    # compose, byte for byte.
+    volume_locations: Dict[str, str] = field(default_factory=dict)
     # A data-dir-relative env file (installed 0600) — the recommended home for
     # secrets, keeping them out of this manifest.
     env_file: str = ""
     volumes: List[str] = field(default_factory=list)
     ports: List[str] = field(default_factory=list)
     networks: List[str] = field(default_factory=list)
+    # Orchestration-level dependency edges (design/63 D1), "name[:readiness]".
+    # Consumed by the graph solver in services_d; NEVER emitted into compose.
     depends_on: List[str] = field(default_factory=list)
     config_templates: List[ConfigTemplate] = field(default_factory=list)
     restart: str = "unless-stopped"
@@ -1024,23 +1231,15 @@ class ServiceDefinition:
                 continue
             validate_service_name(net, "network name")
 
-        depends_on = data.get("depends_on", [])
-        if not isinstance(depends_on, list):
-            raise ServiceValidationError("depends_on must be a list")
-        if depends_on:
-            # Each Layer-2 service runs as its OWN single-service compose project
-            # (-p syrvis-<name>), so compose `depends_on` — which only orders
-            # services WITHIN one project — can never reference another Syrvis
-            # service. Reject it clearly instead of writing a silent no-op that
-            # fails at docker-run time. (Sidecars need a real multi-container
-            # manifest, which the schema does not yet support.)
-            raise ServiceValidationError(
-                "depends_on is not supported: each service is its own compose "
-                "project, so it cannot depend on another Syrvis service. Remove "
-                "the depends_on block (multi-container manifests are not yet supported)."
-            )
-        for dep in depends_on:
-            validate_service_name(dep, "depends_on entry")
+        # design/63 D1: the key is REINTERPRETED at the orchestration layer.
+        # Compose `depends_on` stays impossible across single-service projects
+        # (and is never emitted — see _generate_compose_file); these edges are
+        # solved by the platform, in services_d.build_dependency_graph.
+        depends_on = _validate_depends_on(data.get("depends_on", []), name)
+
+        volume_locations = _validate_volume_locations(
+            data.get("volume_locations", {}), volumes, tier, location
+        )
 
         templates = []
         for t in data.get("config_templates", []):
@@ -1110,6 +1309,7 @@ class ServiceDefinition:
             shutdown=shutdown,
             tier=tier,
             location=location,
+            volume_locations=volume_locations,
             env_file=env_file,
             volumes=volumes,
             ports=ports,
@@ -1123,6 +1323,16 @@ class ServiceDefinition:
             enabled=data.get("enabled", True),
             critical=data.get("critical", False),
         )
+
+    def dependency_edges(self) -> List[Dict[str, str]]:
+        """``depends_on`` parsed into ``[{"on": name, "readiness": class}, ...]``.
+
+        The ONE reader of the declared spelling, so no consumer re-implements
+        the ``name[:readiness]`` split. Entries that reach here are already
+        validated (``from_dict``); a hand-built definition with a malformed
+        entry raises, which is the same fail-closed answer the parser gives.
+        """
+        return [parse_dependency_entry(entry) for entry in self.depends_on]
 
     @classmethod
     def from_yaml(cls, yaml_path: Path) -> "ServiceDefinition":
@@ -1183,6 +1393,8 @@ class ServiceDefinition:
             result["tier"] = self.tier
         if self.location:
             result["location"] = self.location
+        if self.volume_locations:
+            result["volume_locations"] = dict(self.volume_locations)
         if self.env_file:
             result["env_file"] = self.env_file
         if self.volumes:

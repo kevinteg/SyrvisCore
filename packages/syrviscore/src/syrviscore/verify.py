@@ -109,6 +109,10 @@ def gather_l2_drift() -> Optional[drift.DriftReport]:
     intentionally-stopped services read as fourteen MISSING containers on every
     poll for a week, which is how a drift signal gets ignored.
 
+    TERMINAL services — declared ``restart: no`` and observed exited/dead — are
+    skipped too (dep:F11): that is their declared end state, not a deviation
+    from it. An ABSENT container still drifts; only a finished one is exempt.
+
     Returns None when there is nothing to check or docker is unreachable
     (core drift already reports docker-down).
     """
@@ -162,6 +166,26 @@ def gather_l2_drift() -> Optional[drift.DriftReport]:
                 }
             except Exception:  # noqa: BLE001 - absent container -> MISSING drift
                 pass
+
+        # TERMINAL services are not drift either (dep:F11, 0.5.16), for the same
+        # reason shed is not: a `restart: no` service that RAN and exited is in
+        # its declared end state. Docker will not restart it, reconcile will not
+        # restart it, and a drift signal that says otherwise on every poll is
+        # exactly the kind that gets ignored. Read from the OBSERVED status —
+        # a `restart: no` service whose container is missing entirely is still
+        # real MISSING drift.
+        for name, state in list(actual.items()):
+            declared = declarations.get(name)
+            if (
+                declared is not None
+                and declared.restart == "no"
+                and (state.get("status") or "") in ("exited", "dead")
+            ):
+                expected.pop(name, None)
+                actual.pop(name, None)
+        if not expected:
+            return None
+
         # L2 containers outside the declared set are not this scope's concern.
         report = drift.detect_drift("layer2", expected, actual, flag_unexpected=False)
         for item in report.items:

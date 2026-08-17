@@ -145,6 +145,11 @@ def _config_checksums(home: Path, service, configs=None) -> Dict[str, str]:
 
     Covers config_templates dests present in data/<name>/ plus any deploy-bundle
     configs. Best-effort: unreadable files are skipped.
+
+    READ BACK by :func:`last_materialized_digests` (0.5.16, design/60 G1): this
+    map was computed on every deploy since the record schema shipped and never
+    consulted, so ``deploy_bundle`` had no way to tell a byte-identical redeploy
+    from a real change and force-recreated the container either way.
     """
     import hashlib
 
@@ -181,6 +186,57 @@ def _config_checksums(home: Path, service, configs=None) -> Dict[str, str]:
     return sums
 
 
+def content_digest(content) -> str:
+    """``sha256:<hex>`` of ``content`` — the digest the record stores.
+
+    One helper so the WRITE side (digesting what a deploy materialized) and the
+    COMPARE side (digesting what the incoming bundle would materialize) can
+    never encode the same bytes differently. ``surrogateescape`` mirrors
+    ``ServiceManager._place_config``/``write_secret``, which is how the bytes
+    actually reach disk.
+    """
+    import hashlib
+
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="surrogateescape")
+    return "sha256:{}".format(hashlib.sha256(content).hexdigest())
+
+
+def last_materialized_digests(home: Path, workload: str) -> Optional[Dict[str, Any]]:
+    """What the NEWEST record says this workload's configs + env_file held.
+
+    The read half of design/60 G1 ("a no-op apply of an unmodified stack
+    restarts zero containers"), consumed by ``deploy_bundle``.
+
+    NEWEST, not newest-*successful*, and that is the safe choice: a failed
+    update records the digests of what it managed to materialize before it
+    failed, so comparing against it makes a retry of the same bundle look
+    UNCHANGED — which is correct, because a failed update also tears the
+    container down and the next ``up -d`` therefore creates it fresh from the
+    files on disk. Comparing against an older successful record instead would
+    describe bytes that are no longer there.
+
+    Returns ``None`` when nothing is recorded (→ the caller must assume
+    "changed"; an unknown prior state may never be read as a no-op).
+    """
+    try:
+        record = latest_revision(Path(home), workload)
+    except Exception:  # noqa: BLE001 - an unreadable history never blocks a deploy
+        return None
+    if not isinstance(record, dict):
+        return None
+    sums = record.get("config_checksums")
+    return {
+        "revision": record.get("revision"),
+        "action": record.get("action"),
+        "outcome": record.get("outcome"),
+        "config_checksums": sums if isinstance(sums, dict) else {},
+        # Absent on records written before 0.5.16 and on non-deploy actions —
+        # None means "unknown", which the comparison treats as changed.
+        "secrets_checksum": record.get("secrets_checksum"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Write API (best-effort: returns the record dict, or None on ANY failure)
 # ---------------------------------------------------------------------------
@@ -196,8 +252,17 @@ def record_service_deploy(
     rollback_of: Optional[int] = None,
     detail: str = "",
     configs=None,
+    secrets_checksum: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Append one record for a Layer 2 service action. Never raises."""
+    """Append one record for a Layer 2 service action. Never raises.
+
+    ``secrets_checksum`` (0.5.16) is the ``sha256:`` of the env_file BODY this
+    action materialized — never the body, never a per-key digest. It exists so
+    the next deploy can tell "the same secrets" from "rotated secrets" and skip
+    the container force-recreate in the first case (design/60 G1). A record
+    carrying one is written 0640 like an inline-env record, so the digest is no
+    more readable than the env NAMES already beside it.
+    """
     try:
         env_names = [e.split("=", 1)[0] for e in (service.environment or [])]
         routed = bool(service.traefik.enabled and service.traefik.subdomain)
@@ -220,6 +285,7 @@ def record_service_deploy(
             "env_file": service.env_file or None,
             "volumes": _volume_entries(service),
             "config_checksums": _config_checksums(home, service, configs),
+            "secrets_checksum": secrets_checksum,
             "source_url": service.source_url,
             "tier_selector": service.tier,
             # design/26: where the app's home lives ("" = legacy layout).
@@ -261,6 +327,7 @@ def record_service_remove(
             "env_file": None,
             "volumes": [],
             "config_checksums": {},
+            "secrets_checksum": None,
             "source_url": None,
             "tier_selector": "",
             "location": None,
@@ -350,9 +417,13 @@ def _apply_record_perms(home: Path, path: Path, payload: Dict[str, Any]) -> None
 
     Mirrors ``_write_manifest``: history stays a NON-sudo operator read while
     inline env values never become world-readable. Best-effort.
+
+    A ``secrets_checksum`` counts as env material for this purpose (0.5.16): a
+    digest is not a value, but a digest of a SHORT low-entropy secret is a
+    confirmation oracle, so it is held to the same 0640 as the env names.
     """
     try:
-        if payload.get("env_names"):
+        if payload.get("env_names") or payload.get("secrets_checksum"):
             shared_gid = (Path(home) / "config" / "services.d").stat().st_gid
             os.chown(str(path), -1, shared_gid)
             path.chmod(0o640)

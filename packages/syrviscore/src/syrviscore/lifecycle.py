@@ -404,6 +404,35 @@ DEFAULT_SHUTDOWN_BUDGET_S = 180
 DEFAULT_VM_DEADLINE_S = 90
 CORE_STOP_ORDER = ("syrviscore-dashboard", "cloudflared", "portainer", "traefik")
 
+# Schema defaults for a service that declares no `shutdown:` block.
+DEFAULT_STOP_TIMEOUT_S = 30
+DEFAULT_STOP_PRIORITY = 50
+
+# RESERVE-FIRST CLAMPING (design/63 D6, dep:F3; interim until 63 M1's graph).
+#
+# The walk stops in ascending priority bands and used to spend the budget
+# FRONT-TO-BACK: `min(declared, remaining)`. So the stores — which stop LAST, by
+# design, and are the only workloads for which the grace period is load-bearing
+# — got whatever the consumers had not already spent, squeezed toward the 5s
+# floor. design/63 measured the arithmetic from the live declarations and it does
+# not fit: store wave 120s + VM ACPI drain 90s + core 30s = 240s of irreducible
+# reserve against a `timeout 150s` rc.d wrapper. The doctrine that falls out of
+# that is one sentence: **a consumer force-killed at 60s is an inconvenience, a
+# postgres force-killed at 5s is a WAL replay or worse** — so the reserve is held
+# back FIRST and the consumers clamp into what is left, never the reverse.
+#
+# A "store" is a service in the STORE band or above; the band convention is
+# design/25 D4's (20 consumer / 50 default / 70 cache+broker / 90 store). A
+# deployment that declares no band ≥ STORE_BAND simply reserves nothing for L2
+# and behaves as before — the arithmetic is driven by declarations, not by names.
+STORE_BAND = 90
+# The whole core phase (dashboard → cloudflared → portainer → traefik). They are
+# routing/UI containers that stop promptly; 30s is design/63 D6's figure for the
+# phase, not a per-container timeout (that stays capped at 30s below).
+CORE_STOP_RESERVE_S = 30
+# Never clamp a stop below this: SIGTERM plus a heartbeat to react to it.
+STOP_FLOOR_S = 5
+
 
 @dataclass
 class _Phase:
@@ -440,6 +469,12 @@ def shutdown_instance(
     a single failure; the report enumerates every outcome. Declared intent
     (services.d enabled flags) is NEVER touched — this is an operational stop,
     not a change of intent, and resume/reconcile restores everything.
+
+    ``budget_s`` is spent RESERVE-FIRST (design/63 D6, dep:F3): the stores' own
+    declared grace, the VM drain and the core phase are held back before the
+    first consumer is stopped, and consumers clamp into what remains (floor
+    :data:`STOP_FLOOR_S`). The arithmetic is reported under ``budget`` so a
+    5-second consumer stop is explainable rather than mysterious.
     """
     from .service_manager import ServiceManager
 
@@ -511,22 +546,70 @@ def shutdown_instance(
     # --- issue VM graceful shutdown (fire-and-forget; guests drain).
     # VmManager.stop fires the vm pre-stop host hook itself.
     vm_phase = _Phase("vms")
+    vm_windows = _vm_windows(vms, vm_rows, vm_deadline_s)
+    vm_issued_at = time.monotonic()
+    # Guests drain CONCURRENTLY with the L2 stops below (the ACPI action is
+    # issued here and waited on after), so the drain's claim on the budget is
+    # anchored at the ISSUE, decays in real time, and is a max — not a sum.
+    vm_drain_until = (vm_issued_at + max(vm_windows.values())) if vm_windows else 0.0
     for row in vm_rows:
         name = row["name"]
         try:
             vms.stop(name)
-            vm_phase.items.append({"name": name, "action": "acpi-shutdown"})
+            vm_phase.items.append(
+                {
+                    "name": name,
+                    "action": "acpi-shutdown",
+                    "window_s": vm_windows.get(name, DEFAULT_VM_DEADLINE_S),
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - isolate; try the rest
             vm_phase.ok = False
             failures.append("vm:{}".format(name))
             vm_phase.items.append({"name": name, "error": str(exc)})
 
     # --- L2 services, ascending priority bands (DBs last within L2) ---------
+    # Reserve-first: the stores' declared grace + what the VM drain and the core
+    # phase still need is held back, and every EARLIER service clamps into the
+    # remainder (see STORE_BAND above). Declarations are read ONCE here — the old
+    # sort key re-parsed each manifest on every comparison.
     l2_phase = _Phase("services")
-    ordered = sorted(l2_rows, key=lambda r: (_l2_priority(sm, r["name"]), r["name"]))
+    timeouts = {r["name"]: _l2_stop_timeout(sm, r["name"]) for r in l2_rows}
+    priorities = {r["name"]: _l2_priority(sm, r["name"]) for r in l2_rows}
+    ordered = sorted(l2_rows, key=lambda r: (priorities[r["name"]], r["name"]))
+    core_reserve = CORE_STOP_RESERVE_S if core_names else 0
+    store_reserve = sum(timeouts[r["name"]] for r in ordered if priorities[r["name"]] >= STORE_BAND)
+    budget_report = {
+        "budget_s": budget_s,
+        "store_reserve_s": store_reserve,
+        "vm_reserve_s": int(max(vm_windows.values())) if vm_windows else 0,
+        "core_reserve_s": core_reserve,
+        "reserve_s": int(store_reserve + (max(vm_windows.values()) if vm_windows else 0))
+        + core_reserve,
+        "clamped": [],
+    }
+    store_tail = store_reserve
     for row in ordered:
         name = row["name"]
-        grace = int(min(_l2_stop_timeout(sm, name), max(5, _remaining(deadline))))
+        declared = timeouts[name]
+        is_store = priorities[name] >= STORE_BAND
+        if is_store:
+            # THE RESERVE ITSELF. A store keeps its declared stop_timeout even
+            # when the budget is already overspent: a clean checkpoint is the
+            # thing the whole walk exists to buy, and the container's own
+            # stop_grace_period (generated from this value) holds anyway if the
+            # transport kills us mid-stop.
+            store_tail -= declared
+            grace = declared
+        else:
+            allowance = _remaining(deadline) - (
+                store_tail + max(0.0, vm_drain_until - time.monotonic()) + core_reserve
+            )
+            grace = int(min(declared, max(STOP_FLOOR_S, allowance)))
+        item = {"name": name, "grace_s": grace, "declared_s": declared, "band": priorities[name]}
+        if grace < declared:
+            item["clamped"] = True
+            budget_report["clamped"].append(name)
         ok, msg = sm.stop(
             name,
             remove=False,
@@ -536,7 +619,7 @@ def shutdown_instance(
             hook_timeout=int(min(HOOK_DEFAULT_TIMEOUT_S, max(1, _remaining(deadline)))),
             stop_timeout=grace,
         )
-        item = {"name": name, "result": "stopped" if ok else "failed", "grace_s": grace}
+        item["result"] = "stopped" if ok else "failed"
         if not ok:
             l2_phase.ok = False
             failures.append("service:{}".format(name))
@@ -546,25 +629,18 @@ def shutdown_instance(
     phases.append(l2_phase)
 
     # --- wait for VMs to power off; hard-off stragglers ---------------------
-    # Each guest gets its DECLARED graceful window (vms.d stop_timeout,
-    # default 90s); an explicit --vm-deadline caps every guest; the global
-    # budget caps everything.
+    # Each guest gets its DECLARED graceful window (vms.d stop_timeout, default
+    # 90s), capped by an explicit --vm-deadline. The window is measured from the
+    # ACPI ISSUE, not from the start of this wait: the guest has been draining
+    # throughout the L2 phase, so re-anchoring here would double-count that time
+    # (and, with the budget already spent, could truncate a drain that is nearly
+    # done). The VM share is part of the reserve — the L2 walk clamped itself to
+    # protect it — so it is deliberately NOT re-clamped by `_remaining` here.
     if vm_rows and vms is not None:
-        declared_timeouts: Dict[str, int] = {}
-        try:
-            declared_timeouts = {
-                vm.name: getattr(vm, "stop_timeout", DEFAULT_VM_DEADLINE_S)
-                for vm in vms.declarations()
-            }
-        except Exception:  # noqa: BLE001 - fall back to defaults
-            pass
-        now = time.monotonic()
-        deadlines = {}
-        for row in vm_rows:
-            per_vm = declared_timeouts.get(row["name"], DEFAULT_VM_DEADLINE_S)
-            if vm_deadline_s is not None:
-                per_vm = min(per_vm, vm_deadline_s)
-            deadlines[row["name"]] = now + min(per_vm, max(5, _remaining(deadline)))
+        deadlines = {
+            row["name"]: vm_issued_at + vm_windows.get(row["name"], DEFAULT_VM_DEADLINE_S)
+            for row in vm_rows
+        }
         still_on = _wait_vms_off(vms, deadlines)
         for name in still_on:
             try:
@@ -619,6 +695,9 @@ def shutdown_instance(
         "finished_at": finished_at,
         "elapsed_s": round(elapsed, 1),
         "budget_s": budget_s,
+        # The reserve-first arithmetic, so an operator can see WHY a consumer
+        # got 5s instead of 30 (design/63 D6).
+        "budget": budget_report,
         "phases": [p.to_dict() for p in phases],
         "ok": not failures,
         "degraded": bool(failures or forced),
@@ -634,9 +713,9 @@ def _l2_stop_timeout(sm, name: str) -> int:
         from .service_schema import load_service_definition
 
         svc = load_service_definition(sm.services_dir / name / "syrvis-service.yaml")
-        return int((svc.shutdown or {}).get("stop_timeout", 30))
+        return int((svc.shutdown or {}).get("stop_timeout", DEFAULT_STOP_TIMEOUT_S))
     except Exception:  # noqa: BLE001
-        return 30
+        return DEFAULT_STOP_TIMEOUT_S
 
 
 def _l2_priority(sm, name: str) -> int:
@@ -645,9 +724,35 @@ def _l2_priority(sm, name: str) -> int:
         from .service_schema import load_service_definition
 
         svc = load_service_definition(sm.services_dir / name / "syrvis-service.yaml")
-        return int((svc.shutdown or {}).get("priority", 50))
+        return int((svc.shutdown or {}).get("priority", DEFAULT_STOP_PRIORITY))
     except Exception:  # noqa: BLE001
-        return 50
+        return DEFAULT_STOP_PRIORITY
+
+
+def _vm_windows(vms, vm_rows: List[Dict[str, Any]], vm_deadline_s: Optional[int]) -> Dict[str, int]:
+    """``{vm: graceful ACPI window}`` for the RUNNING guests (vms.d stop_timeout).
+
+    The VM tier's claim on the shutdown budget, declared rather than assumed
+    (fnd:F37/dep:F24 — the HAOS guest was an undeclared tenant of a 90s slice).
+    An explicit ``--vm-deadline`` caps every guest; an undeclared/unreadable
+    guest falls back to :data:`DEFAULT_VM_DEADLINE_S`.
+    """
+    declared: Dict[str, int] = {}
+    if vms is not None:
+        try:
+            declared = {
+                vm.name: int(getattr(vm, "stop_timeout", DEFAULT_VM_DEADLINE_S))
+                for vm in vms.declarations()
+            }
+        except Exception:  # noqa: BLE001 - unreadable declarations: defaults
+            declared = {}
+    windows: Dict[str, int] = {}
+    for row in vm_rows:
+        window = declared.get(row["name"], DEFAULT_VM_DEADLINE_S)
+        if vm_deadline_s is not None:
+            window = min(window, vm_deadline_s)
+        windows[row["name"]] = int(window)
+    return windows
 
 
 def _wait_vms_off(vms, deadlines: Dict[str, float], poll_s: float = 3.0) -> List[str]:

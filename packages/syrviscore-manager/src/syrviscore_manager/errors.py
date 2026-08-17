@@ -99,3 +99,15 @@ class CompatibilityError(SyrvisError):
     """The service version declares a newer minimum manager than is installed."""
 
     code = "incompatible_manager"
+
+
+class CollisionError(SyrvisError):
+    """A DSM collision-renamed platform root is present (install refuses).
+
+    ``<volume>/<name>_1`` means DSM renamed one of our volume roots at boot
+    because a shared folder shares its name. Installing over that state writes a
+    NEW empty tree beside the real one and reads as data loss (incident
+    2026-08-16); the fix is a ``mv``, never an install.
+    """
+
+    code = "volume_root_collision"

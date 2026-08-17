@@ -188,7 +188,9 @@ def _manager(tmp_path, start_ok=True):
     return mgr
 
 
-def _snmp_bundle():
+def _snmp_bundle(auth_pass="a", config_body=None):
+    """The reference bundle. ``auth_pass``/``config_body`` let a test express a
+    REAL change — since 0.5.16 a byte-identical redeploy is deliberately inert."""
     return DeployBundle.from_dict(
         {
             "service": base_manifest(
@@ -203,12 +205,13 @@ def _snmp_bundle():
             "configs": [
                 {
                     "dest": "config/snmp.yml",
-                    "content": "auths:\n  synology_v3:\n    username: ${SNMP_V3_USER}\n",
+                    "content": config_body
+                    or "auths:\n  synology_v3:\n    username: ${SNMP_V3_USER}\n",
                 }
             ],
             "secrets": {
                 "SNMP_V3_USER": "snmp-monitor",
-                "SNMP_V3_AUTH_PASS": "a",
+                "SNMP_V3_AUTH_PASS": auth_pass,
                 "SNMP_V3_PRIV_PASS": "p",
             },
         }
@@ -300,7 +303,9 @@ class TestDeployBundleApply:
         assert mgr.deploy_bundle(_snmp_bundle())[0]  # fresh install
         calls = []
         mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
-        assert mgr.deploy_bundle(_snmp_bundle())[0]  # update (has config + secrets)
+        # A REAL rotation (0.5.16: an identical redeploy is a no-op — see
+        # TestNoOpRedeploy — so the change has to be a change).
+        assert mgr.deploy_bundle(_snmp_bundle(auth_pass="rotated"))[0]
         assert any("--force-recreate" in a for a in calls), f"calls={calls}"
         assert not any("restart" in a for a in calls), "a restart would NOT re-read env_file"
 
@@ -308,20 +313,23 @@ class TestDeployBundleApply:
         # A bind-mounted config IS re-read on restart, so the cheap fix-up stays
         # the right one when no secret is in play.
         mgr = _manager(tmp_path)
-        b = DeployBundle.from_dict(
-            {
-                "service": base_manifest(
-                    name="vm",
-                    volumes=["config:/etc/vm:ro"],
-                    networks=["proxy"],
-                ),
-                "configs": [{"dest": "config/vm.yml", "content": "a: 1\n"}],
-            }
-        )
-        assert mgr.deploy_bundle(b)[0]  # fresh install
+
+        def _vm_bundle(body):
+            return DeployBundle.from_dict(
+                {
+                    "service": base_manifest(
+                        name="vm",
+                        volumes=["config:/etc/vm:ro"],
+                        networks=["proxy"],
+                    ),
+                    "configs": [{"dest": "config/vm.yml", "content": body}],
+                }
+            )
+
+        assert mgr.deploy_bundle(_vm_bundle("a: 1\n"))[0]  # fresh install
         calls = []
         mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
-        assert mgr.deploy_bundle(b)[0]  # update (config only, no secrets)
+        assert mgr.deploy_bundle(_vm_bundle("a: 2\n"))[0]  # update, CHANGED config
         assert any("restart" in a for a in calls), f"expected a restart; calls={calls}"
         assert not any("--force-recreate" in a for a in calls)
 
@@ -387,6 +395,129 @@ class TestDeployBundleApply:
         # but a NON-secret write over that 0600 is refused (downgrade guard)
         ok2, msg2 = mgr._place_config("svc", "config/token.scfg", "x", secret=False)
         assert not ok2 and "secret" in msg2.lower()
+
+
+# ---------------------------------------------------------------------------
+# design/60 G1 — a byte-identical redeploy restarts NOTHING (dep:F10, 0.5.16)
+# ---------------------------------------------------------------------------
+
+
+class TestNoOpRedeploy:
+    """G1 at the PLATFORM layer.
+
+    Before 0.5.16 `deploy_bundle` had no change detection at all: the post-`up`
+    fix-up keyed on "does this bundle CARRY secrets", not "are they DIFFERENT",
+    so every push of an unmodified stack force-recreated every secrets-bearing
+    service. A caller-side hash could not fix that — SyrvisCore recreated anyway.
+    """
+
+    def _calls(self, mgr):
+        calls = []
+        mgr._compose = lambda name, cp, *a, **k: (calls.append(a) or (True, ""))
+        return calls
+
+    def test_identical_redeploy_recreates_nothing(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        calls = self._calls(mgr)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle())
+        assert ok, msg
+        assert calls == [], f"a byte-identical redeploy must be inert; calls={calls}"
+        assert "content unchanged" in msg
+
+    def test_a_real_secret_change_still_recreates(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        calls = self._calls(mgr)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle(auth_pass="rotated"))
+        assert ok, msg
+        assert any("--force-recreate" in a for a in calls), f"calls={calls}"
+        assert "content unchanged" not in msg
+
+    def test_a_real_config_change_still_restarts(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        calls = self._calls(mgr)
+        assert mgr.deploy_bundle(_snmp_bundle(config_body="auths: {}\n"))[0]
+        assert any("restart" in a for a in calls), f"calls={calls}"
+        assert not any("--force-recreate" in a for a in calls), "secrets did not change"
+
+    def test_config_and_secret_both_changed_prefers_recreate(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        calls = self._calls(mgr)
+        assert mgr.deploy_bundle(_snmp_bundle(auth_pass="r", config_body="auths: {}\n"))[0]
+        assert any("--force-recreate" in a for a in calls)
+        assert not any("restart" in a for a in calls), "recreate subsumes restart"
+
+    def test_unknown_prior_state_reads_as_changed(self, tmp_path):
+        # No history at all (records pruned / a pre-0.5.16 instance): the
+        # comparison must FAIL CHANGED, never silently skip the fix-up.
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        import shutil as _shutil
+
+        _shutil.rmtree(tmp_path / "data" / "deployments" / "snmp-exporter")
+        calls = self._calls(mgr)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        assert any("--force-recreate" in a for a in calls), "unknown must mean changed"
+
+    def test_pre_0516_record_without_a_secret_digest_reads_as_changed(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        rec = sorted((tmp_path / "data" / "deployments" / "snmp-exporter").glob("*.json"))[-1]
+        doc = json.loads(rec.read_text())
+        doc.pop("secrets_checksum")  # what a 0.5.15 record looks like
+        rec.write_text(json.dumps(doc))
+        calls = self._calls(mgr)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        assert any("--force-recreate" in a for a in calls)
+
+    def test_a_failed_deploy_records_its_digests_so_the_retry_sees_no_change(self, tmp_path):
+        # A failed UPDATE tears the container down, so the retry's `up -d`
+        # creates it fresh from the files on disk — no recreate needed, and the
+        # comparison against the FAILED record (the newest statement about what
+        # was materialized) says exactly that.
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        mgr._start_service = lambda name, cp: (False, "boom")
+        assert not mgr.deploy_bundle(_snmp_bundle(auth_pass="rotated"))[0]
+        mgr._start_service = lambda name, cp: (True, "started")
+        calls = self._calls(mgr)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle(auth_pass="rotated"))
+        assert ok, msg
+        assert calls == [], f"the retry re-materializes the same bytes; calls={calls}"
+
+    def test_fresh_install_is_never_a_no_op(self, tmp_path):
+        # A fresh install starts with the final content, so there is no fix-up
+        # to skip — and no "unchanged" claim to make.
+        mgr = _manager(tmp_path)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle())
+        assert ok and "content unchanged" not in msg
+
+    def test_record_carries_a_secret_digest_not_the_secret(self, tmp_path):
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        rec = sorted((tmp_path / "data" / "deployments" / "snmp-exporter").glob("*.json"))[-1]
+        body = rec.read_text()
+        assert "snmp-monitor" not in body  # no secret VALUE anywhere
+        doc = json.loads(body)
+        assert doc["secrets_checksum"].startswith("sha256:")
+        # a digest of a short secret is a confirmation oracle: 0640, not 0644
+        assert stat.S_IMODE(rec.stat().st_mode) == 0o640
+
+    def test_extra_recorded_template_configs_do_not_count_as_a_change(self, tmp_path):
+        # config_templates rendered outside the bundle also land in
+        # config_checksums; they are not this bundle's claim to make.
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        rec = sorted((tmp_path / "data" / "deployments" / "snmp-exporter").glob("*.json"))[-1]
+        doc = json.loads(rec.read_text())
+        doc["config_checksums"]["config/rendered-by-a-template.yml"] = "sha256:" + "0" * 64
+        rec.write_text(json.dumps(doc))
+        calls = self._calls(mgr)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -733,3 +864,109 @@ class TestBundleAdoptionWholeHome:
         ok, _ = mgr.deploy_bundle(_pg_bundle())
         assert not ok
         assert staged.exists()
+
+
+class TestDeployJournalWiring:
+    """design/60 §5 D6 + §11.2 — the deploy path writes the journal and counts.
+
+    The journal is what makes a half-applied deploy legible instead of inferred,
+    and the durable breaker store is the only thing that can count consecutive
+    failures ACROSS runs. Both are wired here, at the one choke point every
+    bundle apply goes through.
+    """
+
+    def _journal(self, tmp_path):
+        from syrviscore import deploy_journal
+
+        return deploy_journal.read_journal(tmp_path)
+
+    def test_a_successful_deploy_journals_started_not_healthy(self, tmp_path):
+        # 0.5.16 does NO health gating, so nothing was verified — recording
+        # `healthy` would be the silent upgrade design/60 §3.4 forbids.
+        from syrviscore import deploy_journal
+
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+        record = self._journal(tmp_path)
+        assert record["services"]["snmp-exporter"]["state"] == deploy_journal.STATE_STARTED
+        assert [e["state"] for e in record["events"]] == ["starting", "started"]
+        # The revision ties the journal row to the immutable history record.
+        assert record["services"]["snmp-exporter"]["revision"] == 1
+        # Every row terminal -> the run closed itself; nothing goes stale later.
+        assert record["finished_at"] is not None
+        assert deploy_journal.journal_status(tmp_path)["state"] == "terminal"
+
+    def test_a_failed_deploy_journals_failed_and_counts_the_breaker(self, tmp_path):
+        from syrviscore import breakers, deploy_journal
+
+        mgr = _manager(tmp_path, start_ok=False)
+        ok, _ = mgr.deploy_bundle(_snmp_bundle())
+        assert not ok
+        record = self._journal(tmp_path)
+        assert record["services"]["snmp-exporter"]["state"] == deploy_journal.STATE_FAILED
+        assert record["services"]["snmp-exporter"]["detail"]
+        # `failed` IS terminal (D6 clause 3) — a finished decision.
+        assert deploy_journal.journal_status(tmp_path)["state"] == "terminal"
+        row = breakers.get_row(
+            tmp_path, breakers.PLANE_DEPLOY, breakers.deploy_context("snmp-exporter")
+        )
+        assert row["consecutive_failures"] == 1
+        assert row["state"] == "closed"  # below the threshold
+
+    def test_three_consecutive_failures_open_the_deploy_breaker(self, tmp_path):
+        from syrviscore import breakers
+
+        mgr = _manager(tmp_path, start_ok=False)
+        for _ in range(breakers.DEFAULT_THRESHOLD):
+            assert not mgr.deploy_bundle(_snmp_bundle())[0]
+        assert breakers.suppressed_by(tmp_path, "snmp-exporter")["state"] == "open"
+        # ...and the journal MIRRORS it (never owns it).
+        mirror = self._journal(tmp_path)["services"]["snmp-exporter"]["breaker"]
+        assert mirror["state"] == "open"
+        assert mirror["consecutive_failures"] == breakers.DEFAULT_THRESHOLD
+
+    def test_a_successful_deploy_closes_the_deploy_breaker(self, tmp_path):
+        from syrviscore import breakers
+
+        failing = _manager(tmp_path, start_ok=False)
+        for _ in range(breakers.DEFAULT_THRESHOLD):
+            assert not failing.deploy_bundle(_snmp_bundle())[0]
+        assert breakers.suppressed_by(tmp_path, "snmp-exporter") is not None
+        healthy = _manager(tmp_path)
+        assert healthy.deploy_bundle(_snmp_bundle(auth_pass="fixed"))[0]
+        assert breakers.suppressed_by(tmp_path, "snmp-exporter") is None
+
+    def test_the_journal_never_fails_a_deploy(self, tmp_path, monkeypatch):
+        # Same discipline as the history records: recording must never be the
+        # thing that breaks a deployment.
+        from syrviscore import deploy_journal
+
+        monkeypatch.setattr(
+            deploy_journal,
+            "_write",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("read-only state dir")),
+        )
+        mgr = _manager(tmp_path)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle())
+        assert ok, msg
+
+    def test_the_breaker_store_never_fails_a_deploy(self, tmp_path, monkeypatch):
+        from syrviscore import breakers
+
+        monkeypatch.setattr(
+            breakers,
+            "record_success",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("boom")),
+        )
+        mgr = _manager(tmp_path)
+        assert mgr.deploy_bundle(_snmp_bundle())[0]
+
+    def test_a_shed_service_journals_skipped(self, tmp_path):
+        from syrviscore import deploy_journal, intent as intent_mod
+
+        intent_mod.shed(tmp_path, "snmp-exporter", reason="md6-resync")
+        mgr = _manager(tmp_path)
+        ok, msg = mgr.deploy_bundle(_snmp_bundle())
+        assert ok and "SHED" in msg
+        record = self._journal(tmp_path)
+        assert record["services"]["snmp-exporter"]["state"] == deploy_journal.STATE_SKIPPED

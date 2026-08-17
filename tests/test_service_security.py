@@ -99,13 +99,22 @@ class TestServiceDefinitionSecurity:
         with pytest.raises(ServiceValidationError):
             ServiceDefinition.from_dict(base_service(cap_add=["SYS_ADMIN"]))
 
-    def test_depends_on_rejected_as_unsupported(self):
-        # Each service is its own compose project, so depends_on can never work;
-        # it must fail loudly at parse time, not silently no-op at run time.
-        with pytest.raises(ServiceValidationError, match="depends_on is not supported"):
-            ServiceDefinition.from_dict(base_service(depends_on=["db"]))
+    def test_depends_on_parses_as_an_orchestration_edge(self):
+        # REWRITTEN for design/63 D1 (0.5.16). This asserted that depends_on was
+        # rejected outright — correct for the COMPOSE meaning (each service is
+        # its own compose project, so compose depends_on can never reference
+        # another Syrvis service) and now superseded for the ORCHESTRATION
+        # meaning: the key is solved by the platform's graph and, critically, is
+        # STILL never emitted into a generated compose file (asserted in
+        # test_depends_on.py::TestNeverEmittedIntoCompose).
+        svc = ServiceDefinition.from_dict(base_service(depends_on=["db"]))
+        assert svc.depends_on == ["db"]
+        assert svc.dependency_edges() == [{"on": "db", "readiness": "started"}]
         # An empty/absent depends_on remains valid.
         assert ServiceDefinition.from_dict(base_service(depends_on=[])).depends_on == []
+        # The trust boundary is unchanged: an unaudited value still fails loudly.
+        with pytest.raises(ServiceValidationError):
+            ServiceDefinition.from_dict(base_service(depends_on=["db:; rm -rf /"]))
 
     @pytest.mark.parametrize("image", ["nginx", "nginx:latest", "nginx:", "has space:1.0"])
     def test_unpinned_or_latest_image_rejected(self, image):

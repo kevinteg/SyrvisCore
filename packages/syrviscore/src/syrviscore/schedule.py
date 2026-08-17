@@ -25,6 +25,7 @@ header are preserved). The cron spec lives only in the YAML — never an MCP arg
 
 import hashlib
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -39,6 +40,14 @@ CRONTAB_PATH = Path("/etc/crontab")
 BLOCK_BEGIN = jobs_d.BLOCK_BEGIN
 BLOCK_END = jobs_d.BLOCK_END
 SOURCE_CONFIG_NAME = "jobs.source"  # <home>/config/jobs.source — ROOT-owned
+
+# DSM's own scheduler, which SyrvisCore neither owns nor manages — it only
+# ENUMERATES it (see :func:`dsm_task_census`). Module-level so tests can repoint
+# it, exactly like privileged_ops.NETWORK_SCRIPTS_DIR.
+SYNOSCHEDTASK_PATH = Path("/usr/syno/bin/synoschedtask")
+DSM_TASK_TIMEOUT_S = 20
+MAX_DSM_TASKS = 200
+MAX_DSM_FIELD_CHARS = 500
 
 
 class ScheduleError(SyrvisError):
@@ -358,6 +367,155 @@ def _conf_integrity(declarations: Dict[str, Any], config_dir: Path) -> Dict[str,
                 entry["error"] = str(e)
         out[name] = entry
     return out
+
+
+# ---------------------------------------------------------------------------
+# DSM Task Scheduler census (READ-ONLY — SyrvisCore never writes DSM's scheduler)
+# ---------------------------------------------------------------------------
+
+# DSM prints one `Key: [value]` pair per line. The key charset is deliberately
+# generous (DSM has used "Task name", "Run command", "Task ID" and friends
+# across versions) and the value is captured whole, brackets excluded.
+_DSM_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 _/()-]{0,40}):\s*\[(.*)\]\s*$")
+
+# key (normalized) -> the canonical name this census reports it under. Anything
+# unmatched is still kept, under its normalized key, in ``fields``.
+_DSM_FIELD_ALIASES = {
+    "id": "id",
+    "task_id": "id",
+    "task": "name",
+    "name": "name",
+    "task_name": "name",
+    "owner": "owner",
+    "user": "owner",
+    "state": "state",
+    "status": "state",
+    "type": "type",
+    "task_type": "type",
+    "command": "command",
+    "run_command": "command",
+    "user_defined_script": "command",
+    "schedule": "schedule",
+}
+
+
+def _normalize_dsm_key(key: str) -> str:
+    return key.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def parse_dsm_tasks(text: str) -> List[Dict[str, Any]]:
+    """Parse ``synoschedtask --get`` output into rows. Pure; never raises.
+
+    DSM's format has drifted across releases and is not documented, so this is
+    deliberately shape-tolerant rather than clever: any ``Key: [value]`` line
+    joins the record being built, a blank line or a REPEATED key starts the next
+    one, and every field survives under its normalized name in ``fields`` even
+    when it has no canonical alias. A format this parser cannot read at all
+    yields zero rows — and the caller reports that as ``parsed: 0`` beside a
+    non-empty output, which is a visible "I could not read it", not a silent
+    "there are no tasks".
+    """
+    tasks: List[Dict[str, Any]] = []
+    current: Dict[str, Any] = {}
+
+    def flush():
+        if current:
+            row: Dict[str, Any] = {"fields": dict(current)}
+            for raw_key, value in current.items():
+                canonical = _DSM_FIELD_ALIASES.get(raw_key)
+                if canonical and canonical not in row:
+                    row[canonical] = value
+            tasks.append(row)
+        current.clear()
+
+    for line in (text or "").splitlines():
+        if not line.strip():
+            flush()
+            continue
+        match = _DSM_FIELD_RE.match(line)
+        if not match:
+            continue
+        key = _normalize_dsm_key(match.group(1))
+        if key in current:  # a repeated key means a new record began
+            flush()
+        current[key] = match.group(2).strip()[:MAX_DSM_FIELD_CHARS]
+        if len(tasks) >= MAX_DSM_TASKS:
+            break
+    flush()
+    return tasks[:MAX_DSM_TASKS]
+
+
+def dsm_task_census(binary: Optional[Path] = None, run=None) -> Dict[str, Any]:
+    """Enumerate DSM's OWN Task Scheduler entries (``synoschedtask --get``).
+
+    The blind spot design/20 was written about and never closed (ops:F20): a DSM
+    task pointing at a path outside SyrvisCore's managed crontab block is
+    invisible to every seam verb — ``schedule list`` reports only the delimited
+    block it owns — so "the repo declares jobs/login-alert, the NAS ran bin/…,
+    and nothing flagged it" had no automated detector. This is the enumerator.
+
+    STRICTLY READ-ONLY, and a census rather than a manager: SyrvisCore does not
+    create, edit or delete DSM tasks, and nothing here ever will. It reports what
+    else is scheduled on this box so a human (or a repo-side check) can compare
+    it against what the repo believes.
+
+    Never raises. Every failure — no DSM, no permission, a timeout, an
+    unparseable format — comes back as data, because "the census could not run"
+    and "there are no other tasks" must never look the same.
+    """
+    path = Path(binary) if binary is not None else SYNOSCHEDTASK_PATH
+    out: Dict[str, Any] = {
+        "tool": str(path),
+        "available": False,
+        "ok": False,
+        "error": None,
+        "count": 0,
+        "tasks": [],
+    }
+    runner = run or _run_synoschedtask
+    if run is None and not path.exists():
+        out["error"] = (
+            "{} is not present — this is not a DSM host (or the tool moved); "
+            "no DSM Task Scheduler census is possible here".format(path)
+        )
+        return out
+    out["available"] = True
+    try:
+        stdout, stderr, rc = runner(path)
+    except Exception as exc:  # noqa: BLE001 - a census never fails its caller
+        out["error"] = "could not run {}: {}".format(path, exc)
+        return out
+    if rc != 0:
+        # The overwhelmingly likely rc!=0 is EACCES: synoschedtask is root-only,
+        # which is why the seam row runs it under sudo. Say so rather than
+        # printing a bare exit code.
+        out["error"] = "{} exited {} ({})".format(
+            path, rc, (stderr or stdout or "no output").strip()[:MAX_DSM_FIELD_CHARS]
+        )
+        return out
+    tasks = parse_dsm_tasks(stdout)
+    out["ok"] = True
+    out["tasks"] = tasks
+    out["count"] = len(tasks)
+    if not tasks and (stdout or "").strip():
+        out["ok"] = False
+        out["error"] = (
+            "{} produced output this parser did not recognise ({} line(s)) — the "
+            "DSM format changed; treat the census as UNKNOWN, not empty".format(
+                path, len((stdout or "").splitlines())
+            )
+        )
+    return out
+
+
+def _run_synoschedtask(path: Path) -> Tuple[str, str, int]:
+    proc = subprocess.run(
+        [str(path), "--get"],
+        capture_output=True,
+        text=True,
+        timeout=DSM_TASK_TIMEOUT_S,
+    )
+    return proc.stdout or "", proc.stderr or "", proc.returncode
 
 
 def _script_integrity(declarations: Dict[str, Any], jobs_dir: Path) -> Dict[str, Any]:

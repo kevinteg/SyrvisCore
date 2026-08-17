@@ -10,8 +10,10 @@
 # published ghcr tags from that era, so a real bump lands past them on the first
 # free tag rather than colliding with an already-pushed image.)
 #
+# 0.5.11 = shed rendering in /api/summary + blocked/shed buckets in the
+# declarations API (2026-08-16 intent/depends_on round).
 # 0.5.10 = the /api/summary endpoint (syrvis-summary/v1). 0.5.7 is already a
 # PUBLISHED ghcr tag (CI publishes on merge-to-main), so shipping new content
 # needs the next free tag — re-pushing 0.5.7 would change what an existing pin
 # resolves to.
-__version__ = "0.5.10"
+__version__ = "0.5.11"

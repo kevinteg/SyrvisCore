@@ -180,6 +180,20 @@ COMMANDS: List[Command] = [
         read_only=True,
         flags=["--json"],
     ),
+    # schedule dsm-tasks enumerates DSM's OWN Task Scheduler (synoschedtask
+    # --get) — the one scheduler surface the seam could not see, so a task
+    # pointing outside SyrvisCore's managed crontab block was undetectable
+    # (design/20's gap #2, ops:F20). READ-ONLY in the strongest sense: the verb
+    # has no write path at all, and SyrvisCore never creates or edits a DSM task.
+    # sudo because synoschedtask is root-only — same shape as schedule_list.
+    Command(
+        "schedule_dsm_tasks",
+        "syrvis",
+        ["schedule", "dsm-tasks"],
+        sudo=True,
+        read_only=True,
+        flags=["--json"],
+    ),
     Command("versions_list", "syrvisctl", ["list"], read_only=True, flags=["--json"]),
     Command("check_updates", "syrvisctl", ["check"], read_only=True, flags=["--json"]),
     Command("info", "syrvisctl", ["info"], read_only=True, flags=["--json"]),

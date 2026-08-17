@@ -18,7 +18,7 @@ import yaml
 if TYPE_CHECKING:
     from .bundle import DeployBundle
 
-from . import deployments
+from . import deploy_journal, deployments
 from . import exposure as exposure_mod
 from . import jobs_d
 from . import lifecycle
@@ -152,6 +152,21 @@ LOCATION_CHANGE_REFUSAL = (
 # load or make every service plan a spurious `replace`. This file is platform
 # STATE; the manifest is declared INTENT. They do not mix.
 HOME_STATE_FILENAME = ".home-state.json"
+
+# design/37 §4: key prefix under which _service_paths carries per-named-volume
+# placement overrides. ':' can never appear in a slot name, so the override
+# namespace and the {service,data,compose,home,config,secrets,logs} slots share
+# one flat Dict[str, Path] without any chance of collision.
+VOLUME_ROOT_PREFIX = "volume:"
+
+# design/37 §4 point 4: the per-VOLUME sibling of LOCATION_CHANGE_REFUSAL. It
+# names the volume, not just the service — without that the operator cannot tell
+# which directory to move (the ergonomics lesson §6 records).
+VOLUME_LOCATION_CHANGE_REFUSAL = (
+    "placement change for volume {!r} on an installed service requires the "
+    "single-volume app-move procedure (wiki/runbooks/app-move.md): stop -> copy "
+    "{} -> clear the old dir -> re-declare -> deploy"
+)
 
 
 def _intent_columns(name, declared, shed_rows) -> Dict[str, Any]:
@@ -288,6 +303,56 @@ class ServiceManager:
             )
         return paths.resolve_volume_root(location) / self._apps_root_name() / "apps" / name
 
+    def _manifest_volume_locations(self, name: str) -> Dict[str, str]:
+        """``volume_locations:`` recorded in the CENTRAL materialized manifest.
+
+        The name-only sibling of :meth:`_manifest_location` (design/37 §4): a
+        lifecycle op holding only a name (remove/purge) still has to be able to
+        find every tree the app owns, or a purge silently orphans a 224 G upload
+        directory on another volume. Absent/unreadable manifest -> ``{}``; the
+        loud failures stay with ``_manifest_location``, which every caller here
+        reaches first.
+        """
+        manifest = self.services_dir / name / "syrvis-service.yaml"
+        try:
+            data = yaml.safe_load(manifest.read_text())
+        except Exception:  # noqa: BLE001 - _manifest_location owns the loud path
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        overrides = data.get("volume_locations")
+        if not isinstance(overrides, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in overrides.items()
+            if isinstance(v, str) and LOCATION_RE.fullmatch(v)
+        }
+
+    def _volume_locations(self, service_or_name) -> Dict[str, str]:
+        """The effective per-volume placement overrides for a service."""
+        if isinstance(service_or_name, ServiceDefinition):
+            return dict(getattr(service_or_name, "volume_locations", {}) or {})
+        if isinstance(service_or_name, dict):
+            raw = service_or_name.get("volume_locations") or {}
+            return dict(raw) if isinstance(raw, dict) else {}
+        return self._manifest_volume_locations(str(service_or_name))
+
+    def _volume_home(self, name: str, location: str) -> Path:
+        """The app-home tree for ONE overridden volume, on its own volume root.
+
+        Same v2 shape as :meth:`_app_home`, rooted on the override
+        (design/37 §4 point 1): ``<override>/<apps-root>/apps/<name>``. The app
+        home itself does NOT move — only this volume's subtree.
+        """
+        validate_service_name(name, "service name")
+        if not LOCATION_RE.fullmatch(location or ""):
+            raise ServiceValidationError(
+                "Service {!r} declares invalid volume_locations root {!r} (must "
+                "match ^/volume<N>$) — refusing to derive paths from it".format(name, location)
+            )
+        return paths.resolve_volume_root(location) / self._apps_root_name() / "apps" / name
+
     def _service_paths(
         self, name: str, service: Optional[ServiceDefinition] = None
     ) -> Dict[str, Path]:
@@ -344,7 +409,39 @@ class ServiceManager:
             _assert_parent(home, home.parent, "apps")
             for slot in ("data", "config", "secrets", "logs"):
                 _assert_parent(result[slot], home, "app home ({})".format(slot))
+
+        # design/37 §4 point 3: each per-volume override is containment-asserted
+        # against ITS OWN <override>/<apps-root>/apps/<name>/data, exactly as the
+        # four standard slots are asserted against the app home — so a symlinked
+        # override home or volume dir can never redirect a bind somewhere else.
+        # Kept in the SAME flat namespace under a reserved ``volume:`` prefix
+        # (which no slot name can collide with), so the mapping stays
+        # ``Dict[str, Path]`` for every existing caller.
+        for volume, location in sorted(
+            self._volume_locations(service if service is not None else name).items()
+        ):
+            override_home = self._volume_home(name, location)
+            _assert_parent(override_home, override_home.parent, "apps")
+            override_data = override_home / "data"
+            _assert_parent(override_data, override_home, "override home (data)")
+            base = os.path.realpath(str(override_data))
+            target = os.path.realpath(str(override_data / volume))
+            if target != base and not target.startswith(base + os.sep):
+                raise ServiceValidationError(
+                    "Service {!r} volume {!r} escapes its override data directory "
+                    "({})".format(name, volume, location)
+                )
+            result[VOLUME_ROOT_PREFIX + volume] = Path(target)
         return result
+
+    @staticmethod
+    def _override_roots(paths_: Dict[str, Path]) -> Dict[str, Path]:
+        """The ``{volume: host dir}`` overrides inside a :meth:`_service_paths` map."""
+        return {
+            key[len(VOLUME_ROOT_PREFIX) :]: value
+            for key, value in paths_.items()
+            if key.startswith(VOLUME_ROOT_PREFIX)
+        }
 
     def _project_name(self, name: str) -> str:
         """Compose project name for a service (isolates each service)."""
@@ -492,6 +589,48 @@ class ServiceManager:
             return None
         if self._dir_nonempty(self._current_data_root(name)):
             return LOCATION_CHANGE_REFUSAL
+        return None
+
+    def _volume_location_change_refusal(
+        self, name: str, incoming: Optional[Dict[str, str]]
+    ) -> Optional[str]:
+        """design/37 §4 point 4 — the per-VOLUME immutability guard.
+
+        Adding, removing, or changing an override while THAT volume's current
+        host dir is non-empty is refused, for the same reason ``location:``
+        changes are: nothing here copies data, so a naive replace would bind an
+        EMPTY directory over a populated tree (a nested bind SHADOWS what is
+        underneath rather than merging it — design/37 §6's subtlety), and the
+        app would come up looking freshly initialised.
+
+        Scoped per volume so the message can name the directory to move; an
+        empty/absent current dir proceeds, which is the single-volume app-move
+        bypass. ``None`` when every override may proceed.
+        """
+        current = self._manifest_volume_locations(name)
+        incoming = dict(incoming or {})
+        if current == incoming:
+            return None
+        try:
+            paths_ = self._service_paths(name)
+        except ServiceValidationError:
+            return None  # the loud failure belongs to the caller's own path
+        home = self._app_home(name)
+        for volume in sorted(set(current) | set(incoming)):
+            if current.get(volume) == incoming.get(volume):
+                continue
+            # Where this volume's bytes live RIGHT NOW: its override root if it
+            # has one, else the app's own data root.
+            if volume in current:
+                where = paths_.get(VOLUME_ROOT_PREFIX + volume)
+            else:
+                where = (
+                    (home / "data" / volume)
+                    if home is not None
+                    else (self.data_dir / name / volume)
+                )
+            if where is not None and self._dir_nonempty(Path(where)):
+                return VOLUME_LOCATION_CHANGE_REFUSAL.format(volume, where)
         return None
 
     def _is_git_url(self, source: str) -> bool:
@@ -1255,6 +1394,19 @@ class ServiceManager:
                 "materialize or start service {!r} (mount the volume, then "
                 "retry)".format(service.location, service.name)
             )
+        # design/37 §4 point 2: the SAME mount check, per override, on every
+        # materialize/start path — not install-time only. An override pointing at
+        # an unmounted volume would otherwise re-materialize an empty tree on the
+        # bare mountpoint and hide under the real volume when it mounts later,
+        # which is the design/26 release-blocker #2 class of data loss, scoped to
+        # one volume. The refusal names the VOLUME, not just the service.
+        for volume, override in sorted((service.volume_locations or {}).items()):
+            if not paths.is_mounted_volume(override):
+                raise ServiceValidationError(
+                    "volume_locations[{!r}] = {!r} is not a mounted volume — "
+                    "refusing to materialize or start service {!r} (mount the "
+                    "volume, then retry)".format(volume, override, service.name)
+                )
 
         # Layout-aware roots (design/26): the definition is authoritative here —
         # the materialized manifest was just written from it on every install/
@@ -1265,12 +1417,16 @@ class ServiceManager:
         is_v2 = "home" in paths_
         data_root_dir = paths_["data"]
         secrets_root_dir = paths_.get("secrets") or data_root_dir
+        #: {volume: override root} actually emitted — the compose header comment.
+        placed: Dict[str, str] = {}
 
         if service.volumes:
             from .service_schema import FILEPLANE_PREFIX, INFRA_HOST_MOUNTS
 
             is_infra = service.tier == "infra"
             data_root = os.path.realpath(str(data_root_dir))
+            # Containment for every override was asserted by _service_paths.
+            override_roots = self._override_roots(paths_)
             processed_volumes = []
             shares_cache = None
             for vol in service.volumes:
@@ -1343,6 +1499,20 @@ class ServiceManager:
                         except OSError:
                             pass
                     processed_volumes.append(f"{slot_dir}:{container_path}:{mode}")
+                    continue
+
+                # PER-VOLUME PLACEMENT (design/37 §4 point 1): an overridden
+                # volume binds from <override>/<apps-root>/apps/<svc>/data/<vol>
+                # instead of from this app's own data root. The app home —
+                # config, secrets, logs, manifest, compose — does not move; only
+                # this one subtree does. Non-overridden volumes fall through to
+                # the resolution below, byte-for-byte unchanged, which is what
+                # makes `volume_locations` absent == today's compose.
+                if host_path in override_roots:
+                    resolved = str(override_roots[host_path])
+                    self._ensure_volume_dir(Path(resolved), mode)
+                    processed_volumes.append(f"{resolved}:{container_path}:{mode}")
+                    placed[host_path] = service.volume_locations[host_path]
                     continue
 
                 resolved = os.path.realpath(os.path.join(data_root, host_path))
@@ -1430,6 +1600,16 @@ class ServiceManager:
 
         compose_path = paths_["compose"]
         with open(compose_path, "w") as f:
+            # design/37 §4 point 5: name every placement override in the
+            # generated file, so drift inspection stays legible — a bind
+            # pointing at /volume6 in a service homed on /volume5 must not read
+            # as a mystery to whoever runs `cat` on this file at 3 a.m.
+            for volume, override in sorted(placed.items()):
+                f.write(
+                    "# volume_locations: {} -> {} (design/37 per-volume placement)\n".format(
+                        volume, override
+                    )
+                )
             yaml.dump(compose, f, default_flow_style=False, sort_keys=False)
 
         return compose_path
@@ -1701,6 +1881,20 @@ class ServiceManager:
         if purge:
             if data_dir.exists():
                 shutil.rmtree(data_dir)
+            # design/37 §4: a per-volume override places part of this app's data
+            # on ANOTHER volume root. Purging only the home would leave that
+            # tree behind, unreferenced and unnamed by anything — the silent
+            # orphan class. Purge is already destructive-token-gated over the
+            # seam, so the honest behaviour is to remove what the app owns.
+            purged_overrides = sorted(self._override_roots(p))
+            for volume in purged_overrides:
+                target = p[VOLUME_ROOT_PREFIX + volume]
+                if target.exists():
+                    shutil.rmtree(target, ignore_errors=True)
+            if purged_overrides:
+                return True, "Service '{}' removed (data purged, incl. {})".format(
+                    name, ", ".join(purged_overrides)
+                )
             return True, f"Service '{name}' removed (data purged)"
 
         return True, f"Service '{name}' removed (data preserved)"
@@ -2943,6 +3137,16 @@ class ServiceManager:
         if not hooks_ok:
             return False, "deploy aborted by pre-deploy hook: " + self._hook_failure_summary(runs)
 
+        # CHANGE DETECTION, computed BEFORE anything is written (the writes below
+        # are what would destroy the evidence). design/60 G1, dep:F10.
+        change = self._bundle_change_set(name, bundle)
+
+        # DEPLOY JOURNAL (design/60 §5 D6, §3.3): written BEFORE the state
+        # transition, so a killed deploy leaves the truth on disk instead of an
+        # optimistic guess. Best-effort throughout — a journal write may never
+        # fail a deployment (the same discipline as the history records).
+        deploy_journal.record_event(self.syrvis_home, name, deploy_journal.STATE_STARTING)
+
         # 1. Declaration + install/manifest. The declaration is written in BOTH
         #    branches OUTSIDE the rollback boundary (a failed deploy keeps the
         #    declared intent for a retry — the install rollback never removes it).
@@ -2971,7 +3175,9 @@ class ServiceManager:
             # (a bundle is, by construction — the check stays explicit, not
             # incidental, mirroring the tier N1 fix) and a mounted volume.
             try:
-                refusal = self._location_change_refusal(name, service.location)
+                refusal = self._location_change_refusal(
+                    name, service.location
+                ) or self._volume_location_change_refusal(name, service.volume_locations)
             except ServiceValidationError as e:
                 return False, str(e)  # tampered installed manifest: fail closed
             if refusal:
@@ -3035,8 +3241,7 @@ class ServiceManager:
             # 3. Secrets → the declared env_file (0600). Reuse write_secret (atomic,
             #    dest derived from env_file). msg carries no secret value.
             if bundle.secrets:
-                env_body = "".join(f"{k}={v}\n" for k, v in bundle.secrets.items())
-                ok, msg = self.write_secret(name, env_body)
+                ok, msg = self.write_secret(name, self._bundle_secret_body(bundle))
                 if not ok:
                     raise RuntimeError(msg)
 
@@ -3072,15 +3277,31 @@ class ServiceManager:
             #     onyx-opensearch repair had to lean on stop+start's side effect of
             #     removing the container).
             #
-            # So: force-recreate whenever the bundle carries secrets, plain restart
-            # for a configs-only update, nothing at all when neither is present
-            # (fresh installs already start with the final content; config-less
-            # services like victoria-metrics need no fix-up).
+            # So: force-recreate whenever the bundle carries CHANGED secrets,
+            # plain restart for a CHANGED configs-only update, nothing at all
+            # when neither is present (fresh installs already start with the
+            # final content; config-less services like victoria-metrics need no
+            # fix-up).
+            #
+            # ...and nothing at all when the bytes are IDENTICAL to what the last
+            # recorded deploy materialized (design/60 G1, dep:F10). Until 0.5.16
+            # this branch was unconditional, so every push of an unmodified stack
+            # force-recreated every secrets-bearing service — the platform
+            # violating the caller's no-op contract from the inside, and the
+            # mechanism that turned the 2026-08-16 second wave into four
+            # containers recreated against an empty env_file. `changed` is
+            # conservative: an unknown prior state (no history, a pre-0.5.16
+            # record, a `remove` record) reads as CHANGED, so the fix-up is
+            # skipped only on positive evidence of equality.
+            #
+            # NB this is a CONTENT no-op, not a container repair: a container
+            # whose baked env drifted from an unchanged env_file is fixed by
+            # `syrvis service recreate`, which is exactly the verb for it.
             if shed:
                 pass  # nothing is running to re-bake; the shed holds it down
-            elif not fresh and bundle.secrets:
+            elif not fresh and bundle.secrets and change["secrets_changed"]:
                 self._recreate_containers(name, compose_path)
-            elif not fresh and bundle.configs:
+            elif not fresh and bundle.configs and change["configs_changed"]:
                 self._compose(name, compose_path, "restart", timeout=90)
             if traefik_changed:
                 self._reload_traefik()
@@ -3092,7 +3313,7 @@ class ServiceManager:
             # Either branch left changed state (fresh keeps the declared intent;
             # update tore the service down on the new manifest) — history must
             # show the failed rollout.
-            deployments.record_service_deploy(
+            record = deployments.record_service_deploy(
                 self.syrvis_home,
                 service,
                 action="deploy",
@@ -3101,11 +3322,25 @@ class ServiceManager:
                 previous_image=old_image,
                 detail=f"deploy of {name!r} failed ({e})",
                 configs=bundle.configs,
+                secrets_checksum=change["secrets_digest"],
+            )
+            # The deploy-plane breaker (design/60 §11.2): consecutive failed
+            # deploys of the SAME service are counted across runs in the durable
+            # store, which is the only place a cross-run count can live. 0.5.16
+            # ships the counting and the record; the SKIP it authorizes — and
+            # the once-per-open page — belong to the run engine (design/63 M2).
+            self._record_deploy_breaker(name, ok=False, reason=str(e))
+            deploy_journal.record_event(
+                self.syrvis_home,
+                name,
+                deploy_journal.STATE_FAILED,
+                revision=(record or {}).get("revision"),
+                detail=str(e),
             )
             return False, f"deploy of {name!r} failed ({e})"
 
         verb = "installed" if fresh else "updated"
-        deployments.record_service_deploy(
+        record = deployments.record_service_deploy(
             self.syrvis_home,
             service,
             action="deploy",
@@ -3113,6 +3348,19 @@ class ServiceManager:
             outcome="success",
             previous_image=old_image,
             configs=bundle.configs,
+            secrets_checksum=change["secrets_digest"],
+        )
+        self._record_deploy_breaker(name, ok=True)
+        # `skipped` for a shed service (deployed, deliberately not started) and
+        # `started` otherwise. NEVER `healthy`: 0.5.16 does no health gating, so
+        # nothing was verified, and design/60 §3.4 as amended is explicit that a
+        # gate which cannot be evaluated is never silently upgraded.
+        deploy_journal.record_event(
+            self.syrvis_home,
+            name,
+            deploy_journal.STATE_SKIPPED if shed else deploy_journal.STATE_STARTED,
+            revision=(record or {}).get("revision"),
+            detail="shed — not started" if shed else "",
         )
         self._fire_hooks(
             service,
@@ -3120,10 +3368,108 @@ class ServiceManager:
             force=True,
             context={"image": service.image, "previous_image": old_image or ""},
         )
+        unchanged = (
+            not fresh
+            and not shed
+            and (bundle.configs or bundle.secrets)
+            and not change["configs_changed"]
+            and not change["secrets_changed"]
+        )
         return True, (
             f"deployed {name} ({verb}; {len(bundle.configs)} config(s), "
-            f"{len(bundle.secrets)} secret(s))" + (" — SHED, not started" if shed else "")
+            f"{len(bundle.secrets)} secret(s))"
+            + (" — SHED, not started" if shed else "")
+            + (" — content unchanged, container not recreated" if unchanged else "")
         )
+
+    def _record_deploy_breaker(self, name: str, ok: bool, reason: str = "") -> None:
+        """Feed one deploy outcome into the durable breaker store. Never raises.
+
+        design/60 §11.2 + §11.1 point 6: the per-service deploy-failure breaker
+        counts CONSECUTIVE failed deploys of the same service **across runs**,
+        which is implementable only because ``breakers.json`` is durable — the
+        journal is per-run and ``bringup.json`` is overwritten, so neither could
+        ever hold this count (``opc:F4``).
+
+        Recording only. The behaviours the count authorizes — skipping a service
+        whose breaker is open, spending zero velocity budget on it, and the
+        exactly-once page on the open transition — need a run engine to sit in,
+        and that is design/63 M2. Counting first is deliberate: when the engine
+        lands, the breakers it consults already carry real history.
+        """
+        try:
+            from . import breakers
+
+            context = breakers.deploy_context(name)
+            if ok:
+                breakers.record_success(self.syrvis_home, breakers.PLANE_DEPLOY, context)
+            else:
+                breakers.record_failure(
+                    self.syrvis_home, breakers.PLANE_DEPLOY, context, reason=reason
+                )
+        except Exception:  # noqa: BLE001 - breaker bookkeeping never fails a deploy
+            pass
+
+    @staticmethod
+    def _bundle_secret_body(bundle: "DeployBundle") -> str:
+        """The env_file body a bundle materializes (the ONE encoding).
+
+        Kept beside :meth:`_bundle_change_set` because the digest that decides
+        "did the secrets change" must be taken over exactly the bytes step 3
+        writes — if the two ever diverge, every deploy looks changed (harmless)
+        or every deploy looks unchanged (a rotated secret silently not taking
+        effect, which is not).
+        """
+        return "".join("{}={}\n".format(k, v) for k, v in bundle.secrets.items())
+
+    def _bundle_change_set(self, name: str, bundle: "DeployBundle") -> Dict[str, Any]:
+        """Does this bundle carry different bytes than the last recorded deploy?
+
+        The platform half of design/60 G1 (dep:F10). Returns
+        ``{configs_changed, secrets_changed, secrets_digest, known, revision}``.
+
+        FAIL-CHANGED is the whole discipline here: every uncertainty — no
+        history, a record from before 0.5.16, a config the record never digested,
+        an unreadable record — resolves to *changed*, so the worst outcome of a
+        gap is today's behavior (an unnecessary recreate), never a rotated secret
+        that silently never reached the container.
+
+        Only the bundle's OWN dests are compared. The recorded map also covers
+        ``config_templates`` rendered outside the bundle; those are not this
+        bundle's claim to make, and treating an extra recorded key as a
+        difference would make every templated service permanently "changed".
+        """
+        secrets_digest = (
+            deployments.content_digest(self._bundle_secret_body(bundle)) if bundle.secrets else None
+        )
+        out: Dict[str, Any] = {
+            "configs_changed": True,
+            "secrets_changed": bool(bundle.secrets),
+            "secrets_digest": secrets_digest,
+            "known": False,
+            "revision": None,
+        }
+        try:
+            last = deployments.last_materialized_digests(self.syrvis_home, name)
+        except Exception:  # noqa: BLE001 - history is advisory; never fail a deploy
+            last = None
+        if not last:
+            return out
+        out["known"] = True
+        out["revision"] = last.get("revision")
+
+        recorded = last.get("config_checksums") or {}
+        out["configs_changed"] = any(
+            recorded.get(cfg.dest) != deployments.content_digest(cfg.content)
+            for cfg in bundle.configs
+        )
+        if bundle.secrets:
+            prior = last.get("secrets_checksum")
+            # None = unknown (pre-0.5.16 record / a non-deploy action): changed.
+            out["secrets_changed"] = prior is None or prior != secrets_digest
+        else:
+            out["secrets_changed"] = False
+        return out
 
     def _place_config(
         self, name: str, relpath: str, content: str, secret: bool = False

@@ -67,6 +67,30 @@ class TestRenderedContract:
         content = _render(tmp_path / "install")
         assert "# boot-hook-contract: {}".format(privileged_ops.BOOT_HOOK_CONTRACT) in content
 
+    def test_reclaim_guard_is_gated_on_synocheckshare(self, tmp_path):
+        # opc:F6 — the agent's heal waits for DSM's share-reconcile pass to
+        # finish; the rootfs belt (the one that runs when the agent is dead)
+        # must not be the one permitted to race the renamer.
+        start_case = _render(tmp_path / "install").split("start)", 1)[1].split("stop)", 1)[0]
+        assert "synocheckshare.service" in start_case
+        assert start_case.index("synocheckshare.service") < start_case.index("syrviscore_[0-9]*")
+
+    def test_the_gate_is_bounded_and_never_blocks_the_boot(self, tmp_path):
+        start_case = _render(tmp_path / "install").split("start)", 1)[1].split("stop)", 1)[0]
+        # a bound, a log-and-proceed on expiry, and a no-systemctl escape
+        assert "SYNOCHECKSHARE_WAIT={}".format(privileged_ops.SYNOCHECKSHARE_WAIT_S) in start_case
+        assert "proceeding with the reclaim guard anyway" in start_case
+        assert "systemctl unavailable" in start_case
+        # ...and no `exit`/`return` anywhere in the gate: it can only fall through
+        gate = start_case.split("SYNOCHECKSHARE_UNIT=", 1)[1].split("RECLAIM GUARD", 1)[0]
+        assert "exit " not in gate and "return" not in gate
+
+    def test_the_gate_does_not_bump_the_contract(self, tmp_path):
+        # A hook without the gate still heals, reclaims and alarms — marking
+        # every deployed hook STALE for a race-narrowing tweak would page for
+        # nothing. Content drift still triggers the ordinary rewrite.
+        assert privileged_ops.BOOT_HOOK_CONTRACT == 3
+
     def test_still_carries_the_design28_stop_case(self, tmp_path):
         # the reclaim work must not have displaced the graceful-shutdown flush
         assert "shutdown --reason reboot" in _render(tmp_path / "install")

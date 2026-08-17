@@ -216,3 +216,51 @@ def test_adopt_writes_declaration_from_live_guest(home):
 def test_adopt_refuses_absent_guest(home):
     with pytest.raises(VmError):
         VmManager(home=home, adapter=FakeAdapter([])).adopt("Ghost VM")
+
+
+# ---------------------------------------------------------------------------
+# The declaration as a BUDGET input (fnd:F37, dep:F24)
+# ---------------------------------------------------------------------------
+def test_description_is_declarable_and_bounded():
+    vm = VmDefinition.from_dict(_decl(description="HAOS — non-critical, interim on VMM"))
+    assert vm.description == "HAOS — non-critical, interim on VMM"
+    assert vm.to_dict()["description"] == vm.description
+    with pytest.raises(VmError):
+        VmDefinition.from_dict(_decl(description="x" * (vms.MAX_DESCRIPTION + 1)))
+    with pytest.raises(VmError):
+        VmDefinition.from_dict(_decl(description="two\nlines"))
+    with pytest.raises(VmError):
+        VmDefinition.from_dict(_decl(description=42))
+
+
+def test_description_defaults_empty_and_is_omitted_from_the_dump():
+    vm = VmDefinition.from_dict(_decl())
+    assert vm.description == "" and "description" not in vm.to_dict()
+
+
+def test_stop_timeout_is_declarable_and_bounded():
+    assert VmDefinition.from_dict(_decl(stop_timeout=120)).stop_timeout == 120
+    assert VmDefinition.from_dict(_decl()).stop_timeout == 90
+    for bad in (4, 601, "90", True):
+        with pytest.raises(VmError):
+            VmDefinition.from_dict(_decl(stop_timeout=bad))
+
+
+def test_list_carries_the_budget_census_fields(home):
+    _write(home, "homeassistant", stop_timeout=120, description="HAOS", critical=True)
+    mgr = VmManager(
+        home=home, adapter=FakeAdapter([{"guest_name": "Home Assistant", "status": "running"}])
+    )
+    (row,) = mgr.list()
+    assert row["stop_timeout"] == 120 and row["description"] == "HAOS"
+    assert row["power"] == "running"
+
+
+def test_the_shutdown_budget_reads_the_declared_window(home):
+    """The declaration → budget path, end to end (no fakes in between)."""
+    from syrviscore import lifecycle
+
+    _write(home, "homeassistant", stop_timeout=150)
+    mgr = VmManager(home=home, adapter=FakeAdapter([]))
+    windows = lifecycle._vm_windows(mgr, [{"name": "homeassistant"}], None)
+    assert windows == {"homeassistant": 150}

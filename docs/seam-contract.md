@@ -49,7 +49,7 @@ drift test asserts it).
 | Class | Examples | Notes |
 |---|---|---|
 | Read (no sudo) | `status`, `verify`, `service list`, `stack hostnames`, `service catalog`, `profile list`, `updates`, `logs`, `history` | All support `--json`; `updates` queries registries (report-only); `history` is always env-redacted |
-| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `apply --dry-run`, `export` | sudo only to read 0600 config; `export` is always redacted over the seam |
+| Read (sudo, side-effect-free) | `reconcile --dry-run`, `schedule list`, `schedule dsm-tasks`, `apply --dry-run`, `export`, `vm list/status` | sudo only to read 0600 config or a root-only DSM tool; `export` is always redacted over the seam. `schedule dsm-tasks` enumerates DSM's OWN Task Scheduler (`synoschedtask --get`) — SyrvisCore never writes it |
 | Converge (sudo) | `start/stop/restart`, `shutdown`, `resume`, `restart --graceful`, `stack apply`, `reconcile`, `reconcile --force`, `stack enable/disable`, `profile enable`, `service declare/adopt/run/add/start/stop/shed/unshed/update/task`, `syrvisctl install`, `backup create` | Idempotent intent/lifecycle. `shutdown`/`resume` are deliberately token-free (reversible; an unattended NUT low-battery hook must be able to fire `shutdown --reason ups`) — and so are `service shed`/`unshed`, so an unattended degradation response can declare a load-shed with no human in the loop |
 | Destructive (sudo + confirmation token via MCP) | `reconcile --prune`, `service remove`, `service set-image`, `service rollback --to N`, `activate`, `rollback`, `uninstall`, `cleanup`, `backup cleanup`, `schedule apply/sync` | Two-call handshake; `service rollback` requires an EXPLICIT `--to` over the seam |
 | Stdin writers (sudo; **script-only, never MCP tools**) | `apply`, `deploy`, `secret set`, `config set` | Payload arrives on stdin ONLY — secrets never touch argv/ps/logs, and never transit an LLM context |
@@ -190,7 +190,8 @@ The argv service name is authoritative — a bundle claiming a different
 
 Verification loop for a deployment: `verify --json` (health + drift),
 `reconcile --dry-run --json` (L2 plan), `apply --dry-run --json` (core plan),
-`schedule list --json` (jobs + per-script sha256), `stack hostnames --json`
+`schedule list --json` (jobs + per-script sha256 + per-conf presence/size),
+`schedule dsm-tasks --json` (what ELSE this box schedules), `stack hostnames --json`
 (external-state diff), `updates --json` (available container-image updates),
 `export --json` (a redacted snapshot of the whole declared instance) — all
 seam-readable without a break-glass login.

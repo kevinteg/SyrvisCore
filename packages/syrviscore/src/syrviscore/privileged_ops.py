@@ -63,6 +63,21 @@ BOOT_ENV_PATH = Path("/usr/local/etc/syrviscore-boot.env")
 # way in and forever after.
 BOOT_HOOK_CONTRACT = 3
 
+# How long the S99 start case waits for DSM's own share-reconcile pass
+# (`synocheckshare.service`) to reach a terminal state before it runs the
+# reclaim guard. ADVISORY: on expiry the guard runs anyway and says so.
+#
+# NOT a BOOT_HOOK_CONTRACT bump, deliberately. The contract integer answers ONE
+# question for `syrvisctl doctor` reading the rootfs alone: "does the deployed
+# hook have a capability an operator would be wrong to assume is present?" A
+# hook without this gate still heals the seam, still reclaims a renamed root and
+# still alarms — it merely may interleave with the renamer in a window design/61
+# has never observed. Bumping would mark every deployed contract-3 hook STALE
+# and page for a race-narrowing tweak. Content drift is still detected the
+# ordinary way (`check_boot_script` compares the whole file against
+# `render_boot_script`), so `verify --fix` rewrites it on the next sweep.
+SYNOCHECKSHARE_WAIT_S = 60
+
 
 # =============================================================================
 # System Operations Interface
@@ -386,6 +401,7 @@ def render_boot_script(install_dir: Path, apps_root_name: Optional[str] = None) 
     startup_script = install_dir / "bin" / "syrvis-startup.sh"
     apps_root = apps_root_name or paths.PACKAGE_NAME
     package_name = paths.PACKAGE_NAME
+    synocheckshare_wait = SYNOCHECKSHARE_WAIT_S
 
     return f"""#!/bin/sh
 # SyrvisCore boot script
@@ -437,7 +453,43 @@ case "$1" in
             fi
         done
 
-        # 2. RECLAIM GUARD — undo a DSM boot-time rename of a platform root.
+        # 2. PHASE GATE — do not race DSM's own share reconcile.
+        #    `synocheckshare` is the pass that RENAMES a colliding volume root;
+        #    the agent's identical heal is gated on it (design/61: "no heal fires
+        #    until the DSM axis reports >= volumes-up AND synocheckshare is
+        #    terminal"), and rc.d timing relative to it is unprobed — so the
+        #    belt that exists for when the agent is dead was the one belt
+        #    permitted to reclaim a directory the renamer was still working on.
+        #
+        #    ADVISORY, never blocking: a boot hook that can stall a boot is a
+        #    worse failure than the race it prevents. No systemctl (a
+        #    non-systemd DSM, a container, a dev box) -> log and proceed; still
+        #    running at the timeout -> log and proceed. The reclaim below is
+        #    itself conservative (it refuses a non-empty target), so proceeding
+        #    is safe; the gate only removes an avoidable interleave.
+        SYNOCHECKSHARE_UNIT="synocheckshare.service"
+        SYNOCHECKSHARE_WAIT={synocheckshare_wait}
+        if command -v systemctl >/dev/null 2>&1; then
+            _waited=0
+            while [ "$_waited" -lt "$SYNOCHECKSHARE_WAIT" ]; do
+                _state=$(systemctl is-active "$SYNOCHECKSHARE_UNIT" 2>/dev/null)
+                case "$_state" in
+                    active|activating|reloading) ;;
+                    *) break ;;
+                esac
+                sleep 2
+                _waited=$((_waited + 2))
+            done
+            if [ "$_waited" -ge "$SYNOCHECKSHARE_WAIT" ]; then
+                boot_log "$SYNOCHECKSHARE_UNIT still active after ${{SYNOCHECKSHARE_WAIT}}s — proceeding with the reclaim guard anyway (gate is advisory)"
+            elif [ "$_waited" -gt 0 ]; then
+                boot_log "waited ${{_waited}}s for $SYNOCHECKSHARE_UNIT to finish before the reclaim guard"
+            fi
+        else
+            boot_log "systemctl unavailable — cannot gate on $SYNOCHECKSHARE_UNIT; proceeding"
+        fi
+
+        # 3. RECLAIM GUARD — undo a DSM boot-time rename of a platform root.
         #    A `<volume>/<name>_<N>` that carries an install manifest (the
         #    SYRVIS_HOME root) or an apps/ tree (an app-home root) is OUR
         #    directory wearing DSM's collision suffix. Rename it back only when
@@ -498,7 +550,7 @@ case "$1" in
             done
         done
 
-        # 3. Trampoline into the volume-resident startup script. The else branch
+        # 4. Trampoline into the volume-resident startup script. The else branch
         #    is load-bearing: without it a missing/unreachable startup script was
         #    a SILENT no-op, which is how the 2026-08-16 decapitation produced
         #    zero pages for ~50 minutes.

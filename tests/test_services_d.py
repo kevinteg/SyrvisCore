@@ -171,6 +171,187 @@ class TestPlan:
         assert (action["kind"], action["destructive"]) == (kind, destructive)
 
 
+def _install(sm, name, **extra):
+    """Install a service AND its declaration from one document.
+
+    Unlike add_image + adopt, this puts the extra keys (``restart``,
+    ``shutdown``, ``enabled``) into the MANIFEST as well, so the planner sees a
+    content match and reaches the status branch under test instead of planning a
+    replace.
+    """
+    from syrviscore.service_schema import ServiceDefinition
+
+    doc = {"name": name, "version": "1.0", "image": "ghcr.io/a/{}:1.0".format(name)}
+    doc.update(extra)
+    ok, msg = sm.install_declaration(ServiceDefinition.from_dict(doc), start=False)
+    assert ok, msg
+
+
+class TestBringUpOrder:
+    """dep:F23 — bring-up follows REVERSED shutdown bands, not the alphabet.
+
+    Interim until design/63 M1's dependency graph; the point is only that a
+    store is no longer started after the consumer that needs it because 'o'
+    sorts before 'r'.
+    """
+
+    def _plan(self, home, monkeypatch, decls, status="stopped", prune=None):
+        sm = _manager(home)
+        for name, extra in decls.items():
+            _install(sm, name, **extra)
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: status)
+        declarations, invalid = services_d.load_declarations(home)
+        return services_d.build_reconcile_plan(sm, declarations, invalid, prune=prune)
+
+    def test_stores_start_before_consumers_despite_the_alphabet(self, home, monkeypatch):
+        # 'onyx-api' sorts before its stores alphabetically — the exact case
+        # dep:F23 names.
+        plan = self._plan(
+            home,
+            monkeypatch,
+            {
+                "onyx-api": {"shutdown": {"priority": 20}},
+                "onyx-relational-db": {"shutdown": {"priority": 90}},
+                "onyx-redis": {"shutdown": {"priority": 70}},
+            },
+        )
+        assert [a["name"] for a in plan["actions"]] == [
+            "onyx-relational-db",
+            "onyx-redis",
+            "onyx-api",
+        ]
+
+    def test_ties_break_by_name_so_the_plan_is_deterministic(self, home, monkeypatch):
+        plan = self._plan(home, monkeypatch, {"b-svc": {}, "a-svc": {}})
+        assert [a["name"] for a in plan["actions"]] == ["a-svc", "b-svc"]
+
+    def test_bring_down_keeps_the_shutdown_direction(self, home, monkeypatch):
+        # Disabled everywhere: consumers stop FIRST, exactly like the walk.
+        plan = self._plan(
+            home,
+            monkeypatch,
+            {
+                "store": {"shutdown": {"priority": 90}, "enabled": False},
+                "consumer": {"shutdown": {"priority": 20}, "enabled": False},
+            },
+            status="running",
+        )
+        assert [(a["kind"], a["name"]) for a in plan["actions"]] == [
+            ("stop", "consumer"),
+            ("stop", "store"),
+        ]
+
+    def test_stops_are_planned_before_starts(self, home, monkeypatch):
+        sm = _manager(home)
+        _install(sm, "going-down", enabled=False, shutdown={"priority": 20})
+        _install(sm, "coming-up", shutdown={"priority": 90})
+        # going-down is alive (so it plans a stop); coming-up is not
+        monkeypatch.setattr(
+            ServiceManager,
+            "_get_service_status",
+            lambda self, n: "running" if n == "going-down" else "stopped",
+        )
+        declarations, invalid = services_d.load_declarations(home)
+        plan = services_d.build_reconcile_plan(sm, declarations, invalid)
+        assert [(a["kind"], a["name"]) for a in plan["actions"]] == [
+            ("stop", "going-down"),
+            ("start", "coming-up"),
+        ]
+
+    def test_an_undeclared_prune_target_takes_the_default_band(self, home, monkeypatch):
+        sm = _manager(home)
+        assert sm.add_image("legacy", "ghcr.io/a/legacy:1.0", start=False)[0]
+        services_d.remove_declaration(home, "legacy")
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "running")
+        plan = services_d.build_reconcile_plan(sm, {}, [], prune="stop")
+        assert [a["name"] for a in plan["actions"]] == ["legacy"]
+
+    def test_blocked_rows_sort_last(self, home, monkeypatch):
+        sm = _manager(home)
+        _install(sm, "blocked-one")
+        _install(sm, "healthy")
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "stopped")
+        monkeypatch.setattr(
+            services_d,
+            "_vanished_home_refusal",
+            lambda mgr, name: "home vanished" if name == "blocked-one" else None,
+        )
+        declarations, invalid = services_d.load_declarations(home)
+        plan = services_d.build_reconcile_plan(sm, declarations, invalid)
+        assert [(a["kind"], a["name"]) for a in plan["actions"]] == [
+            ("start", "healthy"),
+            ("blocked", "blocked-one"),
+        ]
+
+
+class TestTerminalRestartNo:
+    """dep:F11 — a `restart: no` service that exited is terminal, not drift."""
+
+    def _plan(self, home, monkeypatch, status, restart="no"):
+        sm = _manager(home)
+        _install(sm, "oneshot", restart=restart)
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: status)
+        declarations, invalid = services_d.load_declarations(home)
+        return services_d.build_reconcile_plan(sm, declarations, invalid)
+
+    @pytest.mark.parametrize("status", ["exited", "dead"])
+    def test_exited_is_terminal_never_a_start(self, home, monkeypatch, status):
+        plan = self._plan(home, monkeypatch, status)
+        assert plan["actions"] == []
+        assert [r["name"] for r in plan["terminal"]] == ["oneshot"]
+        assert plan["terminal"][0]["status"] == status
+        assert "restart: no" in plan["terminal"][0]["reason"]
+        assert plan["summary"]["terminal"] == 1
+
+    def test_terminal_is_not_drift_and_not_a_failure(self, home, monkeypatch):
+        plan = self._plan(home, monkeypatch, "exited")
+        # not an action -> apply does nothing -> the verdict stays ok
+        assert services_d.apply_reconcile_plan(_manager(home), {}, plan) == []
+        assert services_d.verdict(plan, [])[0] is True
+
+    def test_a_never_started_service_is_still_a_start(self, home, monkeypatch):
+        # "stopped" = no container at all. `restart: no` says nothing about
+        # whether to start it the FIRST time.
+        plan = self._plan(home, monkeypatch, "stopped")
+        assert [a["kind"] for a in plan["actions"]] == ["start"]
+        assert plan["terminal"] == []
+
+    def test_docker_unreachable_is_not_terminal(self, home, monkeypatch):
+        plan = self._plan(home, monkeypatch, "unknown")
+        assert [a["kind"] for a in plan["actions"]] == ["start"]
+        assert plan["terminal"] == []
+
+    def test_the_default_restart_policy_still_gets_repaired(self, home, monkeypatch):
+        plan = self._plan(home, monkeypatch, "exited", restart="unless-stopped")
+        assert [a["kind"] for a in plan["actions"]] == ["start"]
+        assert plan["terminal"] == []
+
+    def test_a_content_change_still_replaces_a_terminal_service(self, home, monkeypatch):
+        sm = _manager(home)
+        _install(sm, "oneshot", restart="no")
+        path = services_d.declaration_path(home, "oneshot")
+        doc = yaml.safe_load(path.read_text())
+        doc["image"] = "ghcr.io/a/oneshot:2.0"  # a real content change
+        path.write_text(yaml.safe_dump(doc))
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "exited")
+        declarations, invalid = services_d.load_declarations(home)
+        plan = services_d.build_reconcile_plan(sm, declarations, invalid)
+        assert [a["kind"] for a in plan["actions"]] == ["replace"]
+        assert plan["terminal"] == []
+
+    def test_shed_outranks_terminal(self, home, monkeypatch):
+        from syrviscore import intent
+
+        plan_home = home
+        sm = _manager(plan_home)
+        _install(sm, "oneshot", restart="no")
+        intent.shed(plan_home, "oneshot", reason="md6-resync")
+        monkeypatch.setattr(ServiceManager, "_get_service_status", lambda self, n: "exited")
+        declarations, invalid = services_d.load_declarations(plan_home)
+        plan = services_d.build_reconcile_plan(sm, declarations, invalid)
+        assert plan["shed"] == ["oneshot"] and plan["terminal"] == []
+
+
 class _FakeManager:
     def __init__(self, fail=()):
         self.calls = []
@@ -189,6 +370,12 @@ class _FakeManager:
     def _location_change_refusal(self, name, new_location):
         self.calls.append(("location_check", name, new_location))
         return None  # no installed data / no location change in these fakes
+
+    def _volume_location_change_refusal(self, name, incoming):
+        # design/37 §4 point 4's per-VOLUME sibling: the replace path consults
+        # both guards, so the fake has to answer both.
+        self.calls.append(("volume_location_check", name, dict(incoming or {})))
+        return None
 
     def start(self, name):
         self.calls.append(("start", name))

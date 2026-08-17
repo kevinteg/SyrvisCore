@@ -860,6 +860,43 @@ def schedule_list(as_json):
     click.echo()
 
 
+@schedule.command("dsm-tasks")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
+@handle_errors
+def schedule_dsm_tasks(as_json):
+    """Census of DSM's OWN Task Scheduler entries (read-only; never modified).
+
+    `schedule list` reports only SyrvisCore's delimited /etc/crontab block, so a
+    DSM task pointing anywhere else has always been invisible over the seam —
+    the gap design/20 was written about. This enumerates them via
+    `synoschedtask --get` so a deployment can compare "what DSM runs" against
+    "what the repo believes". SyrvisCore never creates, edits or deletes a DSM
+    task; the tool is root-only, so run this with sudo (the seam row does).
+    """
+    from syrviscore import schedule as schedule_lib
+
+    result = schedule_lib.dsm_task_census()
+    if as_json:
+        click.echo(jsonlib.dumps(result, indent=2, default=str))
+        return
+    click.echo()
+    if not result["ok"]:
+        click.echo("DSM Task Scheduler census UNAVAILABLE: {}".format(result["error"]))
+        click.echo()
+        return
+    click.echo("DSM Task Scheduler: {} task(s) [{}]".format(result["count"], result["tool"]))
+    for task in result["tasks"]:
+        click.echo(
+            "  {:<4} {:<28} {:<8} {}".format(
+                task.get("id", "?"),
+                (task.get("name") or "(unnamed)")[:28],
+                task.get("state", "?"),
+                task.get("command", ""),
+            )
+        )
+    click.echo()
+
+
 @schedule.command("apply")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors
@@ -2163,17 +2200,28 @@ def _render_reconcile_plan(plan):
     click.echo()
     summary = plan["summary"]
     click.echo(
-        "Declared: {}  in sync: {}  disabled: {}  shed: {}  unmanaged: {}  invalid: {}".format(
+        "Declared: {}  in sync: {}  disabled: {}  shed: {}  terminal: {}  "
+        "blocked: {}  unmanaged: {}  invalid: {}".format(
             summary["declared"],
             len(plan["in_sync"]),
             len(plan["disabled"]),
             len(plan.get("shed") or []),
+            len(plan.get("terminal") or []),
+            len(plan.get("blocked") or []),
             len(plan["unmanaged"]),
             summary["invalid"],
         )
     )
     for name in plan.get("shed") or []:
         click.echo("  [~] shed (declared, deliberately down): {}".format(name))
+    for row in plan.get("terminal") or []:
+        click.echo("  [.] terminal ({}): {} — {}".format(row["status"], row["name"], row["reason"]))
+    for row in plan.get("blocked") or []:
+        click.echo(
+            "  [>] {}: {} — {} withheld until the dependency is back".format(
+                row["reason"], row["name"], row["withheld"]
+            )
+        )
     for row in plan["invalid"]:
         click.echo("  [!] invalid declaration {}: {}".format(row["file"], row["error"]))
     for name in plan["unmanaged"]:
@@ -2812,13 +2860,18 @@ def vm_list(as_json):
         return
     click.echo("Declared VMs:")
     for r in rows:
-        tags = []
+        tags = ["stop {}s".format(r.get("stop_timeout", 90))]
         if r["critical"]:
             tags.append("critical")
         if not r["enabled"]:
             tags.append("disabled")
-        suffix = "  [{}]".format(", ".join(tags)) if tags else ""
-        click.echo("  {:<20} {:<10} {}{}".format(r["name"], r["power"], r["guest_name"], suffix))
+        click.echo(
+            "  {:<20} {:<10} {}  [{}]".format(
+                r["name"], r["power"], r["guest_name"], ", ".join(tags)
+            )
+        )
+        if r.get("description"):
+            click.echo("      {}".format(r["description"]))
 
 
 @vm.command("status")

@@ -41,12 +41,28 @@ def declarations() -> dict:
     pending = {a["name"]: a["kind"] for a in plan["actions"]}
     in_sync = set(plan["in_sync"])
     disabled = set(plan["disabled"])
+    # The two OTHER "nothing owed here" buckets. Without them a declared service
+    # held down on purpose renders `unmanaged` — the one state it definitively
+    # is not. `.get()` so this reader still works against an older platform lib
+    # (the dashboard image bundles its own copy).
+    shed = set(plan.get("shed") or [])
+    terminal = {row["name"] for row in (plan.get("terminal") or [])}
+    # design/63 M1: a hard depends_on edge onto a deliberately-down service.
+    # Declared and wanted, so it is emphatically not `unmanaged` either — and it
+    # carries WHICH dependency, because "blocked" without the name is a riddle.
+    blocked = {row["name"]: row for row in (plan.get("blocked") or [])}
 
     def state_of(name: str) -> str:
         if name in pending:
             return "pending_{}".format(pending[name])
         if name in in_sync:
             return "in_sync"
+        if name in shed:
+            return "shed"
+        if name in terminal:
+            return "terminal"
+        if name in blocked:
+            return "blocked"
         if name in disabled:
             return "disabled"
         return "unmanaged"
@@ -74,6 +90,7 @@ def declarations() -> dict:
                     (definition.container_name if definition else "") or name
                 ),
                 "state": state_of(name),
+                "blocked_by": (blocked.get(name) or {}).get("dependency"),
             }
         )
 

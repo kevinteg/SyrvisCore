@@ -81,6 +81,11 @@ def test_declarations_mixed_states(client, monkeypatch):
         "declared": 3,
         "invalid": 1,
         "shed": 0,
+        # 0.5.16: `restart: no` + exited is its own bucket, not drift.
+        "terminal": 0,
+        # 0.5.16 (design/63 M1): so is a hard depends_on edge onto a service
+        # that is deliberately down.
+        "blocked": 0,
         "total_actions": 2,
         "destructive": 0,
     }
@@ -101,6 +106,9 @@ def test_declarations_mixed_states(client, monkeypatch):
         "exposure": "internal",
         "status": "running",
         "state": "in_sync",
+        # 0.5.16 (design/63 M1): which dependency is holding this service down,
+        # because "blocked" without the name is a riddle. None when nothing is.
+        "blocked_by": None,
     }
 
     # Declared but not installed -> the plan's add action, no container yet.
@@ -138,6 +146,42 @@ def test_declarations_disabled_states(client, monkeypatch):
     assert by_name["off"]["enabled"] is False
     assert by_name["runningoff"]["state"] == "pending_stop"
     assert by_name["runningoff"]["enabled"] is False
+
+
+def test_declarations_terminal_state(client, monkeypatch):
+    """0.5.16: `restart: no` + exited is `terminal`, not `unmanaged`.
+
+    A declared, installed service that is deliberately finished must never
+    render as the one state it definitively is not — which is what it did while
+    the endpoint knew only the actions/in_sync/disabled buckets.
+    """
+    oneshot = ServiceDefinition.from_dict(
+        {
+            "name": "oneshot",
+            "version": "1.0.0",
+            "image": "ghcr.io/example/oneshot:1.0.0",
+            "restart": "no",
+        }
+    )
+    _wire(monkeypatch, {"oneshot": oneshot}, [], {"oneshot": oneshot}, {"oneshot": "exited"})
+
+    body = client.get("/api/declarations").json()
+    (row,) = body["services"]
+    assert row["state"] == "terminal"
+    assert body["summary"]["terminal"] == 1
+
+
+def test_declarations_shed_state(client, monkeypatch):
+    """A shed service is `shed`, not `unmanaged` (same bucket class)."""
+    from syrviscore import intent as intent_mod
+
+    svc = _definition("shedme")
+    monkeypatch.setattr(intent_mod, "shed_map", lambda home: {"shedme": {"reason": "md6-resync"}})
+    _wire(monkeypatch, {"shedme": svc}, [], {"shedme": svc}, {"shedme": "exited"})
+
+    body = client.get("/api/declarations").json()
+    (row,) = body["services"]
+    assert row["state"] == "shed"
 
 
 def test_declarations_library_failure_degrades(client, monkeypatch):

@@ -370,6 +370,93 @@ class TestL2Drift:
         assert by_name["legacy"].critical is False  # unmanaged, watched
         assert "napping" not in by_name  # declared-off: skipped
 
+    def test_terminal_restart_no_service_is_not_drift(self, monkeypatch, tmp_path):
+        """dep:F11 — an exited `restart: no` service is in its declared END
+        state. Fixing the planner but leaving verify shouting MISSING every poll
+        would just move the noise."""
+        import yaml as yamllib
+
+        from syrviscore import services_d
+
+        home = tmp_path / "syrviscore"
+        (home / "config").mkdir(parents=True)
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+        stamp_install_root(home)
+        monkeypatch.setenv("DOMAIN", "example.com")
+        d = services_d.get_declarations_dir(home)
+        d.mkdir(parents=True)
+        for name, restart in (("oneshot", "no"), ("daemon", "unless-stopped")):
+            (d / "{}.yaml".format(name)).write_text(
+                yamllib.safe_dump(
+                    {
+                        "name": name,
+                        "version": "1",
+                        "image": "ghcr.io/a/{}:1.0".format(name),
+                        "restart": restart,
+                    }
+                )
+            )
+
+        import docker as docker_sdk
+
+        class _Exited:
+            def __init__(self, name):
+                self.name = name
+                self.status = "exited"
+                self.attrs = {"Config": {"Image": "ghcr.io/a/{}:1.0".format(name)}}
+
+        class _Client:
+            def __init__(self):
+                self.containers = self
+
+            def get(self, name):
+                return _Exited(name)
+
+        monkeypatch.setattr(docker_sdk, "from_env", lambda: _Client())
+
+        report = verify.gather_l2_drift()
+        by_name = {i.service: i for i in report.items}
+        assert "oneshot" not in by_name  # terminal: not drift
+        assert by_name["daemon"].kind == DriftKind.STOPPED  # still drift
+
+    def test_a_restart_no_service_with_no_container_is_still_drift(self, monkeypatch, tmp_path):
+        # Absence is not the same as "ran and finished".
+        import yaml as yamllib
+
+        from syrviscore import services_d
+
+        home = tmp_path / "syrviscore"
+        (home / "config").mkdir(parents=True)
+        monkeypatch.setenv("SYRVIS_HOME", str(home))
+        stamp_install_root(home)
+        monkeypatch.setenv("DOMAIN", "example.com")
+        d = services_d.get_declarations_dir(home)
+        d.mkdir(parents=True)
+        (d / "oneshot.yaml").write_text(
+            yamllib.safe_dump(
+                {
+                    "name": "oneshot",
+                    "version": "1",
+                    "image": "ghcr.io/a/oneshot:1.0",
+                    "restart": "no",
+                }
+            )
+        )
+
+        import docker as docker_sdk
+
+        class _Boom:
+            def __init__(self):
+                self.containers = self
+
+            def get(self, name):
+                raise RuntimeError("no such container")
+
+        monkeypatch.setattr(docker_sdk, "from_env", lambda: _Boom())
+
+        report = verify.gather_l2_drift()
+        assert [i.service for i in report.items] == ["oneshot"]
+
     def test_remediate_starts_failing_l2_services(self, monkeypatch):
         stub = drift.DriftReport(
             scope="layer2",

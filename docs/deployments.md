@@ -45,6 +45,7 @@ Record shape (`syrvis-deployment/v1`), service tier:
   "env_names": ["API_KEY", "MODE"], "env_file": "secrets.env",
   "volumes": [{"source": "media", "target": "/data", "mode": "rw", "kind": "service-data"}],
   "config_checksums": {"config.yaml": "sha256:…"},
+  "secrets_checksum": "sha256:… (of the env_file BODY; null when none)",
   "source_url": "deploy:cyberquill", "tier_selector": "",
   "rollback_of": null,
   "manifest": { "…full ServiceDefinition snapshot…" }
@@ -55,7 +56,21 @@ Rules that must hold:
 
 - **Best-effort writes.** A history-write failure never fails a deployment
   (same discipline as the services.d dual-write).
-- **Secrets.** `env_names` carries KEYS only; the full `manifest` snapshot
+- **The digests are READ BACK** (0.5.16, design/60 G1). `deploy_bundle`
+  compares an incoming bundle's config/secret digests against the newest record
+  and skips the post-`up` fix-up when they are identical — so a byte-identical
+  redeploy of a secrets-bearing service no longer force-recreates its container.
+  Comparison is FAIL-CHANGED: no history, a pre-0.5.16 record, or a config the
+  record never digested all read as *changed*, so the fix-up is skipped only on
+  positive evidence of equality. Only the bundle's own dests are compared
+  (`config_templates` rendered outside the bundle also appear in the map and are
+  not the bundle's claim to make). The newest record wins even when it FAILED —
+  a failed update tears the container down, so the retry's `up -d` creates it
+  fresh from the files on disk. A container whose baked env drifted from an
+  unchanged env_file is repaired by `syrvis service recreate`, not by a deploy.
+- **Secrets.** `secrets_checksum` is a digest, never a value — and a record
+  carrying one is written `0640` like an inline-env record, because a digest of
+  a SHORT low-entropy secret is a confirmation oracle. `env_names` carries KEYS only; the full `manifest` snapshot
   (needed for rollback fidelity) keeps inline `KEY=VALUE`, so a record carrying
   inline env is written `0640` + the services.d shared group (mirroring
   installed manifests). `syrvis history` ALWAYS masks inline env values; only
@@ -155,7 +170,13 @@ shutdown:
 `stop_timeout` is also emitted into the generated compose as
 `stop_grace_period`, so the grace holds on EVERY stop path including the
 daemon's own stop at OS poweroff. VMs declare `stop_timeout` (5..600, default
-90) in `vms.d/` — the ACPI wait deadline.
+90) in `vms.d/` — the ACPI wait deadline, and the VM tier's declared claim on
+the shutdown budget (`vm list --json` reports it beside `description`).
+
+**Band 90+ is the STORE band** and it is load-bearing since 0.5.16: the
+shutdown budget is reserved for those services first and every earlier band
+clamps into what remains (see §5). Declaring a database at band 50 does not
+just reorder it — it removes its grace from the reserve.
 
 ## 5. Instance runstate + graceful shutdown (the UPS path)
 
@@ -177,9 +198,22 @@ syrvis status          # shows an INSTANCE HALTED banner; --json carries runstat
 4. Stop L2 services in ascending `shutdown.priority` bands: per service,
    `pre-stop` hooks (container quiesce, then host) → `compose stop -t <grace>`
    → `post-stop`. Declared intent (`enabled` flags) is NEVER touched.
-5. Wait for VMs to power off (deadline-clamped); force-off stragglers.
+5. Wait for VMs to power off — each guest's deadline is anchored at the ACPI
+   ISSUE (step 3), not at the start of this wait, so the drain that overlapped
+   the container stops is not double-counted; force-off stragglers.
 6. Stop core per-container with Traefik LAST (ingress dies last).
 7. Refresh runstate with the outcome. Exit 0 = clean, 2 = degraded (listed).
+
+**Reserve-first clamping (0.5.16).** Step 4 no longer spends the budget
+front-to-back. The reserve — stores' declared grace (band ≥ 90) + the remaining
+VM drain + 30 s for the core phase — is held back BEFORE the first consumer
+stops, and consumers clamp into the remainder with a 5 s floor. Stores are never
+clamped. Measured from the live home-tech declarations that reserve is
+120 + 90 + 30 = 240 s, which does not fit a 150 s rc.d wrapper; the point of the
+inversion is that what does not fit is a consumer's grace, not a database's
+(design/63 D6). `--json` reports the whole arithmetic under `budget`. This is
+INTERIM: design/63 M1 replaces the sequential band walk with reverse-topological
+waves and parallel stops within a wave.
 
 **Halted gate:** `services_d.apply_reconcile_plan` and
 `DockerManager.start_core_services/restart_core_services` refuse while halted
@@ -250,3 +284,76 @@ container must not stop the instance it runs inside).
 | `data/state/runstate.json` | halted record (absent == active) | root 0644, names only |
 | `hooks.d/<workload>/<event>`, `hooks.d/instance/<event>` | host hooks | root 0755, trust-checked |
 | `logs/hooks.log` | structured hook outcomes | appended, 16 KiB/run cap |
+
+## 8. The deploy journal and the breaker store (0.5.16)
+
+Two new state files, both under `data/state/` beside `runstate.json` and
+`intent.json` — one state directory, one convention.
+
+### `data/state/deploy-journal.json` (design/60 §5 D6)
+
+What a deploy run was doing when it stopped. The contract is normative in four
+clauses, and every consumer calls `deploy_journal.journal_status()` so the rules
+are implemented exactly once:
+
+1. **Canonical absolute path**, derived from `SYRVIS_HOME`.
+2. **`schema_version` is a required integer.** A reader that does not recognise
+   it reports `unknown` and **refuses to act on the file** — and an unparseable
+   journal is `unknown` too, never `absent`. *Absent* means "no run";
+   *unparseable* means "I cannot tell". Different verdicts.
+3. **Terminal set:** `started`, `healthy`, `skipped`, `failed` — **`failed` IS
+   terminal** (a failed service is a finished decision, not an in-flight one).
+   Non-terminal: `pending`, `stopping`, `starting`. A journal is *in-flight* iff
+   any row is non-terminal AND `finished_at` is absent.
+4. **Staleness:** an in-flight journal older than 60 minutes, or whose recorded
+   pid is not live, is `stale`. **A stale journal never blocks unattended work**
+   — it annotates. Only a *fresh* in-flight journal whose service set
+   *intersects* the caller's refuses (with `--force` parity). A stale journal
+   holding unattended bring-up hostage forever is the failure this forbids.
+
+> **`started` vs `healthy`.** A service with no declared `healthcheck:` records
+> `started` — never `healthy` (design/60 §3.4 as amended: a gate that cannot be
+> evaluated is never silently upgraded). At 0.5.16 there is no health gating at
+> all, so every success records `started`: nothing was verified.
+
+Writes are best-effort and atomic; a journal failure may never fail a deploy.
+The consuming verbs D6 enumerates (`syrvis doctor`, `syrvis up`'s gate,
+`status --json`, hostd `/status`, `deploy-stack --resume`) arrive with
+design/63 M2.
+
+### `data/state/breakers.json` (design/60 §11.1 point 6)
+
+The **ONE** durable breaker store: an array of rows keyed `{plane, context}`,
+`plane ∈ {deploy, recovery, agent}`, and the only place a breaker count lives.
+Everything else that shows a breaker — the journal's per-service `breaker:`
+block, `bringup.json`'s `breakers[]`, hostd `/status.breakers`, the console
+panel — is a **MIRROR rendered from it**. The journal is per-run and
+`bringup.json` is overwritten by the next engine run, so neither can hold a
+cross-run count, which is exactly what a breaker is.
+
+- **The curve** — exponential with ±20% jitter, capped at **10 minutes**.
+- **Half-open, ruled once** (`opc:F5`): an attempt issued *before*
+  `next_probe_at` skips; the **first** attempt *after* it IS the probe. Its
+  failure re-opens silently (no second page); its success closes and resets.
+- **Cross-plane suppression** — an open breaker in ANY plane suppresses
+  *automatic* work in EVERY plane for that service. Automatic ≠ operator.
+- **A close closes all** — one reset path, so `deploy-stack --only X` and
+  `syrvis up` stop being half-measures that each leave the other's armed.
+- **`by` is a FIELD, not a doctrine** (`opc:F2`) — intent cannot be inferred
+  from the verb, because hostd, the S99 fallback and `restore` all fire the same
+  `syrvis up`. Only `by ∈ {cli:*, seam:*, mcp:*}` **closes**; `hostd`/`s99`/
+  `cron` (and an absent value) **inherit** and honor. Fails safe toward *not*
+  resetting.
+- **The open transition pages exactly once** — `record_failure` returns that
+  transition as a boolean, so a caller that pages on it cannot double-page.
+
+`deploy_bundle` counts deploy-plane outcomes into the store, and `--force` on
+`guard_bulk_degraded` closes the breakers in its scope (recorded in
+`logs/overrides.log`). **0.5.16 RECORDS only** — the engine that acts on an open
+breaker (skipping the service, spending zero velocity budget, the timed
+half-open probe) is design/63 M2.
+
+| Path | Purpose | Perms |
+|---|---|---|
+| `data/state/deploy-journal.json` | in-flight deploy run (absent == no run) | root 0644, names only |
+| `data/state/breakers.json` | the durable breaker store (absent == all closed) | root 0644, names only |

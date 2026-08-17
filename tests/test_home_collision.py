@@ -382,3 +382,68 @@ class TestDoctorCli:
 
         assert "RENAMED BY DSM" in result.output
         assert str(volumes / "volume6" / "syrviscore_1") in result.output
+
+
+class TestInstallCollisionPrecheck:
+    """fnd:F16 — `syrvisctl install` refuses while a renamed root exists.
+
+    `syrvisctl doctor` has printed "Do NOT run 'syrvisctl install'" since 0.5.9.
+    Prose is not a guard, and the state that produces the rename is exactly the
+    state that produces the reflex to reinstall — which would scaffold a fresh
+    empty root beside the real one and start databases against empty homes.
+    """
+
+    def _invoke(self, args):
+        from syrviscore_manager.cli import cli as manager_cli
+
+        return CliRunner().invoke(manager_cli, args)
+
+    def test_a_renamed_install_root_refuses_the_install(self, volumes):
+        _renamed_root(volumes, 4)
+        result = self._invoke(["install", "--wheel", "/dev/null", "-y"])
+        assert result.exit_code != 0
+        assert "REFUSING to install" in result.output
+        assert str(volumes / "volume4" / "syrviscore_1") in result.output
+        # the refusal carries the exact mv and names the runbook
+        assert (
+            "sudo mv {} {}".format(
+                volumes / "volume4" / "syrviscore_1", volumes / "volume4" / "syrviscore"
+            )
+            in result.output
+        )
+        assert "seam-dead-after-boot.md" in result.output
+
+    def test_a_renamed_apps_root_refuses_too(self, volumes, monkeypatch):
+        cache = volumes / "boot.env"
+        cache.write_text("SYRVIS_APPS_ROOT_NAME='syrviscore-apps'\n")
+        monkeypatch.setattr(manager_doctor, "BOOT_ENV_PATH", cache)
+        (volumes / "volume6" / "syrviscore-apps_1" / "apps").mkdir(parents=True)
+        result = self._invoke(["install", "--wheel", "/dev/null", "-y"])
+        assert result.exit_code != 0 and "REFUSING to install" in result.output
+        assert "app-home root" in result.output
+
+    def test_a_clean_layout_passes_the_precheck(self, volumes):
+        from syrviscore_manager import cli as manager_cli_mod
+
+        _platform_root(volumes, 4)
+        manager_cli_mod.assert_no_collision_artifacts()  # no raise
+
+    def test_the_override_is_explicit_and_announced(self, volumes, monkeypatch):
+        _renamed_root(volumes, 4)
+        # stop right after the precheck: the point is only that it got past it
+        monkeypatch.setattr(
+            "syrviscore_manager.paths.resolve_home",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("past the precheck")),
+        )
+        result = self._invoke(["install", "--ignore-collision", "-y"])
+        assert "--ignore-collision" in result.output
+        assert "REFUSING to install" not in result.output
+
+    def test_the_error_is_typed_for_json_consumers(self, volumes):
+        from syrviscore_manager import cli as manager_cli_mod
+        from syrviscore_manager.errors import CollisionError
+
+        _renamed_root(volumes, 5)
+        with pytest.raises(CollisionError) as exc:
+            manager_cli_mod.assert_no_collision_artifacts()
+        assert exc.value.to_dict()["error"] == "volume_root_collision"

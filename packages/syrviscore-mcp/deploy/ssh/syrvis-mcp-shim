@@ -96,6 +96,9 @@ fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "list" ] && [ "${6}" = "--json" ]; then
   set -f; exec "$@"
 fi
+if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "dsm-tasks" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
 if [ $# -eq 3 ] && [ "${1}" = "/var/packages/syrviscore/target/venv/bin/syrvisctl" ] && [ "${2}" = "list" ] && [ "${3}" = "--json" ]; then
   set -f; exec "$@"
 fi

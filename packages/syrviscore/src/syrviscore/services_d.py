@@ -28,7 +28,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from .errors import SyrvisError
-from .service_schema import ServiceDefinition, load_service_definition
+from .service_schema import (
+    DEPENDS_ON_HARD,
+    DEPENDS_ON_HEALTHY,
+    ServiceDefinition,
+    load_service_definition,
+)
 
 DECLARATIONS_DIRNAME = "services.d"
 
@@ -38,6 +43,19 @@ PRUNE_POLICIES = ("stop", "remove", "purge")
 # declaration against the installed manifest, so an orchestration-only change
 # (e.g. flipping `critical`) can never trigger a container replace.
 _ORCHESTRATION_KEYS = ("enabled", "critical")
+
+# Docker statuses that mean "this container RAN and is now finished" — as
+# opposed to `stopped` (no container exists at all: it was never started, or was
+# removed) and `unknown` (the daemon could not be reached). Only these two can
+# make a `restart: no` service TERMINAL; the other two are absence and
+# ignorance, and neither is evidence of a completed run.
+_TERMINAL_STATUSES = frozenset({"exited", "dead"})
+
+# Action kinds, grouped by which direction they move a workload. Bring-up is
+# ordered by REVERSED stop band (stores first); bring-down by the stop band
+# itself, exactly like the shutdown walk.
+_STOP_KINDS = frozenset({"stop", "prune_stop", "prune_remove", "prune_purge"})
+_BRINGUP_KINDS = frozenset({"add", "replace", "start"})
 
 
 class ReconcileError(SyrvisError):
@@ -94,7 +112,13 @@ def load_declarations(
             valid[service.name] = service
         except Exception as exc:  # noqa: BLE001 - isolation: report, keep loading
             invalid.append({"file": path.name, "error": str(exc)})
-    return valid, invalid
+
+    # WHOLE-SET stage (design/63 D2): the per-file loop above cannot see cycles,
+    # unknown targets, or whether an edge's target declares a healthcheck. A
+    # service that fails it is moved out of `valid` — the DECLARING file goes
+    # invalid, every other service proceeds, and isolation is preserved exactly
+    # as it is for a syntax error.
+    return _apply_graph_validation(valid, invalid)
 
 
 def _drop_unknown_top_level_keys(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -108,6 +132,255 @@ def _drop_unknown_top_level_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     from .service_schema import ALLOWED_TOP_LEVEL_KEYS
 
     return {k: v for k, v in data.items() if k in ALLOWED_TOP_LEVEL_KEYS}
+
+
+# ---------------------------------------------------------------------------
+# The dependency graph (design/63 D1/D2/D3 — M1: validation + ordering only)
+# ---------------------------------------------------------------------------
+
+
+def build_dependency_graph(
+    declarations: Dict[str, ServiceDefinition],
+    invalid: Optional[List[Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Solve the declared ``depends_on`` edges over the whole declaration set.
+
+    Returns::
+
+        {"edges":   {name: [{"on": target, "readiness": class}, ...]},
+         "errors":  {name: "why this declaration is invalid"},
+         "depths":  {name: int},     # longest path from a root; the wave number
+         "waves":   [[name, ...]],   # depths inverted, each wave sorted by name
+         "blocked": {name: {"reason": ..., "dependency": ..., "why": ...}}}
+
+    The FOUR whole-set rules, which is the whole of M1's D2 (there is no
+    readiness gating here — that is M2; M1 is pure ordering):
+
+    * **cycle** -> error on every member, naming the cycle. Detected over ALL
+      edges, soft included: a soft edge still orders, so a soft cycle would
+      still make the topological order undefined.
+    * **unknown target** -> error on the DEPENDANT. Unknown is not the same as
+      deliberately down: nothing on this instance declares that name at all,
+      so the edge is a typo or a stale copy, and a typo must fail loudly.
+    * **``healthy`` onto a target with no ``healthcheck:``** -> error on the
+      dependant (design/63 D1, ``dep:F9``). Never a silent downgrade to
+      ``started``: the declaration asks for a check the platform cannot make,
+      and 2026-08-16 was a lesson in checks that report what they cannot see.
+    * **hard edge onto a DISABLED / SHED / INVALID-FILE target** -> NOT an
+      error. It is a plan-time ``blocked`` classification (design/63 D2 as
+      AMENDED 2026-08-16, ``opc:F10``). As first written this was a validation
+      error, which meant a partial load-shed made a RUNNING service's
+      declaration invalid — reclassifying it ``unmanaged`` on the operator's own
+      deliberate action, during exactly the window when the fleet is already
+      degraded. And because "which services are disabled" flips under any apply
+      (``opc:F9``), validity itself would have been non-deterministic.
+
+    Shed is NOT read here — this function is pure over the declaration set, and
+    the shed overlay is instance STATE. ``build_reconcile_plan`` folds it in
+    (:func:`dependency_blocked`), which is also the only place it matters.
+    """
+    invalid_names = {
+        row["file"][:-5] for row in (invalid or []) if row.get("file", "").endswith(".yaml")
+    }
+
+    edges: Dict[str, List[Dict[str, str]]] = {}
+    errors: Dict[str, str] = {}
+    for name, service in declarations.items():
+        try:
+            edges[name] = service.dependency_edges()
+        except Exception as exc:  # noqa: BLE001 - a bad entry invalidates its own file
+            edges[name] = []
+            errors[name] = str(exc)
+
+    # Rule 1+2: unknown targets and healthy-without-healthcheck.
+    for name, service_edges in edges.items():
+        for edge in service_edges:
+            target, readiness = edge["on"], edge["readiness"]
+            if target not in declarations:
+                if target in invalid_names:
+                    continue  # rule 4: blocked at plan time, not invalid here
+                errors.setdefault(
+                    name,
+                    "depends_on target {!r} is not declared on this instance — an "
+                    "edge onto a service that does not exist is a typo, not a "
+                    "deliberately-down dependency".format(target),
+                )
+                continue
+            if readiness == DEPENDS_ON_HEALTHY and not declarations[target].healthcheck:
+                errors.setdefault(
+                    name,
+                    "depends_on {!r} asks for a 'healthy' gate but {!r} declares no "
+                    "healthcheck: — declare one on the target, or write "
+                    "'{}' honestly (design/63 D1: never a silent downgrade)".format(
+                        "{}:{}".format(target, readiness), target, target
+                    ),
+                )
+
+    # Rule 3: cycles. Every member of a cycle is invalid, and the message names
+    # the ring — "a cycle exists" is useless at 3 a.m.
+    for cycle in _find_cycles(edges):
+        ring = " -> ".join(cycle + [cycle[0]])
+        for member in cycle:
+            errors.setdefault(member, "depends_on forms a dependency cycle: {}".format(ring))
+
+    depths = _dependency_depths(edges, skip=set(errors))
+    waves: List[List[str]] = []
+    for name, depth in sorted(depths.items()):
+        while len(waves) <= depth:
+            waves.append([])
+        waves[depth].append(name)
+
+    return {
+        "edges": edges,
+        "errors": errors,
+        "depths": depths,
+        "waves": waves,
+        "invalid_targets": sorted(invalid_names),
+    }
+
+
+def _find_cycles(edges: Dict[str, List[Dict[str, str]]]) -> List[List[str]]:
+    """Every simple cycle's member list, via iterative DFS (3.8-clean, no recursion).
+
+    Recursion would be fine at 39 services, but the declaration set is
+    attacker-adjacent input and a stack overflow is not an error message.
+    """
+    color: Dict[str, int] = {}  # 0 unvisited, 1 on-stack, 2 done
+    cycles: List[List[str]] = []
+    seen_rings = set()
+    for root in sorted(edges):
+        if color.get(root, 0) != 0:
+            continue
+        stack: List[Tuple[str, int]] = [(root, 0)]
+        path: List[str] = [root]
+        color[root] = 1
+        while stack:
+            node, index = stack[-1]
+            targets = [e["on"] for e in edges.get(node, [])]
+            if index >= len(targets):
+                color[node] = 2
+                stack.pop()
+                path.pop()
+                continue
+            stack[-1] = (node, index + 1)
+            nxt = targets[index]
+            if nxt not in edges:
+                continue  # unknown target: rule 2 already reported it
+            state = color.get(nxt, 0)
+            if state == 1:
+                ring = path[path.index(nxt) :]
+                key = frozenset(ring)
+                if key not in seen_rings:
+                    seen_rings.add(key)
+                    cycles.append(ring)
+            elif state == 0:
+                color[nxt] = 1
+                path.append(nxt)
+                stack.append((nxt, 0))
+    return cycles
+
+
+def _dependency_depths(
+    edges: Dict[str, List[Dict[str, str]]], skip: Optional[set] = None
+) -> Dict[str, int]:
+    """Longest-path depth per node: 0 for a service that depends on nothing.
+
+    This IS the topological order — if A depends on B then depth(A) > depth(B),
+    so ascending depth is a valid topological sort AND a wave number (design/63
+    D3's per-wave narration, M2). Nodes named in ``skip`` (already invalid) and
+    unknown targets contribute nothing. Cycle members are bounded by the
+    iteration cap rather than looping forever; they are invalid anyway.
+    """
+    skip = skip or set()
+    depths = {name: 0 for name in edges}
+    nodes = sorted(edges)
+    for _ in range(len(nodes) + 1):
+        changed = False
+        for name in nodes:
+            if name in skip:
+                continue
+            best = 0
+            for edge in edges[name]:
+                target = edge["on"]
+                if target in edges and target != name:
+                    best = max(best, depths[target] + 1)
+            if best != depths[name]:
+                depths[name] = best
+                changed = True
+        if not changed:
+            break
+    return depths
+
+
+def dependency_blocked(
+    declarations: Dict[str, ServiceDefinition],
+    graph: Dict[str, Any],
+    shed: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Services whose bring-up is blocked by a HARD edge (design/63 D2 amended).
+
+    ``{name: {"reason": "<D3 vocabulary>", "dependency": target, "why": kind}}``
+    where ``kind`` is one of ``disabled`` / ``shed`` / ``invalid`` / ``blocked``
+    (the last being the transitive case — a hard edge onto an already-blocked
+    service).
+
+    SOFT edges never block: "order when cheap, never gate" is the whole
+    distinction the readiness class exists to carry. Propagation is transitive
+    over hard edges only, and iterates to a fixed point so a chain of any depth
+    resolves in one pass of the planner.
+    """
+    shed = shed or {}
+    invalid_targets = set(graph.get("invalid_targets") or ())
+    blocked: Dict[str, Dict[str, str]] = {}
+    for _ in range(len(declarations) + 1):
+        changed = False
+        for name, service_edges in sorted(graph["edges"].items()):
+            if name in blocked or name in graph["errors"]:
+                continue
+            for edge in service_edges:
+                if edge["readiness"] not in DEPENDS_ON_HARD:
+                    continue
+                target = edge["on"]
+                if target in shed:
+                    why = "shed"
+                elif target in invalid_targets:
+                    why = "invalid"
+                elif target in declarations and not declarations[target].enabled:
+                    why = "disabled"
+                elif target in blocked:
+                    why = "blocked"
+                else:
+                    continue
+                blocked[name] = {
+                    "dependency": target,
+                    "why": why,
+                    "reason": "blocked (dependency {} {})".format(target, why),
+                }
+                changed = True
+                break
+        if not changed:
+            break
+    return blocked
+
+
+def _apply_graph_validation(
+    valid: Dict[str, ServiceDefinition], invalid: List[Dict[str, str]]
+) -> Tuple[Dict[str, ServiceDefinition], List[Dict[str, str]]]:
+    """Move graph-invalid declarations from ``valid`` into ``invalid``.
+
+    Cheap short-circuit: an instance with no edges anywhere (every instance
+    before design/63 M3's first subtree commit) pays one ``any()`` and returns
+    the inputs untouched.
+    """
+    if not any(service.depends_on for service in valid.values()):
+        return valid, invalid
+    graph = build_dependency_graph(valid, invalid)
+    if not graph["errors"]:
+        return valid, invalid
+    for name, error in sorted(graph["errors"].items()):
+        valid.pop(name, None)
+        invalid.append({"file": "{}.yaml".format(name), "error": error})
+    return valid, invalid
 
 
 def _content_dict(service: ServiceDefinition) -> Dict[str, Any]:
@@ -187,6 +460,82 @@ def _vanished_home_refusal(manager, name: str) -> Optional[str]:
     )
 
 
+def _stop_band(service: Optional[ServiceDefinition]) -> int:
+    """The declared ``shutdown.priority`` (lower stops FIRST; default 50).
+
+    Read from the DECLARATION, not the installed manifest: the plan is about
+    where a service is going, and an undeclared (prune) target has no intent to
+    read, so it takes the default band.
+    """
+    from .lifecycle import DEFAULT_STOP_PRIORITY
+
+    if service is None:
+        return DEFAULT_STOP_PRIORITY
+    try:
+        return int((service.shutdown or {}).get("priority", DEFAULT_STOP_PRIORITY))
+    except Exception:  # noqa: BLE001 - a malformed band never breaks planning
+        return DEFAULT_STOP_PRIORITY
+
+
+def _action_order_key(
+    action: Dict[str, Any],
+    declarations: Dict[str, ServiceDefinition],
+    depths: Optional[Dict[str, int]] = None,
+):
+    """Sort key: TOPOLOGICAL order first, the shutdown band as the tie-breaker.
+
+    Two orderings, folded into one key so there is exactly one sort (design/63
+    D7: every ordering feature lands in this planner or it does not land).
+
+    * **``depths``** (design/63 M1) is the dependency graph's longest-path depth
+      — the topological primary. Bring-up ascends it (a store at depth 0 is
+      issued before the consumer at depth 1); bring-down descends it (dependents
+      drain before the store they use), which is the same reverse-topological
+      walk D6 gives the shutdown side.
+    * **the band** (dep:F23, SC-B's interim ordering) is what breaks ties WITHIN
+      a wave. It is no longer the primary ordering, and it is not retired
+      either: design/63 D6 keeps bands meaningful for the standalones and as the
+      migration bridge, so an instance with NO edges sorts byte-identically to
+      the band-only behaviour it had before the graph existed.
+
+    Where an edge and a band disagree the EDGE wins (design/63 D6) — that is
+    exactly what putting depth ahead of band in the tuple means.
+
+    The interim ordering's own rationale, retained because it is still the
+    no-edge behaviour:
+
+    design/25 D6 claimed resume "starts in declaration order"; the reality was
+    alphabetical-by-filename, because declarations load by sorted glob and the
+    planner iterated them as-is. Alphabetical starts docker-health-exporter
+    before docker-socket-proxy (its only data path), immich-legal-server before
+    immich-legal-redis, and onyx-api before all three of its stores — and 15 of
+    39 services have no healthcheck, so "healthchecks absorb that" was a hope,
+    not a mechanism.
+
+    The band order is the REVERSE of the shutdown walk, which is the one
+    ordering the declarations already carry: stores stop last, so they start
+    first. Bands are coarse and cross-subtree and cannot express "onyx-api needs
+    onyx-relational-db *healthy*" — which is why they are now the tie-breaker
+    and the graph is the primary. An UNDECLARED prune target has no depth (it
+    has no declaration to read edges from) and takes depth 0.
+
+    Bring-down actions keep the shutdown walk's own direction (consumers first),
+    so a plan that both stops and starts things never tears a store out from
+    under a consumer that is still running.
+    """
+    name = action["name"]
+    band = _stop_band(declarations.get(name))
+    depth = (depths or {}).get(name, 0)
+    kind = action["kind"]
+    if kind in _STOP_KINDS:
+        return (0, -depth, band, name)
+    if kind in _BRINGUP_KINDS:
+        return (1, depth, -band, name)
+    # `blocked` (and anything unknown): a report row, not an instruction — it
+    # fails wherever it sits, so it sits last.
+    return (2, 0, 0, name)
+
+
 def build_reconcile_plan(
     manager,
     declarations: Dict[str, ServiceDefinition],
@@ -213,6 +562,29 @@ def build_reconcile_plan(
     decision is the point, not an accident. Shed names are reported in their
     own ``shed`` bucket rather than folded into ``disabled``, so "14 shed" and
     "14 turned off in git" never read the same.
+
+    FOUR non-action buckets, all meaning "nothing owed here" for different
+    reasons: ``disabled`` (git says off), ``shed`` (intent.json says off),
+    ``terminal`` (a ``restart: no`` service that exited — see the branch below)
+    and ``blocked`` (a hard ``depends_on`` edge onto a service that is
+    deliberately down). None of them is drift.
+
+    **``blocked`` the BUCKET vs ``blocked`` the ACTION.** They are different
+    things and the distinction is load-bearing:
+
+    * ``plan["blocked"]`` (design/63 D2 as amended, ``opc:F10``) — a hard edge
+      whose target is disabled/shed/invalid. It is *not* an action and *not* a
+      failure: a deliberate 14-service load-shed must not fail every hourly
+      reconcile for every dependant in those subtrees. Exactly the reasoning
+      that made ``terminal`` a bucket.
+    * ``actions[kind == "blocked"]`` — the 0.9.x vanished-app-home SAFETY
+      REFUSAL (:func:`_vanished_home_refusal`). That one IS a failed action, on
+      purpose: converging it would destroy data.
+
+    ACTION ORDER is topological over the dependency graph, with the shutdown
+    band as the tie-breaker inside each wave (:func:`_action_order_key`,
+    design/63 M1/D6). An instance with no declared edges orders exactly as the
+    band-only interim did.
     """
     if prune is not None and prune not in PRUNE_POLICIES:
         raise ReconcileError(
@@ -225,8 +597,17 @@ def build_reconcile_plan(
     in_sync: List[str] = []
     disabled_ok: List[str] = []
     shed_ok: List[str] = []
+    terminal: List[Dict[str, Any]] = []
     shed = intent_mod.shed_map(manager.syrvis_home)
     installed = _installed_manifests(manager)
+
+    # design/63 M1: the graph is solved ONCE per plan — it supplies the
+    # topological order AND the blocked set. `load_declarations` already moved
+    # every graph-INVALID declaration into `invalid`, so anything reaching here
+    # is a valid edge set; re-solving is cheap and keeps the planner usable with
+    # a hand-built declaration dict (tests, the dashboard, a future engine).
+    graph = build_dependency_graph(declarations, invalid)
+    blocked_by_dependency = dependency_blocked(declarations, graph, shed)
 
     # FLOOR CHECK (incident 2026-08-16). "Zero declarations" is a legitimate
     # state only for an instance with nothing installed. Zero declarations while
@@ -322,6 +703,30 @@ def build_reconcile_plan(
                     "destructive": False,  # data dir is preserved across replace
                 }
             )
+        elif declared.restart == "no" and status in _TERMINAL_STATUSES:
+            # TERMINAL, not drifted (dep:F11, design/60 §3.5 terminal precedence).
+            # `restart: no` is how design/63 D4's hard-edge subtrees say "when
+            # this exits, it STAYS exited" — Docker honors that, and until now
+            # the reconciler did not: it emitted a `start` for anything not
+            # running, so every hourly reconcile, every boot converge and every
+            # resume resurrected a service the operator had deliberately let
+            # stop. The only remaining way to hold it down was `enabled: false`,
+            # the field a GitOps apply overwrites. Three mechanisms, one field,
+            # cancelling out.
+            #
+            # It is a BUCKET, not an action: an action would report as a failure
+            # on every pass (a `blocked` row grades ok=False), and a terminal
+            # service is not a failure — it is a service with nothing owed. To
+            # bring one back an operator starts it explicitly, or changes the
+            # declaration (which plans a `replace`).
+            terminal.append(
+                {
+                    "name": name,
+                    "status": status,
+                    "critical": declared.critical,
+                    "reason": "restart: no — exited on purpose, reconcile will not restart it",
+                }
+            )
         elif status != "running" or manager.is_service_flapping(declared.container_name or name):
             # FLAPPING counts as not-in-sync (incident 2026-08-16). A
             # `restart: unless-stopped` container reads "running" between
@@ -360,6 +765,37 @@ def build_reconcile_plan(
                 }
             )
 
+    # DEPENDENCY BLOCK (design/63 D2 amended): a bring-up whose hard edge points
+    # at a deliberately-down service is withdrawn from the plan and reported in
+    # its own bucket. Deliberately a POST-pass over the assembled actions rather
+    # than a branch inside the classifier: only bring-up is suppressed, so a
+    # blocked service that is RUNNING still reports `in_sync`, a blocked service
+    # that is declared off still reports `disabled`, and a `stop` is never
+    # withheld (stopping is always safe, and a service on its way down does not
+    # need its dependency).
+    blocked: List[Dict[str, Any]] = []
+    if blocked_by_dependency:
+        kept: List[Dict[str, Any]] = []
+        for action in actions:
+            row = blocked_by_dependency.get(action["name"])
+            if row is None or action["kind"] not in _BRINGUP_KINDS:
+                kept.append(action)
+                continue
+            blocked.append(
+                {
+                    "name": action["name"],
+                    "critical": action.get("critical", False),
+                    "withheld": action["kind"],
+                    "dependency": row["dependency"],
+                    "why": row["why"],
+                    "reason": row["reason"],
+                }
+            )
+        actions = kept
+
+    depths = graph["depths"]
+    actions.sort(key=lambda a: _action_order_key(a, declarations, depths))
+
     return {
         "changed": bool(actions),
         "actions": actions,
@@ -367,12 +803,22 @@ def build_reconcile_plan(
         "disabled": disabled_ok,
         # Declared, but held down by intent.json — NOT drift, NOT "disabled".
         "shed": sorted(shed_ok),
+        # Declared `restart: no` and exited — nothing owed, nothing to restart.
+        "terminal": sorted(terminal, key=lambda r: r["name"]),
+        # Declared and wanted, but a hard depends_on edge points at a service
+        # that is deliberately down. NOT an action and NOT a failure.
+        "blocked": sorted(blocked, key=lambda r: r["name"]),
         "unmanaged": unmanaged,
         "invalid": invalid,
+        # The solved graph, for callers that order their own work (the bring-up
+        # engine at M2, the dashboard, home-tech's dependency lint).
+        "graph": {"depths": depths, "waves": graph["waves"], "edges": graph["edges"]},
         "summary": {
             "declared": len(declarations),
             "invalid": len(invalid),
             "shed": len(shed_ok),
+            "terminal": len(terminal),
+            "blocked": len(blocked),
             "total_actions": len(actions),
             "destructive": sum(1 for a in actions if a["destructive"]),
         },
@@ -424,7 +870,11 @@ def apply_reconcile_plan(
                 # refusal surfaces as this service's own failed action; the
                 # rest of the plan proceeds (failure isolation). The bypass is
                 # the app-move procedure (empty/absent old data root proceeds).
-                refusal = manager._location_change_refusal(name, declarations[name].location)
+                refusal = manager._location_change_refusal(
+                    name, declarations[name].location
+                ) or manager._volume_location_change_refusal(
+                    name, declarations[name].volume_locations
+                )
                 if refusal:
                     ok, msg = False, refusal
                 else:

@@ -40,8 +40,10 @@ VM_ALLOWED_KEYS = frozenset(
         "passthrough",  # advisory; attach is a manual powered-off op
         "health",
         "stop_timeout",  # seconds to wait for a graceful ACPI shutdown (5..600)
+        "description",  # one line, for the operator reading `vm list`
     }
 )
+MAX_DESCRIPTION = 200
 VM_TYPES = frozenset({"vm"})
 VM_BACKENDS = frozenset({"synology-vmm"})
 
@@ -90,7 +92,11 @@ class VmDefinition:
     autostart: bool = True
     # How long the instance-shutdown path waits for the guest OS to power off
     # after the graceful ACPI shutdown before force-off (guests vary widely).
+    # This is the VM tier's DECLARED claim on the shutdown budget: without it
+    # the guest was an undeclared tenant of a 90s slice that the reserve-first
+    # clamping arithmetic then had to guess at (fnd:F37, dep:F24).
     stop_timeout: int = 90
+    description: str = ""
     source: Dict[str, Any] = field(default_factory=dict)
     resources: Dict[str, Any] = field(default_factory=dict)
     passthrough: Dict[str, Any] = field(default_factory=dict)
@@ -153,6 +159,14 @@ class VmDefinition:
         ):
             raise VmError("stop_timeout must be an integer 5..600 (seconds)")
 
+        description = data.get("description", "")
+        if not isinstance(description, str) or len(description) > MAX_DESCRIPTION:
+            raise VmError(
+                "description must be a string of at most {} chars".format(MAX_DESCRIPTION)
+            )
+        if not _no_control(description):
+            raise VmError("description must not contain control characters")
+
         return cls(
             name=name,
             guest_name=guest_name,
@@ -162,6 +176,7 @@ class VmDefinition:
             critical=bool(data.get("critical", False)),
             autostart=bool(data.get("autostart", True)),
             stop_timeout=stop_timeout,
+            description=description.strip(),
             source=dict(data.get("source", {})),
             resources=dict(data.get("resources", {})),
             passthrough=dict(data.get("passthrough", {})),
@@ -180,6 +195,8 @@ class VmDefinition:
         }
         if self.stop_timeout != 90:
             out["stop_timeout"] = self.stop_timeout
+        if self.description:
+            out["description"] = self.description
         for m in ("source", "resources", "passthrough", "health"):
             val = getattr(self, m)
             if val:
@@ -330,7 +347,13 @@ class VmManager:
             return {}
 
     def list(self) -> List[Dict[str, Any]]:
-        """Declared VMs joined with their live power state (best-effort)."""
+        """Declared VMs joined with their live power state (best-effort).
+
+        Carries ``stop_timeout`` and ``description`` because this is also the
+        VM-tier CENSUS: the shutdown budget's VM reserve is exactly the declared
+        stop_timeout of the guests reported running here, and a reader asking
+        "what else claims the shutdown window" must not have to open vms.d.
+        """
         live = self._live_by_name()
         out: List[Dict[str, Any]] = []
         for vm in self.declarations():
@@ -343,6 +366,8 @@ class VmManager:
                     "enabled": vm.enabled,
                     "critical": vm.critical,
                     "autostart": vm.autostart,
+                    "stop_timeout": vm.stop_timeout,
+                    "description": vm.description,
                     "power": power,
                 }
             )

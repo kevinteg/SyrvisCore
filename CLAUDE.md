@@ -231,6 +231,25 @@ syrvis service task --task T -- <name>  # Run a DECLARED one-shot task (tasks: b
 syrvis service set-image --image REF -- <name>  # Re-pin an L2 image + redeploy (declarative update)
 syrvis service catalog        # Bundled catalog templates (--json)
 
+# Scheduled jobs (OPTIONAL; dormant with an empty config/jobs.d)
+syrvis schedule list          # Declared jobs + the managed crontab block (--json;
+                              # plan.scripts = per-job presence+sha256,
+                              # plan.confs = per-job conf presence+size)
+syrvis schedule dsm-tasks     # READ-ONLY census of DSM's OWN Task Scheduler
+                              # (synoschedtask --get). SyrvisCore never creates,
+                              # edits or deletes a DSM task — this only reports
+                              # what ELSE is scheduled on the box, the gap that
+                              # let a task point outside the managed block
+                              # unnoticed (design/20).
+sudo syrvis schedule apply    # LOCAL reconcile of the managed crontab block
+sudo syrvis schedule sync     # Clone the root-configured source, install + apply
+
+# VMs (config/vms.d/*.yaml; Synology VMM — adopt-first, never created here)
+syrvis vm list                # Declared VMs + live power (--json); carries
+                              # stop_timeout (the VM tier's declared claim on the
+                              # shutdown budget) and description
+syrvis vm status|start|stop|restart NAME
+
 # Updates + export
 syrvis updates [--json --refresh]  # Available container-image updates (report-only)
 syrvis export [--json --reveal-secrets]  # Snapshot instance as syrvis-instance/v1 (redacted)
@@ -286,6 +305,69 @@ MCP tooling. The repo stays generic: no domain, IPs, accounts, or service catalo
 - Service version: `packages/syrviscore/src/syrviscore/__version__.py`
 - Follow semantic versioning (MAJOR.MINOR.PATCH)
 - Manager and service can have different versions
+- **Bump the LAST SEGMENT only** (0.5.15 → 0.5.16), features included.
+
+#### 0.5.16 — deploy & lifecycle robustness (in progress)
+
+The 2026-08-16 review's deploy-plane package. Landed here (SC-B):
+
+- `deploy_bundle` reads the recorded config/secret digests back, so a
+  byte-identical redeploy no longer force-recreates a secrets-bearing service
+  (design/60 G1); records gain `secrets_checksum`
+- reserve-first shutdown clamping — stores keep their declared grace, consumers
+  clamp into what remains (design/63 D6); VM windows anchored at the ACPI issue
+- reconcile orders bring-up by REVERSED shutdown bands (interim until 63 M1's
+  `depends_on` graph) and classes an exited `restart: no` service TERMINAL
+- `vms.d` gains `description`; `vm list` reports the budget census fields
+- seam read verb `schedule dsm-tasks` (DSM Task Scheduler census)
+- `syrvisctl install` refuses while a collision-renamed platform root exists
+- S99 reclaim guard gains a bounded, advisory `synocheckshare` phase gate
+  (deliberately NOT a `BOOT_HOOK_CONTRACT` bump — see the constant's comment)
+
+Landed here (SC-C) — design/63 M1, design/60 §5 D6 + §11.1 point 6, design/37
+Phase 1:
+
+- **`depends_on` is a real key again** — orchestration-level, string entries
+  `name[:readiness]` with `started` (default) / `healthy` / `soft`
+  (design/63 D1). The old blanket reject was right for the COMPOSE meaning and
+  is superseded for the ORCHESTRATION one; nothing is ever emitted into a
+  generated compose file. Parse splits the suffix BEFORE name validation, and an
+  unknown suffix is an error, never a default.
+- **Whole-set graph validation** (`services_d.build_dependency_graph`, run from
+  `load_declarations`): cycles, unknown targets and `healthy`-onto-a-checkless-
+  target invalidate the DECLARING file only — isolation preserved. A hard edge
+  onto a **disabled/shed/invalid** target is a plan-time `blocked` BUCKET, never
+  a validation error and never a failure (design/63 D2 as amended, `opc:F10`):
+  a deliberate load-shed must not fail every hourly reconcile for its dependants.
+- **Topological plan ordering**, with SC-B's reversed-band key as the
+  TIE-BREAKER inside each wave (one sort, not two). No edges anywhere ⇒
+  byte-identical to the band-only interim.
+- **`data/state/deploy-journal.json`** — `schema_version` (unknown ⇒ report
+  `unknown` and refuse to act; unparseable is NOT absent), terminal set
+  `{started, healthy, skipped, failed}` with `failed` TERMINAL, the 60-minute
+  staleness rule (a stale journal annotates, never refuses), atomic writes,
+  bounded events. Written from the deploy path; `started` never `healthy`,
+  because 0.5.16 verifies no health.
+- **`data/state/breakers.json`** — the ONE durable breaker store, one row per
+  `{plane, context}`, the only place a count lives. Cross-plane suppression, "a
+  close closes all", the capped jittered curve, and `by` as a FIELD (only
+  `cli:`/`seam:`/`mcp:` close; `hostd`/`s99`/`cron` inherit). The journal's
+  `breaker:` blocks are MIRRORS. `--force` on `guard_bulk_degraded` closes the
+  breakers in its scope. **Recording only** — the skip/page/half-open ENGINE is
+  design/63 M2.
+- **`volume_locations:`** (design/37 §4 Phase 1, unblocking design/64 D7) —
+  per-named-volume placement: `{<declared volume>: /volume<N>}` binds that
+  volume from `<override>/<apps-root>/apps/<name>/data/<vol>` while the app home
+  stays put. Per-override mount check on every materialize/start path,
+  containment assertions, a per-VOLUME change refusal, purge coverage, and the
+  override named in a comment in the generated compose.
+
+Do not tag until the release chain runs: the **dashboard image must be rebuilt +
+repinned** with the edge schema before any `depends_on` lands in a real
+`services.d` (design/63 D2's reader-enumeration gate — a stale dashboard would
+mark every edge-carrying declaration invalid and reclassify its running service
+`unmanaged`). And while any edge exists, **platform rollback below 0.5.16 is
+forbidden.**
 
 ### Build System
 
