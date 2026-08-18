@@ -122,13 +122,74 @@ def _image_tag(image: str) -> str:
     return "0.0.0"
 
 
-# design/22: the source_url prefixes that mark a service as OPERATOR-AUTHORED —
-# the trust anchor for `tier: infra`. install_declaration (a config/services.d
-# declaration) sets "services.d:<name>"; deploy_bundle (a bundle streamed over the
-# operator seam) sets "deploy:<name>". A git-repo (add), image-first (run), or
-# catalog service sets a git URL / image ref / "catalog:<name>" and therefore can
-# NEVER escalate itself to the infra tier. This tuple is the whole authorship gate.
+# design/22 + design/66: these prefixes are a PROVENANCE LABEL, not the trust
+# anchor for `tier: infra` — and could never have been one for a streamed bundle.
+# install_declaration sets "services.d:<name>"; deploy_bundle stamps
+# "deploy:<name>" onto a bundle whose schema cannot carry a source_url
+# (bundle.ALLOWED_BUNDLE_KEYS; source_url is not in
+# service_schema.ALLOWED_TOP_LEVEL_KEYS and from_dict never sets it), so the tier
+# gate below used to test the very string deploy_bundle had just written — a
+# tautology that could not fail. This tuple continues to govern `location:`,
+# where the transport genuinely is the intended anchor. The `tier: infra` grant
+# now lives in DEFAULT_INFRA_SERVICES / <home>/config/infra-allow — a root-held
+# list a repo push and a streamed bundle both cannot reach.
 OPERATOR_AUTHORED_PREFIXES = ("services.d:", "deploy:")
+
+# design/66: the infra tier's grant is a NAME on a root-held list BOUND to the
+# image repository that name may run. `tier: infra` is the only thing between a
+# declaration and INFRA_HOST_MOUNTS = {/proc, /sys, /, /var/run/docker.sock}
+# (service_schema:219, admitted by _validate_volume:997) — and a docker.sock bind
+# is host root regardless of the forced `:ro`, because a Unix socket is
+# bidirectional. The image repository is part of the grant, not decoration: a
+# one-line `image:` swap on an already-infra service (node-exporter holds
+# /:/rootfs:ro) reads every secret on the box, so an actor with the seam must not
+# change WHAT CODE a privileged service runs without a root grant change.
+#
+# The DEFAULT lives in platform CODE — the one place a repo push cannot reach —
+# so widening/rebinding takes a SyrvisCore release. A site override is the
+# root-owned <home>/config/infra-allow, one "<name> [<image-repo>]" per line.
+# Absent file => DEFAULT_INFRA_SERVICES. Present file => EXACTLY its contents
+# (empty => no service may hold the infra tier).
+DEFAULT_INFRA_SERVICES = {
+    "node-exporter": "prom/node-exporter",
+    "docker-socket-proxy": "tecnativa/docker-socket-proxy",
+}
+INFRA_ALLOW_FILENAME = "infra-allow"
+
+
+def _infra_image_repo(image):
+    """`<repository>` for an image ref, Docker-Hub-normalized to the same string
+    home-tech's `verify-all intent.infra-tier` compares against — one value on
+    both sides, never two normalizations. Registry+tag+digest stripped; a
+    docker.io/ (or index.docker.io/) prefix removed."""
+    repo = (image or "").strip()
+    if not repo:
+        return ""
+    repo = repo.split("@", 1)[0]
+    if repo.rfind(":") > repo.rfind("/"):
+        repo = repo[: repo.rfind(":")]
+    for prefix in ("docker.io/", "index.docker.io/"):
+        if repo.startswith(prefix):
+            repo = repo[len(prefix) :]
+    return repo
+
+
+def load_infra_allow(syrvis_home):
+    """{service name: bound image repo (or "")} permitted to declare tier: infra."""
+    path = Path(syrvis_home) / "config" / INFRA_ALLOW_FILENAME
+    try:
+        text = path.read_text()
+    except (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError):
+        return dict(DEFAULT_INFRA_SERVICES)
+    out = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        out[parts[0]] = parts[1] if len(parts) > 1 else ""
+    return out
+
 
 # design/26: refusal message for a location change on an installed service that
 # still has data — a naive replace would materialize an EMPTY home at the new
@@ -509,6 +570,39 @@ class ServiceManager:
     def _home_state_path(self, name: str) -> Path:
         """Sidecar state file for ``name`` (see :data:`HOME_STATE_FILENAME`)."""
         return self.services_dir / name / HOME_STATE_FILENAME
+
+    def _infra_privilege_refusal(self, service):
+        """None if `service`'s tier: infra is permitted HERE, else the refusal.
+
+        design/66 — the load-bearing gate, checked at EVERY admission point that
+        can materialize a container (install → reconcile/apply-instance,
+        deploy_bundle, set_image). The grant is a root-held NAME list bound to the
+        image repository. It never consults source_url — a value this module writes.
+        """
+        if (getattr(service, "tier", "") or "") != "infra":
+            return None
+        allow = load_infra_allow(self.syrvis_home)
+        if service.name not in allow:
+            return (
+                "tier: infra is not permitted for {!r}: it is named neither in "
+                "<home>/config/{} nor in the platform default ({}). The infra tier is the "
+                "only one that may hold /, /proc, /sys or the docker socket, so the grant is "
+                "a root-held list — not a property of how the declaration arrived".format(
+                    service.name, INFRA_ALLOW_FILENAME, ", ".join(sorted(DEFAULT_INFRA_SERVICES))
+                )
+            )
+        want_repo = allow.get(service.name) or ""
+        got_repo = _infra_image_repo(getattr(service, "image", "") or "")
+        if want_repo and got_repo != want_repo:
+            return (
+                "tier: infra service {!r} is bound to image repository {!r}, but the "
+                "declaration runs {!r} — a privileged service may not change what code it "
+                "runs without a root grant change. A digest pin proves the bytes are "
+                "immutable, never WHOSE bytes.".format(
+                    service.name, want_repo, got_repo or (getattr(service, "image", "") or "")
+                )
+            )
+        return None
 
     def read_home_state(self, name: str) -> Dict[str, Any]:
         """The recorded app-home state for ``name`` ({} when absent/unreadable).
@@ -1025,29 +1119,18 @@ class ServiceManager:
         leaves partial state that blocks a retry. Shared by the git-sourced
         :meth:`add` and the image-first :meth:`add_image`.
         """
-        # AUTHORSHIP GATE for the privileged infra tier (design/22). tier: infra
-        # unlocks host mounts, so it is permitted ONLY for an operator-authored
-        # declaration — services.d / a deploy bundle, which set source_url to
-        # "services.d:<name>". A git-repo (add), image-first (run), or catalog
-        # service — whose source_url is the git URL / image ref / "catalog:…" —
-        # can NEVER escalate itself to infra. This is the load-bearing rule of
-        # design/22 (the schema accepts tier:infra when parsing so a materialized
-        # manifest round-trips; the trust decision is made HERE, by authorship).
-        if service.tier == "infra" and not str(service.source_url or "").startswith(
-            OPERATOR_AUTHORED_PREFIXES
-        ):
-            # keep_data=True (adversarial review, release-blocker #1): the data
-            # dir is only created further down, so anything at the data
-            # location right now PREDATES this call (e.g. data kept by a
-            # remove-without-purge, or a pre-populated v2 home) — a gate
-            # refusal must never destroy it. Same rule as the location gate.
+        # PRIVILEGE GATE (design/66). This was an AUTHORSHIP gate keyed on
+        # source_url — a string THIS module writes, so for a streamed bundle it
+        # tested its own handwriting and could not fail. The grant is now a
+        # root-held NAME list bound to the image repository (DEFAULT_INFRA_SERVICES
+        # / <home>/config/infra-allow), which no repo push and no bundle can reach.
+        # keep_data=True for the same reason the old gate used it: the data dir is
+        # created further down, so anything there PREDATES this call and a refusal
+        # must never destroy it. Same rule as the location gate below.
+        _infra_refusal = self._infra_privilege_refusal(service)
+        if _infra_refusal:
             self._rollback_add(service.name, keep_data=True)
-            return False, (
-                "tier: infra is only permitted for an operator-authored "
-                "services.d/deploy declaration — not a {} service".format(
-                    service.source_url or "repo/image"
-                )
-            )
+            return False, _infra_refusal
         # AUTHORSHIP GATE for the app location (design/26) — the same trust
         # anchor as tier: a location redirects the app's home onto a host
         # volume, so it is permitted ONLY for an operator-authored services.d/
@@ -2012,6 +2095,12 @@ class ServiceManager:
                     # The app's declared home volume ("" = legacy layout on
                     # SYRVIS_HOME). Flows to the seam/dashboard rows as-is.
                     "location": service.location or "",
+                    # design/66: trust tier + image reference, so a deployment
+                    # repo's `nas.privilege` check can grade a LIVE tier: infra
+                    # service against config/service-policy.yaml over the seam
+                    # (older releases omit these; the check degrades to UNKNOWN).
+                    "tier": service.tier or "",
+                    "image": service.image or "",
                     # Crash-loop visibility (incident 2026-08-16). `status` stays
                     # Docker's raw string — a restarting container legitimately
                     # reads "running", and every existing consumer depends on
@@ -2534,6 +2623,26 @@ class ServiceManager:
             updated = ServiceDefinition.from_dict(data)
         except ServiceValidationError as e:
             return False, f"invalid image {new_image!r}: {e}"
+
+        # design/66 (V5-2): a re-pin may never DROP a digest. data["image"] =
+        # new_image replaces the WHOLE reference, so `service set-image grafana
+        # grafana/grafana:13.1.3` silently converted a tag@sha256:... pin into a
+        # mutable tag, server-side, discarding the one supply-chain control the
+        # deployment repo's CI enforces on every declaration. The seam accepts
+        # this verb on argv shape alone, so the refusal must live here.
+        if "@sha256:" in (current.image or "") and "@sha256:" not in new_image:
+            return False, (
+                f"refusing to unpin '{name}': it is digest-pinned and {new_image!r} is not. "
+                f"Read the digest with `docker buildx imagetools inspect {new_image}` and "
+                f"re-pin as `{new_image}@sha256:...`"
+            )
+        # design/66: set-image IS an admission point — it pulls and starts a new
+        # image on a service that KEEPS its tier — and it consulted no privilege
+        # gate at all. Re-run the infra gate so a privileged service's image
+        # cannot be swapped to a foreign repository (node-exporter holds /:/rootfs:ro).
+        _infra_refusal = self._infra_privilege_refusal(updated)
+        if _infra_refusal:
+            return False, _infra_refusal
 
         # design/26: location is immutable while installed (by construction the
         # round-trip above preserves it, but the guard keeps future edits to
@@ -3117,21 +3226,21 @@ class ServiceManager:
             probe_home = self._app_home(service)
             adopted = probe_home is not None and self._dir_nonempty(probe_home)
 
-        # A deploy bundle is delivered over the operator seam → operator-authored by
-        # construction (the bundle schema never carries source_url, so it's None
-        # here). Mark it "deploy:<name>" so the tier:infra authorship gate (design/22)
-        # accepts it on the FRESH path (install_declaration preserves a preset
-        # source_url) AND so the assertion below covers the UPDATE path, which does
-        # NOT route through _install_from_definition's gate. Without this, an update
-        # could turn a benign on-disk service into an infra one without
-        # re-authorization (adversarial review N1) — reachable only over the root
-        # seam, but the gate must be explicit here, not incidental.
+        # design/66. The stamp below is a PROVENANCE LABEL for `service list`, the
+        # deploy journal and the history records — no longer an authority. This
+        # block USED to stamp "deploy:<name>" onto a bundle that cannot carry a
+        # source_url (bundle.ALLOWED_BUNDLE_KEYS) and then test that same stamp, so
+        # `tier: infra` — and with it /var/run/docker.sock — was reachable by
+        # anyone who could stream one bundle. The grant is now the root-held name
+        # list bound to an image repository. It runs BEFORE any write and covers
+        # BOTH the fresh and the update fork, so an update can no longer turn a
+        # benign on-disk service into an infra one (the N1 case) or swap a
+        # privileged service's image to a foreign repository.
         if not service.source_url:
             service.source_url = "deploy:{}".format(name)
-        if service.tier == "infra" and not str(service.source_url or "").startswith(
-            OPERATOR_AUTHORED_PREFIXES
-        ):
-            return False, ("tier: infra is only permitted for an operator-authored declaration")
+        _infra_refusal = self._infra_privilege_refusal(service)
+        if _infra_refusal:
+            return False, _infra_refusal
 
         hooks_ok, runs = self._fire_hooks(service, "pre-deploy", context={"image": service.image})
         if not hooks_ok:

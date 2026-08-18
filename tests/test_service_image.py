@@ -201,6 +201,48 @@ class TestSetImage:
         manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
         assert manifest["image"] == "ghcr.io/acme/app:1.0.0"
 
+    def test_a_repin_may_not_DROP_a_digest(self, home, monkeypatch):
+        """design/66 (V5-2). `data["image"] = new_image` replaces the WHOLE
+        reference, so a set-image to a bare tag silently converted a
+        `tag@sha256:...` pin into a mutable tag — server-side, discarding the one
+        supply-chain control the deployment repo's CI enforces on every
+        declaration. The seam accepts this verb on argv shape alone, so the
+        refusal has to live in the manager."""
+        pinned = "ghcr.io/acme/app:1.0.0@sha256:" + "a" * 64
+        sm = self._installed(home, monkeypatch, image=pinned)
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:2.0.0")
+        assert not ok
+        assert "refusing to unpin" in msg and "imagetools inspect" in msg
+        manifest = yaml.safe_load((home / "services" / "app" / "syrvis-service.yaml").read_text())
+        assert manifest["image"] == pinned  # untouched
+
+        # re-pinning to another DIGEST is still fine — only the drop is refused
+        ok, msg = sm.set_image("app", "ghcr.io/acme/app:2.0.0@sha256:" + "b" * 64)
+        assert ok, msg
+
+    def test_set_image_re_runs_the_infra_privilege_gate(self, home, monkeypatch):
+        """design/66: set-image IS an admission point — it pulls and starts a new
+        image on a service that KEEPS its tier — and it consulted no gate at all."""
+        sm = _manager(home)
+        svc = ServiceDefinition.from_dict(
+            {
+                "name": "node-exporter",
+                "version": "1.12.1",
+                "image": "prom/node-exporter:v1.12.1",
+                "tier": "infra",
+                "volumes": ["/:/rootfs:ro"],
+            }
+        )
+        monkeypatch.setattr(sm, "_start_service", lambda *a, **k: (True, "started"))
+        monkeypatch.setattr(sm, "_reload_traefik", lambda: None)
+        ok, msg = sm.install_declaration(svc, start=False)
+        assert ok, msg
+        monkeypatch.setattr(sm, "_compose", lambda *a, **k: (True, ""))
+        monkeypatch.setattr(sm, "_stop_service", lambda *a, **k: (True, ""))
+        ok, msg = sm.set_image("node-exporter", "ghcr.io/attacker/node-exporter:v1.12.1")
+        assert not ok
+        assert "prom/node-exporter" in msg
+
     def test_same_image_is_noop(self, home, monkeypatch):
         sm = self._installed(home, monkeypatch)
         ok, msg = sm.set_image("app", "ghcr.io/acme/app:1.0.0")

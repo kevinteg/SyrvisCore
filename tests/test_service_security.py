@@ -484,9 +484,15 @@ class TestCommandReconcileAndConverge:
 
 
 class TestInfraTier:
-    """design/22 — the privileged infra tier: an enumerated READ-ONLY host-mount
-    allowlist, gated by AUTHORSHIP (only an operator services.d/deploy declaration
-    may set tier: infra — never a git/image/catalog service)."""
+    """design/22 + design/66 — the privileged infra tier: an enumerated READ-ONLY
+    host-mount allowlist, gated by a root-held NAME list BOUND to the image
+    repository that name may run (DEFAULT_INFRA_SERVICES / <home>/config/infra-allow).
+
+    It used to be gated by AUTHORSHIP — `source_url` starting "services.d:"/"deploy:".
+    That was a tautology for a streamed bundle: the bundle schema cannot carry a
+    source_url, deploy_bundle stamped "deploy:<name>" itself, and the gate then
+    tested its own handwriting. source_url is now a PROVENANCE LABEL only (it still
+    governs `location:`, where the transport genuinely is the anchor)."""
 
     def test_non_infra_rejects_any_host_mount(self):
         for vol in (
@@ -553,16 +559,18 @@ class TestInfraTier:
         m._reload_traefik = lambda: None
         return m
 
-    def test_authorship_gate_allows_operator_and_emits_host_mounts(self, tmp_path):
+    def test_privilege_gate_allows_an_allowlisted_name_and_emits_host_mounts(self, tmp_path):
         import yaml
 
         mgr = self._mgr(tmp_path)
         svc = ServiceDefinition.from_dict(
             base_service(
-                name="node-exporter", tier="infra", volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"]
+                name="node-exporter",
+                image="prom/node-exporter:v1.12.1",  # the repo the NAME is bound to
+                tier="infra",
+                volumes=["/proc:/host/proc:ro", "/:/rootfs:ro"],
             )
         )
-        # install_declaration sets source_url="services.d:node-exporter" -> operator -> allowed
         ok, msg = mgr.install_declaration(svc, start=False)
         assert ok, msg
         compose = yaml.safe_load((tmp_path / "compose" / "node-exporter.yaml").read_text())
@@ -570,22 +578,79 @@ class TestInfraTier:
         # emitted as ABSOLUTE host paths (not resolved under data/<svc>/), read-only
         assert "/proc:/host/proc:ro" in vols and "/:/rootfs:ro" in vols
 
-    def test_authorship_gate_rejects_git_source(self, tmp_path):
+    def test_privilege_gate_rejects_a_name_that_is_not_granted(self, tmp_path):
+        """design/66: the NAME is the grant. An operator-authored source_url — the
+        thing that used to unlock this — buys nothing."""
         mgr = self._mgr(tmp_path)
         svc = ServiceDefinition.from_dict(
             base_service(name="evil", tier="infra", volumes=["/proc:/host/proc:ro"])
         )
-        svc.source_url = "https://github.com/attacker/evil.git"  # a repo, NOT services.d:
+        svc.source_url = "services.d:evil"  # the OLD gate would have accepted this
         sp = mgr.services_dir / "evil"
         sp.mkdir(parents=True, exist_ok=True)
         ok, msg = mgr._install_from_definition(svc, sp, start=False)
         assert not ok and "infra" in msg.lower()
+        assert "node-exporter" in msg  # names the platform default, so the fix is obvious
+
+    def test_privilege_gate_rejects_a_foreign_image_on_an_allowlisted_name(self, tmp_path):
+        """THE one-line escalation (design/66 §4): node-exporter is already infra
+        and already holds /:/rootfs:ro, so swapping only `image:` for an
+        attacker-built, correctly digest-pinned reference read every secret on the
+        box and passed every existing check."""
+        mgr = self._mgr(tmp_path)
+        svc = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter",
+                image="ghcr.io/attacker/node-exporter:v1.12.1@sha256:" + "a" * 64,
+                tier="infra",
+                volumes=["/:/rootfs:ro"],
+            )
+        )
+        ok, msg = mgr.install_declaration(svc, start=False)
+        assert not ok
+        assert "prom/node-exporter" in msg and "ghcr.io/attacker/node-exporter" in msg
+
+    def test_infra_allow_file_overrides_the_platform_default(self, tmp_path):
+        """A root-owned <home>/config/infra-allow replaces the default EXACTLY —
+        so an empty file means no service may hold the infra tier."""
+        from syrviscore.service_manager import DEFAULT_INFRA_SERVICES, load_infra_allow
+
+        assert load_infra_allow(tmp_path) == DEFAULT_INFRA_SERVICES
+        (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config" / "infra-allow").write_text(
+            "# a site override\nwatchtower acme/watchtower\nbare-name\n"
+        )
+        assert load_infra_allow(tmp_path) == {"watchtower": "acme/watchtower", "bare-name": ""}
+
+        mgr = self._mgr(tmp_path)
+        # node-exporter is no longer granted — the file REPLACES the default
+        denied = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter",
+                image="prom/node-exporter:v1.12.1",
+                tier="infra",
+                volumes=["/:/rootfs:ro"],
+            )
+        )
+        ok, msg = mgr.install_declaration(denied, start=False)
+        assert not ok and "infra" in msg.lower()
+        # a name with NO bound repo is granted without an image constraint
+        allowed = ServiceDefinition.from_dict(
+            base_service(
+                name="bare-name",
+                image="anything/at-all:1",
+                tier="infra",
+                volumes=["/proc:/host/proc:ro"],
+            )
+        )
+        ok, msg = mgr.install_declaration(allowed, start=False)
+        assert ok, msg
 
     def test_deploy_bundle_update_path_handles_infra(self, tmp_path):
-        # design/22 N1: deploy_bundle's UPDATE path regenerates compose WITHOUT
-        # routing through _install_from_definition's gate. A bundle is
-        # operator-authored (seam-delivered) so infra is PERMITTED — but the gate
-        # must be EXPLICIT, not incidental. Fresh-install benign, then update to
+        # design/22 N1 + design/66: deploy_bundle's UPDATE path regenerates compose
+        # WITHOUT routing through _install_from_definition's gate, so the gate must
+        # be EXPLICIT here. node-exporter running prom/node-exporter is on the
+        # root-held grant, so it is PERMITTED. Fresh-install benign, then update to
         # infra; both succeed and the update emits the allowlisted host mounts.
         import yaml
         from syrviscore.bundle import DeployBundle
@@ -606,11 +671,57 @@ class TestInfraTier:
         )
         ok, msg = mgr.deploy_bundle(DeployBundle(service=infra))  # update
         assert ok, msg
-        assert infra.source_url == "deploy:node-exporter"  # marked operator-authored
+        # design/66: still stamped, but now only as a PROVENANCE LABEL for
+        # `service list`/the journal — it is no longer what unlocked the tier.
+        assert infra.source_url == "deploy:node-exporter"
         vols = yaml.safe_load((tmp_path / "compose" / "node-exporter.yaml").read_text())[
             "services"
         ]["node-exporter"]["volumes"]
         assert "/proc:/host/proc:ro" in vols and "/:/rootfs:ro" in vols
+
+    def test_deploy_bundle_refuses_infra_for_an_ungranted_name(self, tmp_path):
+        """THE tautology, killed (design/66). A bundle cannot carry a source_url
+        (bundle.ALLOWED_BUNDLE_KEYS), deploy_bundle stamped "deploy:<name>" itself,
+        and the old gate tested that stamp — so `tier: infra`, and with it
+        /var/run/docker.sock, was reachable by anyone who could stream ONE bundle."""
+        from syrviscore.bundle import DeployBundle
+
+        mgr = self._mgr(tmp_path)
+        evil = ServiceDefinition.from_dict(
+            base_service(
+                name="totally-benign",
+                tier="infra",
+                volumes=["/var/run/docker.sock:/var/run/docker.sock:ro"],
+            )
+        )
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=evil))
+        assert not ok
+        assert "infra" in msg.lower() and "node-exporter" in msg
+        assert not (tmp_path / "compose" / "totally-benign.yaml").exists()
+
+    def test_deploy_bundle_refuses_an_image_swap_on_a_privileged_service(self, tmp_path):
+        """A bundle may not rebind an allowlisted name to a foreign repository."""
+        from syrviscore.bundle import DeployBundle
+
+        mgr = self._mgr(tmp_path)
+        ok, msg = mgr.deploy_bundle(
+            DeployBundle(
+                service=ServiceDefinition.from_dict(
+                    base_service(name="node-exporter", image="prom/node-exporter:v1.12.1")
+                )
+            )
+        )
+        assert ok, msg
+        swapped = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter",
+                image="ghcr.io/attacker/node-exporter:v1.12.1",
+                tier="infra",
+                volumes=["/:/rootfs:ro"],
+            )
+        )
+        ok, msg = mgr.deploy_bundle(DeployBundle(service=swapped))
+        assert not ok and "prom/node-exporter" in msg
 
     def test_compose_emit_is_defense_in_depth(self, tmp_path):
         # Even if the schema were bypassed (volumes mutated AFTER validation), the
@@ -1080,6 +1191,30 @@ class TestAppHomeLayout:
         rows = {r["name"]: r for r in mgr.list()}
         assert rows["pg"]["location"] == "/volume6"
         assert rows["web"]["location"] == ""
+
+    def test_list_rows_carry_tier_and_image(self, tmp_path, monkeypatch):
+        """design/66: home-tech's `nas.privilege` grades LIVE tier: infra services
+        against config/service-policy.yaml over the seam, so `service list --json`
+        has to say which services hold the tier and what code they run. Additive:
+        a release too old to report them degrades that check to UNKNOWN."""
+        mgr = _v2_mgr(tmp_path, monkeypatch)
+        infra = ServiceDefinition.from_dict(
+            base_service(
+                name="node-exporter",
+                image="prom/node-exporter:v1.12.1",
+                tier="infra",
+                volumes=["/:/rootfs:ro"],
+            )
+        )
+        assert mgr.install_declaration(infra, start=False)[0]
+        assert mgr.install_declaration(
+            ServiceDefinition.from_dict(base_service(name="web")), start=False
+        )[0]
+        rows = {r["name"]: r for r in mgr.list()}
+        assert rows["node-exporter"]["tier"] == "infra"
+        assert rows["node-exporter"]["image"] == "prom/node-exporter:v1.12.1"
+        assert rows["web"]["tier"] == ""  # "" not missing — an absent key means OLD
+        assert rows["web"]["image"] == "nginx:1.27.0"
 
     def test_deployment_record_carries_location(self, tmp_path, monkeypatch):
         # (viii) — additive v1-schema field at the record choke point.
