@@ -407,11 +407,16 @@ def read_env_value(env_path, key: str) -> str:
 _ENV_VALUE_HAZARD_RE = re.compile(r"""[$`\\;&|<>()\n\r\t]""")
 
 # KEY NAMES a loader/shell treats specially. A .env should never redefine these.
+# The LD_*/BASH_* families are matched BY PREFIX below: naming only LD_PRELOAD and
+# LD_LIBRARY_PATH leaves LD_AUDIT (and every other loader knob) accepted, which is
+# functionally LD_PRELOAD against the root boot shell.
 _ENV_KEY_HAZARDS = frozenset({
-    "PATH", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
-    "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "SHELLOPTS", "PS4",
-    "PROMPT_COMMAND", "GIT_SSH_COMMAND",
+    "PATH", "IFS", "ENV", "SHELL", "SHELLOPTS", "BASHOPTS", "CDPATH",
+    "GLOBIGNORE", "PROMPT_COMMAND", "PS4", "PYTHONPATH", "PYTHONSTARTUP",
+    "PYTHONHOME", "PERL5LIB", "NODE_OPTIONS", "DYLD_INSERT_LIBRARIES",
+    "GIT_SSH_COMMAND",
 })
+_ENV_KEY_HAZARD_PREFIXES = ("LD_", "BASH_")
 # A legal env key: letters/digits/underscore, not starting with a digit.
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -438,6 +443,10 @@ def env_key_hazard(key):
         return "key {!r} is not a bare [A-Za-z_][A-Za-z0-9_]* name".format(key)
     if key in _ENV_KEY_HAZARDS:
         return "key {!r} is a loader/shell-special name that a .env must not redefine".format(key)
+    for prefix in _ENV_KEY_HAZARD_PREFIXES:
+        if key.startswith(prefix):
+            return ("key {!r} is in the {}* family — dynamic-loader/shell-startup names "
+                    "a .env must not redefine".format(key, prefix))
     return None
 
 

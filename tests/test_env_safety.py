@@ -61,9 +61,18 @@ def test_key_safe(key):
     "PATH", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH", "PYTHONPATH", "BASH_ENV",
     "DYLD_INSERT_LIBRARIES", "PROMPT_COMMAND", "GIT_SSH_COMMAND",
     "1BAD", "bad-key", "has space", "",
+    # The whole LD_*/BASH_* families are refused BY PREFIX — naming only
+    # LD_PRELOAD left LD_AUDIT accepted, which is the same root RCE.
+    "LD_AUDIT", "LD_DEBUG_OUTPUT", "BASH_FUNC_ls%%", "BASHOPTS", "SHELL",
+    "CDPATH", "GLOBIGNORE", "PYTHONHOME", "PERL5LIB", "NODE_OPTIONS",
 ])
 def test_key_hazard(key):
     assert env_key_hazard(key) is not None
+
+
+def test_key_prefix_reason_names_the_family():
+    reason = env_key_hazard("LD_AUDIT")
+    assert "LD_" in reason
 
 
 # ── env_file_hazards ─────────────────────────────────────────────────────────
