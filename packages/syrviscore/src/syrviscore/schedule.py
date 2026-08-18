@@ -1,6 +1,6 @@
 """Scheduled-jobs library — the PRIVILEGED half of the jobs.d capability.
 
-Trust model (design/12 + home-tech design/66): the git source of job scripts +
+Trust model (design/12 + home-tech design/68): the git source of job scripts +
 declarations is ROOT-CONFIGURED in ``<home>/config/jobs.source`` (a single repo
 URL the operator cannot write). There is NO per-declaration source — so a
 compromised operator can neither point a job at an arbitrary repo (which would be
@@ -15,7 +15,7 @@ root:root 0755 without looking at them. So "root-vetted" meant "whoever can push
 to that repo", and home-tech's own drift detector hashed the NAS copy against the
 same repo — a push made both sides the attacker's and the check went green.
 
-What makes the set vetted NOW (design/66):
+What makes the set vetted NOW (design/68):
 
 - ``<home>/config/jobs.pin`` (root-owned) records ONE reviewed commit and the
   sha256 of that commit's ``jobs/MANIFEST.sha256``. A sync with no argv
@@ -68,7 +68,7 @@ CRONTAB_PATH = Path("/etc/crontab")
 BLOCK_BEGIN = jobs_d.BLOCK_BEGIN
 BLOCK_END = jobs_d.BLOCK_END
 SOURCE_CONFIG_NAME = "jobs.source"  # <home>/config/jobs.source — ROOT-owned
-PIN_CONFIG_NAME = "jobs.pin"  # <home>/config/jobs.pin — ROOT-owned (design/66)
+PIN_CONFIG_NAME = "jobs.pin"  # <home>/config/jobs.pin — ROOT-owned (design/68)
 MANIFEST_FILENAME = "MANIFEST.sha256"  # <repo>/jobs/MANIFEST.sha256
 
 # A full commit sha (never abbreviated: an abbreviation is ambiguous by
@@ -442,7 +442,7 @@ def materialize_job_script(
     ⚠ ``expected_sha256=None`` is a REFUSAL, not a bypass. The default is None
     only so the failure mode of a caller that forgets to pass it is "nothing is
     installed", never "the old unchecked behaviour". This is the line that makes
-    the whole scheme load-bearing: before design/66 these bytes became a
+    the whole scheme load-bearing: before design/68 these bytes became a
     root:root 0755 executable with no inspection whatsoever.
 
     Atomic replace via a temp file in the destination dir, so a half-written
@@ -580,7 +580,7 @@ def compute_plan(syrvis_home: Path) -> Dict[str, Any]:
         jobs_d.validate_cron_spec(" ".join(line.split()[:5]))
     plan["invalid"] = invalid
     plan["source"] = get_configured_source(syrvis_home)
-    # design/66: the reviewed pin goes on the wire beside the source URL, so
+    # design/68: the reviewed pin goes on the wire beside the source URL, so
     # home-tech's `nas.jobs` can resolve its reference digests from the PINNED
     # commit instead of from its own (attacker-writable) working tree, and
     # `nas.jobs-pin` can assert the live pin against config/jobs.pin. None here
@@ -868,6 +868,19 @@ def sync_from_source(
     6. Materialize each declared+enabled ``jobs/<name>`` ONLY if it matches its
        manifest row (root:root 0755).
     7. LOCAL reconcile the managed crontab block; then, if advancing, write the pin.
+
+    ⚠ STEP 4 AND STEP 6 FAIL DIFFERENTLY, and confusing them misreads the blast
+    radius. Step 4 is a WHOLE-RUN abort: a manifest digest that does not match the
+    pin returns before any write, and nothing at all is installed. Step 6 is a
+    PER-SCRIPT REFUSAL: each script is graded against its own manifest row
+    independently, so a run in which one script is tampered still installs every
+    UNTAMPERED one. The tampered script is never written — its old bytes stay on
+    disk — and its refusal message rides in ``synced``. ``ok`` is then False (it is
+    the AND over every ``synced`` row and the reconcile), so the CLI exits 1 and,
+    on an advancing sync, THE PIN IS NOT WRITTEN. Note that step 7's crontab
+    reconcile runs regardless: the outcome of a partial failure is a mixed tree,
+    correctly reported as not-ok, not an atomic all-or-nothing sync. Treat any
+    step-6 refusal as a tamper signal and investigate before re-running.
 
     Only the ``jobs.d/`` + ``jobs/`` subtrees of the pinned tree are read.
     """

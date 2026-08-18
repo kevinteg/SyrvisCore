@@ -46,7 +46,7 @@ KIND_SHED_REASON = "shed_reason"
 # accepted shapes use only characters already on the shim's allowlist.
 KIND_TIMESTAMP = "timestamp"
 
-# design/66. A FULL 40-hex commit sha and a `sha256:<64 hex>` digest — the two
+# design/68. A FULL 40-hex commit sha and a `sha256:<64 hex>` digest — the two
 # values that advance the jobs pin. Both are pure hex under the shim's existing
 # character allowlist ([A-Za-z0-9 ._@:/-]), so no allowlist widening is needed.
 KIND_GIT_REV = "git_rev"
@@ -664,7 +664,7 @@ COMMANDS: List[Command] = [
         flags=["--json"],
         timeout_s=600,
     ),
-    # design/66: ADVANCE the jobs pin. The bare schedule_sync row above now means
+    # design/68: ADVANCE the jobs pin. The bare schedule_sync row above now means
     # "re-materialize the already-reviewed commit" — it cannot pick up a push, so
     # it is safe to hand an operator as a repair. THIS row is the deliberate
     # review act, and it is deliberately reachable from the seam: an operator who

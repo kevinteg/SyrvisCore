@@ -122,7 +122,7 @@ def _image_tag(image: str) -> str:
     return "0.0.0"
 
 
-# design/22 + design/66: these prefixes are a PROVENANCE LABEL, not the trust
+# design/22 + design/68: these prefixes are a PROVENANCE LABEL, not the trust
 # anchor for `tier: infra` — and could never have been one for a streamed bundle.
 # install_declaration sets "services.d:<name>"; deploy_bundle stamps
 # "deploy:<name>" onto a bundle whose schema cannot carry a source_url
@@ -135,15 +135,19 @@ def _image_tag(image: str) -> str:
 # list a repo push and a streamed bundle both cannot reach.
 OPERATOR_AUTHORED_PREFIXES = ("services.d:", "deploy:")
 
-# design/66: the infra tier's grant is a NAME on a root-held list BOUND to the
+# design/68: the infra tier's grant is a NAME on a root-held list BOUND to the
 # image repository that name may run. `tier: infra` is the only thing between a
 # declaration and INFRA_HOST_MOUNTS = {/proc, /sys, /, /var/run/docker.sock}
 # (service_schema:219, admitted by _validate_volume:997) — and a docker.sock bind
 # is host root regardless of the forced `:ro`, because a Unix socket is
 # bidirectional. The image repository is part of the grant, not decoration: a
-# one-line `image:` swap on an already-infra service (node-exporter holds
-# /:/rootfs:ro) reads every secret on the box, so an actor with the seam must not
-# change WHAT CODE a privileged service runs without a root grant change.
+# one-line `image:` swap on an already-infra service reads every secret on the box
+# (node-exporter CARRIED /:/rootfs:ro — the entire host filesystem — until the
+# deploying repo drained that mount; it keeps /proc + /sys, which is still host
+# level), so an actor with the seam must not change WHAT CODE a privileged service
+# runs without a root grant change. The gate does not depend on that one mount: the
+# infra tier admits {/proc, /sys, /, /var/run/docker.sock} to ANY named service, so
+# what is currently declared bounds today's blast radius, never the grant's.
 #
 # The DEFAULT lives in platform CODE — the one place a repo push cannot reach —
 # so widening/rebinding takes a SyrvisCore release. A site override is the
@@ -574,7 +578,7 @@ class ServiceManager:
     def _infra_privilege_refusal(self, service):
         """None if `service`'s tier: infra is permitted HERE, else the refusal.
 
-        design/66 — the load-bearing gate, checked at EVERY admission point that
+        design/68 — the load-bearing gate, checked at EVERY admission point that
         can materialize a container (install → reconcile/apply-instance,
         deploy_bundle, set_image). The grant is a root-held NAME list bound to the
         image repository. It never consults source_url — a value this module writes.
@@ -1119,7 +1123,7 @@ class ServiceManager:
         leaves partial state that blocks a retry. Shared by the git-sourced
         :meth:`add` and the image-first :meth:`add_image`.
         """
-        # PRIVILEGE GATE (design/66). This was an AUTHORSHIP gate keyed on
+        # PRIVILEGE GATE (design/68). This was an AUTHORSHIP gate keyed on
         # source_url — a string THIS module writes, so for a streamed bundle it
         # tested its own handwriting and could not fail. The grant is now a
         # root-held NAME list bound to the image repository (DEFAULT_INFRA_SERVICES
@@ -2095,7 +2099,7 @@ class ServiceManager:
                     # The app's declared home volume ("" = legacy layout on
                     # SYRVIS_HOME). Flows to the seam/dashboard rows as-is.
                     "location": service.location or "",
-                    # design/66: trust tier + image reference, so a deployment
+                    # design/68: trust tier + image reference, so a deployment
                     # repo's `nas.privilege` check can grade a LIVE tier: infra
                     # service against config/service-policy.yaml over the seam
                     # (older releases omit these; the check degrades to UNKNOWN).
@@ -2624,7 +2628,7 @@ class ServiceManager:
         except ServiceValidationError as e:
             return False, f"invalid image {new_image!r}: {e}"
 
-        # design/66 (V5-2): a re-pin may never DROP a digest. data["image"] =
+        # design/68 (V5-2): a re-pin may never DROP a digest. data["image"] =
         # new_image replaces the WHOLE reference, so `service set-image grafana
         # grafana/grafana:13.1.3` silently converted a tag@sha256:... pin into a
         # mutable tag, server-side, discarding the one supply-chain control the
@@ -2636,10 +2640,12 @@ class ServiceManager:
                 f"Read the digest with `docker buildx imagetools inspect {new_image}` and "
                 f"re-pin as `{new_image}@sha256:...`"
             )
-        # design/66: set-image IS an admission point — it pulls and starts a new
+        # design/68: set-image IS an admission point — it pulls and starts a new
         # image on a service that KEEPS its tier — and it consulted no privilege
-        # gate at all. Re-run the infra gate so a privileged service's image
-        # cannot be swapped to a foreign repository (node-exporter holds /:/rootfs:ro).
+        # gate at all. Re-run the infra gate so a privileged service's image cannot
+        # be swapped to a foreign repository (node-exporter CARRIED /:/rootfs:ro
+        # until the deploying repo drained it; /proc + /sys remain, and the tier
+        # would re-admit the whole set on any future declaration).
         _infra_refusal = self._infra_privilege_refusal(updated)
         if _infra_refusal:
             return False, _infra_refusal
@@ -3226,7 +3232,7 @@ class ServiceManager:
             probe_home = self._app_home(service)
             adopted = probe_home is not None and self._dir_nonempty(probe_home)
 
-        # design/66. The stamp below is a PROVENANCE LABEL for `service list`, the
+        # design/68. The stamp below is a PROVENANCE LABEL for `service list`, the
         # deploy journal and the history records — no longer an authority. This
         # block USED to stamp "deploy:<name>" onto a bundle that cannot carry a
         # source_url (bundle.ALLOWED_BUNDLE_KEYS) and then test that same stamp, so

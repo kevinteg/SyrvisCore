@@ -835,7 +835,7 @@ def schedule_list(as_json):
             "jobs": jobs_out,
             "invalid": invalid,
             "source": plan.get("source"),
-            # design/66: the reviewed pin, beside the source URL. `null` here is
+            # design/68: the reviewed pin, beside the source URL. `null` here is
             # meaningful — it says this instance is UNPINNED and a bare sync will
             # be refused. home-tech's nas.jobs / nas.jobs-pin read this field.
             "pin": plan.get("pin"),

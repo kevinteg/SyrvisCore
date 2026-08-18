@@ -216,7 +216,7 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "is_timestamp() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)?$'; }",
         "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
-        # design/66: the two jobs-pin slots. A FULL 40-hex sha only — an
+        # design/68: the two jobs-pin slots. A FULL 40-hex sha only — an
         # abbreviated commit is ambiguous by construction and a supply-chain pin
         # may not be ambiguous. The digest carries its `sha256:` prefix so the
         # shim cannot confuse the two slots even if the argv order drifted.
