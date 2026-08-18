@@ -553,6 +553,17 @@ TZ={tz}
 
     env_content = _preserve_existing_values(env_content, existing_env)
 
+    # design/70 (P6): the boot hook sources this file as root. Scan the fully
+    # rendered content and REFUSE to write an unsafe key/value rather than plant a
+    # boot-time root RCE. Fail-closed: a refused setup leaves the file untouched.
+    env_hazards = paths.env_file_hazards(env_content)
+    if env_hazards:
+        keys = ", ".join(sorted({k for k, _ in env_hazards}))
+        raise paths.EnvValueError(
+            "refusing to write .env: {} unsafe key/value(s) [{}] — the root boot "
+            "hook sources this file (design/70)".format(len(env_hazards), keys)
+        )
+
     env_path.write_text(env_content)
     # 0600: .env holds the tunnel/DNS/DDNS tokens and the OIDC secret. The CLI
     # runs as the owning user, compose interpolation runs under sudo, and the

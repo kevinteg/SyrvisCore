@@ -132,6 +132,12 @@ class InstanceBundle:
         for key, value in raw.items():
             if not isinstance(key, str) or not ENV_NAME_RE.fullmatch(key):
                 raise InstanceBundleError("invalid env key {!r}".format(key))
+            # design/70 (P6): reject loader/shell-special KEY NAMES (PATH, LD_PRELOAD,
+            # PYTHONPATH, …). They pass the charset check above but poison os.environ
+            # via the CLI's load_dotenv(override=True), which is a reboot-free root RCE.
+            key_hazard = paths.env_key_hazard(key)
+            if key_hazard:
+                raise InstanceBundleError("env key rejected: {}".format(key_hazard))
             if not isinstance(value, str):
                 # Do NOT include the value in the error (it may be a secret).
                 raise InstanceBundleError("env {!r}: value must be a string".format(key))
@@ -145,6 +151,13 @@ class InstanceBundle:
             # making every re-apply report the key "changed" (and, for a secret,
             # refusing re-apply without --allow-secret-change). Strip once here.
             value = value.strip()
+            # design/70 (P6): reject shell-hazardous VALUES ($ ` \ ; & | < > ( ) …).
+            # The root boot hook sources .env as bash, so `FOO=$(cmd)` runs cmd as
+            # root at the next boot. env_value_hazard names only the offending
+            # character, never the value (which may be a secret).
+            value_hazard = paths.env_value_hazard(value)
+            if value_hazard:
+                raise InstanceBundleError("env {!r}: {}".format(key, value_hazard))
             total += len(key.encode()) + len(value.encode("utf-8", errors="surrogateescape"))
             out[key] = value
         if total > ENV_MAX_BYTES:
