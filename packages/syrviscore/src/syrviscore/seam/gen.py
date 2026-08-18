@@ -121,6 +121,8 @@ _SLOT_PREDICATE = {
     "halt_reason": "is_reason",
     "shed_reason": "is_shedreason",
     "timestamp": "is_timestamp",
+    "git_rev": "is_gitrev",
+    "sha256_digest": "is_sha256",
 }
 
 
@@ -214,6 +216,12 @@ def render_shim(cfg: DeployConfig = DEFAULT) -> str:
         "is_timestamp() { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)?$'; }",
         "is_bool()      { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^(true|false)$'; }",
+        # design/66: the two jobs-pin slots. A FULL 40-hex sha only — an
+        # abbreviated commit is ambiguous by construction and a supply-chain pin
+        # may not be ambiguous. The digest carries its `sha256:` prefix so the
+        # shim cannot confuse the two slots even if the argv order drifted.
+        "is_gitrev()    { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$'; }",
+        "is_sha256()    { printf '%s' \"$1\" | LC_ALL=C grep -Eq '^sha256:[0-9a-f]{64}$'; }",
         "is_image()     { printf '%s' \"$1\" | LC_ALL=C grep -Eq "
         "'^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+"
         "(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }",

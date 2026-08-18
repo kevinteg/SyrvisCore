@@ -46,6 +46,12 @@ KIND_SHED_REASON = "shed_reason"
 # accepted shapes use only characters already on the shim's allowlist.
 KIND_TIMESTAMP = "timestamp"
 
+# design/66. A FULL 40-hex commit sha and a `sha256:<64 hex>` digest — the two
+# values that advance the jobs pin. Both are pure hex under the shim's existing
+# character allowlist ([A-Za-z0-9 ._@:/-]), so no allowlist widening is needed.
+KIND_GIT_REV = "git_rev"
+KIND_SHA256 = "sha256_digest"
+
 # The core-tier service set for KIND_STACK_SERVICE slots. Duplicated from
 # syrviscore.stack (ALL_SERVICES / PRIMORDIAL) so the generator stays
 # stdlib-only when run straight from the source tree; a drift test asserts
@@ -656,6 +662,31 @@ COMMANDS: List[Command] = [
         sudo=True,
         destructive=True,
         flags=["--json"],
+        timeout_s=600,
+    ),
+    # design/66: ADVANCE the jobs pin. The bare schedule_sync row above now means
+    # "re-materialize the already-reviewed commit" — it cannot pick up a push, so
+    # it is safe to hand an operator as a repair. THIS row is the deliberate
+    # review act, and it is deliberately reachable from the seam: an operator who
+    # can run bare `schedule sync` could ALREADY install any repo content as root
+    # cron before this change, so making the rev explicit grants no new
+    # capability — it only makes the existing one argument-bearing, journaled,
+    # and diffable against home-tech's config/jobs.pin record. What stays
+    # root-only is config/jobs.source (the URL), unchanged since design/12 §1.
+    # Both slots are strict hex; neither can carry a path, a URL or a shell char.
+    Command(
+        "schedule_sync_pin",
+        "syrvis",
+        ["schedule", "sync"],
+        sudo=True,
+        destructive=True,
+        flags=[
+            "--to",
+            FlagValue(Slot("to", KIND_GIT_REV)),
+            "--manifest",
+            FlagValue(Slot("manifest", KIND_SHA256)),
+            "--json",
+        ],
         timeout_s=600,
     ),
     # secret set writes a Layer 2 service's env_file secret atomically as root:root

@@ -1,11 +1,39 @@
 """Scheduled-jobs library — the PRIVILEGED half of the jobs.d capability.
 
-Trust model (design/12, owner-set boundary): the git source of job scripts +
+Trust model (design/12 + home-tech design/66): the git source of job scripts +
 declarations is ROOT-CONFIGURED in ``<home>/config/jobs.source`` (a single repo
 URL the operator cannot write). There is NO per-declaration source — so a
 compromised operator can neither point a job at an arbitrary repo (which would be
 arbitrary root code via the fetched script) nor supply a command
-(derive-not-declare). It can at most re-apply the already-synced, root-vetted set.
+(derive-not-declare).
+
+⚠ THE CLAIM THAT USED TO END THIS PARAGRAPH — "it can at most re-apply the
+already-synced, root-vetted set" — WAS FALSE, and was false for as long as this
+module has existed. Nothing vetted anything: the clone took whatever the remote's
+DEFAULT BRANCH HEAD was, and ``materialize_job_script`` wrote those bytes
+root:root 0755 without looking at them. So "root-vetted" meant "whoever can push
+to that repo", and home-tech's own drift detector hashed the NAS copy against the
+same repo — a push made both sides the attacker's and the check went green.
+
+What makes the set vetted NOW (design/66):
+
+- ``<home>/config/jobs.pin`` (root-owned) records ONE reviewed commit and the
+  sha256 of that commit's ``jobs/MANIFEST.sha256``. A sync with no argv
+  materializes THAT commit and no other — a fresh push cannot move it, which is
+  what makes ``schedule sync`` safe to hand an operator as a repair.
+- the clone is pinned and PROVEN pinned (``git rev-parse HEAD`` equality) before
+  a single byte is copied;
+- every script is checked against its manifest digest at copy time. No row, or a
+  different digest, is a refusal — never a warning.
+- advancing the pin is explicit and argument-bearing:
+  ``schedule sync --to <40-hex> --manifest sha256:<64-hex>``. Both values are
+  re-verified against the fetched tree, and ``changed_scripts`` names every
+  root-run script the advance would alter.
+
+NOTE the asymmetry, deliberately: ``apply_schedule`` does NOT consult the pin.
+It performs no fetch — the scripts are already on disk — so the boot hook, the
+``*/5`` seam-selfheal and ``verify --fix`` self-heal exactly as before, pin or no
+pin. Only the FETCHING verb is gated.
 
 Two privileged operations (root-only in production):
 
@@ -40,6 +68,14 @@ CRONTAB_PATH = Path("/etc/crontab")
 BLOCK_BEGIN = jobs_d.BLOCK_BEGIN
 BLOCK_END = jobs_d.BLOCK_END
 SOURCE_CONFIG_NAME = "jobs.source"  # <home>/config/jobs.source — ROOT-owned
+PIN_CONFIG_NAME = "jobs.pin"  # <home>/config/jobs.pin — ROOT-owned (design/66)
+MANIFEST_FILENAME = "MANIFEST.sha256"  # <repo>/jobs/MANIFEST.sha256
+
+# A full commit sha (never abbreviated: an abbreviation is ambiguous by
+# construction and a supply-chain pin may not be ambiguous), and the manifest
+# digest as it is written in the pin file.
+_REV_RE = re.compile(r"^[0-9a-f]{40}$")
+_MANIFEST_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 # DSM's own scheduler, which SyrvisCore neither owns nor manages — it only
 # ENUMERATES it (see :func:`dsm_task_census`). Module-level so tests can repoint
@@ -101,12 +137,39 @@ def _is_git_url(source: str) -> bool:
     )
 
 
-def _clone_configured_source(git_url: str) -> Tuple[bool, str, Optional[Path]]:
-    """Clone the root-configured source with the SAME hardening services use.
+def _git(args: List[str], timeout: int = 180, env: Optional[Dict[str, str]] = None):
+    """Run git with the hardened env. Never raises for a non-zero exit."""
+    return subprocess.run(["git"] + args, capture_output=True, text=True, timeout=timeout, env=env)
 
-    Restricted git protocols, no terminal prompt, shallow clone, ``--`` guard, and
-    a timeout. The URL is NOT operator-supplied (it comes from the root-owned
-    config file), but the hardening is kept regardless. Caller owns the temp dir.
+
+def _git_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    # `file` is allowed alongside the network transports because the source is
+    # ROOT-configured (never operator input); it is required so a local-repo
+    # fixture (CI) — and a legitimate local mirror — can be cloned.
+    env["GIT_ALLOW_PROTOCOL"] = "https:git:ssh:file"
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def _clone_configured_source(git_url: str, rev: str) -> Tuple[bool, str, Optional[Path]]:
+    """Clone the root-configured source AT AN EXACT COMMIT, and PROVE it landed there.
+
+    Two strategies, in order:
+
+    1. ``git init`` + ``git fetch --depth 1 <url> <rev>`` + ``checkout --detach
+       FETCH_HEAD`` — one object, no branch, no default-branch trust. Works
+       against any host that serves SHA-in-want (GitHub does).
+    2. a full clone + ``checkout --detach <rev>`` — the fallback for a host or a
+       git too old for (1). home-tech is small; this runs only on a pin advance
+       or a repair, never on a schedule.
+
+    Whichever path ran, the LAST thing this does is ``git rev-parse HEAD`` and
+    compare it to ``rev``. If the checkout is not EXACTLY the pinned commit the
+    tree is discarded and nothing downstream ever sees it. That equality is the
+    whole gate — every digest check after it is defence in depth, not the anchor.
+
+    The caller owns the temp dir on success.
     """
     if not _is_git_url(git_url):
         return (
@@ -114,34 +177,199 @@ def _clone_configured_source(git_url: str) -> Tuple[bool, str, Optional[Path]]:
             "configured jobs.source is not a supported git URL: {!r}".format(git_url),
             None,
         )
+    if not _REV_RE.match(rev or ""):
+        return False, "jobs pin rev is not a full 40-hex commit sha: {!r}".format(rev), None
 
-    env = dict(os.environ)
-    # `file` is allowed alongside the network transports because the source is
-    # ROOT-configured (never operator input); it is required so a local-repo
-    # fixture (CI) — and a legitimate local mirror — can be cloned.
-    env["GIT_ALLOW_PROTOCOL"] = "https:git:ssh:file"
-    env["GIT_TERMINAL_PROMPT"] = "0"
-
+    env = _git_env()
     temp_dir = tempfile.mkdtemp(prefix="syrvis-jobs-")
     temp_path = Path(temp_dir) / "repo"
+
+    def _fail(msg: str) -> Tuple[bool, str, Optional[Path]]:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return False, msg, None
+
     try:
-        result = subprocess.run(
-            ["git", "clone", "--depth", "1", "--", git_url, str(temp_path)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env=env,
+        temp_path.mkdir(parents=True, exist_ok=True)
+        r = _git(["init", "--quiet", str(temp_path)], env=env, timeout=60)
+        if r.returncode != 0:
+            return _fail("git init failed: {}".format(r.stderr.strip()))
+        r = _git(
+            ["-C", str(temp_path), "fetch", "--depth", "1", git_url, rev], env=env, timeout=180
         )
-        if result.returncode != 0:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return False, "failed to clone jobs.source: {}".format(result.stderr.strip()), None
+        if r.returncode == 0:
+            r = _git(
+                ["-C", str(temp_path), "checkout", "--quiet", "--detach", "FETCH_HEAD"],
+                env=env,
+                timeout=120,
+            )
+            if r.returncode != 0:
+                return _fail("checkout of the pinned commit failed: {}".format(r.stderr.strip()))
+        else:
+            # The remote refused SHA-in-want (or git is too old to ask). Fall
+            # back to a FULL clone — never a --depth 1 of the default branch,
+            # which is the exact unpinned fetch this function exists to remove.
+            shutil.rmtree(str(temp_path), ignore_errors=True)
+            r = _git(["clone", "--", git_url, str(temp_path)], env=env, timeout=300)
+            if r.returncode != 0:
+                return _fail("failed to clone jobs.source: {}".format(r.stderr.strip()))
+            r = _git(
+                ["-C", str(temp_path), "checkout", "--quiet", "--detach", rev],
+                env=env,
+                timeout=120,
+            )
+            if r.returncode != 0:
+                return _fail(
+                    "pinned commit {} is not present in jobs.source: {}".format(
+                        rev[:12], r.stderr.strip()
+                    )
+                )
     except subprocess.TimeoutExpired:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return False, "git clone timed out for the configured jobs.source", None
+        return _fail("git timed out fetching the pinned commit from jobs.source")
     except FileNotFoundError:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return False, "git is not installed", None
-    return True, "cloned", temp_path
+        return _fail("git is not installed")
+
+    # THE GATE. Everything below this line trusts that HEAD == the pin.
+    try:
+        head = _git(["-C", str(temp_path), "rev-parse", "HEAD"], env=env, timeout=60)
+    except subprocess.TimeoutExpired:
+        return _fail("git rev-parse timed out verifying the pinned checkout")
+    if head.returncode != 0:
+        return _fail("could not verify the checked-out commit: {}".format(head.stderr.strip()))
+    got = (head.stdout or "").strip()
+    if got != rev:
+        return _fail(
+            "REFUSING to materialize: the checkout is at {} but the pin names {} "
+            "— nothing was installed".format(got[:12] or "(nothing)", rev[:12])
+        )
+    return True, "cloned at {}".format(rev[:12]), temp_path
+
+
+def get_pin_config_path(syrvis_home: Path) -> Path:
+    return Path(syrvis_home) / "config" / PIN_CONFIG_NAME
+
+
+def parse_pin(text: str) -> Optional[Dict[str, str]]:
+    """Parse jobs.pin -> {"rev", "manifest"}, or None when absent/malformed.
+
+    FIRST non-comment, non-blank line, exactly two whitespace-separated tokens.
+    The first-line rule is byte-identical to :func:`get_configured_source` on
+    purpose: home-tech's verify-all mirrors both parsers, and a check that reads
+    a different line from the one the platform reads is fiction (that exact bug
+    was caught in verify-all's jobs.source reader on 2026-08-10).
+
+    Malformed is None, i.e. FAIL-CLOSED: a sync with no usable pin refuses.
+    """
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            return None
+        if not _REV_RE.match(parts[0]) or not _MANIFEST_DIGEST_RE.match(parts[1]):
+            return None
+        return {"rev": parts[0], "manifest": parts[1]}
+    return None
+
+
+def get_configured_pin(syrvis_home: Path) -> Optional[Dict[str, str]]:
+    """The reviewed pin, or None (FAIL-CLOSED — an unpinned sync is refused)."""
+    try:
+        text = get_pin_config_path(syrvis_home).read_text()
+    except (FileNotFoundError, PermissionError, IsADirectoryError, NotADirectoryError):
+        return None
+    return parse_pin(text)
+
+
+def write_pin(syrvis_home: Path, rev: str, manifest_digest: str) -> Path:
+    """Atomically record the reviewed pin (root:root 0644).
+
+    Called ONLY from a successful ``sync_from_source(..., to_rev=, to_manifest=)``
+    — and only AFTER the materialize + reconcile succeeded, so a half-applied
+    sync leaves the OLD pin standing. That direction is the safe one: the next
+    bare sync then restores the previously-reviewed bytes, and ``nas.jobs`` FAILs
+    loudly in the meantime instead of quietly blessing a partial write.
+    """
+    path = get_pin_config_path(Path(syrvis_home))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = (
+        "# jobs.pin — the REVIEWED commit of config/jobs.source that `schedule sync`\n"
+        "# materializes. Written ONLY by `syrvis schedule sync --to <rev> --manifest <sha256>`.\n"
+        "# <40-hex commit sha> sha256:<64-hex digest of that commit's jobs/MANIFEST.sha256>\n"
+        "{} {}\n".format(rev, manifest_digest)
+    )
+    fd, tmp_name = tempfile.mkstemp(prefix=".jobs.pin.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(tmp_name, 0o644)
+        try:
+            os.chown(tmp_name, 0, 0)  # root:root; needs privilege
+        except (PermissionError, OSError):
+            pass  # unprivileged/sim run: mode is still enforced above
+        os.replace(tmp_name, str(path))
+    finally:
+        if Path(tmp_name).exists():
+            Path(tmp_name).unlink()
+    return path
+
+
+def _sha256_file(path: Path) -> str:
+    """THE digest function — one implementation, both sides of every comparison.
+
+    :func:`_script_integrity` (what the seam reports and home-tech's `nas.jobs`
+    grades) and :func:`materialize_job_script` (what actually gets installed)
+    must agree by construction, not by two people writing the same line twice.
+    """
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def parse_manifest(text: str) -> Dict[str, str]:
+    """Parse ``jobs/MANIFEST.sha256`` -> {job name: sha256 hex}.
+
+    The format is plain ``sha256sum`` output taken from the repo root, so
+    ``sha256sum -c jobs/MANIFEST.sha256`` verifies it with no bespoke tool::
+
+        <64 hex>  jobs/<name>
+
+    A manifest may describe NOTHING but ``jobs/<name>``. Any other path, a
+    duplicate name, a malformed digest, an illegal job name, or a line that does
+    not split into exactly two tokens is a HARD REFUSAL — not a skipped row. A
+    parser that silently ignores rows it does not understand is a parser an
+    attacker writes rows for.
+    """
+    out: Dict[str, str] = {}
+    for lineno, raw in enumerate((text or "").splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise ScheduleError(
+                "jobs manifest line {}: expected '<sha256>  {}/<name>'".format(
+                    lineno, REPO_SCRIPTS_SUBDIR
+                )
+            )
+        digest, rel = parts
+        if not re.match(r"^[0-9a-f]{64}$", digest):
+            raise ScheduleError("jobs manifest line {}: malformed sha256".format(lineno))
+        prefix = REPO_SCRIPTS_SUBDIR + "/"
+        if not rel.startswith(prefix):
+            raise ScheduleError(
+                "jobs manifest line {}: {!r} is outside {}/ — a manifest may only "
+                "describe job scripts".format(lineno, rel, REPO_SCRIPTS_SUBDIR)
+            )
+        name = rel[len(prefix) :]
+        if not re.match(jobs_d._NAME_RE_STR, name):
+            raise ScheduleError(
+                "jobs manifest line {}: {!r} is not a legal job name".format(lineno, name)
+            )
+        if name in out:
+            raise ScheduleError(
+                "jobs manifest line {}: duplicate entry for {!r}".format(lineno, name)
+            )
+        out[name] = digest
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -203,10 +431,20 @@ def _install_declaration(src_yaml: Path, name: str, syrvis_home: Path) -> None:
             Path(tmp).unlink()
 
 
-def materialize_job_script(checkout: Path, name: str, jobs_dir: Path) -> Tuple[bool, str]:
-    """Copy the trusted repo's ``jobs/<name>`` to ``<jobs_dir>/<name>`` (root:root 0755).
+def materialize_job_script(
+    checkout: Path, name: str, jobs_dir: Path, expected_sha256: Optional[str] = None
+) -> Tuple[bool, str]:
+    """Copy ``jobs/<name>`` to ``<jobs_dir>/<name>`` (root:root 0755) IF it matches.
 
-    ``checkout`` is the already-cloned ROOT-configured source (not operator input).
+    ``checkout`` is the already-cloned, REV-VERIFIED source. ``expected_sha256``
+    is that script's row in ``jobs/MANIFEST.sha256`` at the pinned commit.
+
+    ⚠ ``expected_sha256=None`` is a REFUSAL, not a bypass. The default is None
+    only so the failure mode of a caller that forgets to pass it is "nothing is
+    installed", never "the old unchecked behaviour". This is the line that makes
+    the whole scheme load-bearing: before design/66 these bytes became a
+    root:root 0755 executable with no inspection whatsoever.
+
     Atomic replace via a temp file in the destination dir, so a half-written
     root-owned script is never schedulable. chown to root:root is best-effort
     (needs privilege); the 0755 mode is always enforced.
@@ -215,6 +453,20 @@ def materialize_job_script(checkout: Path, name: str, jobs_dir: Path) -> Tuple[b
     script = _repo_script(checkout, name)
     if script is None:
         return False, "source repo has no {}/{} script".format(REPO_SCRIPTS_SUBDIR, name)
+    if not expected_sha256:
+        return False, (
+            "{}/{} has no row in {}/{} at the pinned commit — refusing to install an "
+            "unmanifested root script".format(
+                REPO_SCRIPTS_SUBDIR, name, REPO_SCRIPTS_SUBDIR, MANIFEST_FILENAME
+            )
+        )
+    actual = _sha256_file(script)
+    if actual != expected_sha256:
+        return False, (
+            "{}/{} does not match the pinned manifest (want {}…, got {}…) — refusing".format(
+                REPO_SCRIPTS_SUBDIR, name, expected_sha256[:12], actual[:12]
+            )
+        )
     jobs_dir.mkdir(parents=True, exist_ok=True)
     dest = jobs_dir / name
     fd, tmp_name = tempfile.mkstemp(prefix=".{}.".format(name), dir=str(jobs_dir))
@@ -328,6 +580,12 @@ def compute_plan(syrvis_home: Path) -> Dict[str, Any]:
         jobs_d.validate_cron_spec(" ".join(line.split()[:5]))
     plan["invalid"] = invalid
     plan["source"] = get_configured_source(syrvis_home)
+    # design/66: the reviewed pin goes on the wire beside the source URL, so
+    # home-tech's `nas.jobs` can resolve its reference digests from the PINNED
+    # commit instead of from its own (attacker-writable) working tree, and
+    # `nas.jobs-pin` can assert the live pin against config/jobs.pin. None here
+    # is meaningful and must never be smoothed over: it means UNPINNED.
+    plan["pin"] = get_configured_pin(syrvis_home)
     plan["scripts"] = _script_integrity(declarations, jobs_dir)
     plan["confs"] = _conf_integrity(declarations, syrvis_home / "config")
     return plan
@@ -531,7 +789,7 @@ def _script_integrity(declarations: Dict[str, Any], jobs_dir: Path) -> Dict[str,
         entry: Dict[str, Any] = {"present": script.is_file()}
         if entry["present"]:
             try:
-                entry["sha256"] = hashlib.sha256(script.read_bytes()).hexdigest()
+                entry["sha256"] = _sha256_file(script)
             except OSError as e:
                 entry["error"] = str(e)
         out[name] = entry
@@ -581,19 +839,37 @@ def apply_schedule(syrvis_home: Path) -> Dict[str, Any]:
     }
 
 
-def sync_from_source(syrvis_home: Path) -> Dict[str, Any]:
-    """Clone the ONE root-configured source, install its jobs, then reconcile.
+def sync_from_source(
+    syrvis_home: Path,
+    to_rev: Optional[str] = None,
+    to_manifest: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Clone the root-configured source AT THE REVIEWED PIN, install, reconcile.
 
-    Steps (privileged):
+    TWO MODES, and the difference is the whole security story:
+
+    * **bare** (no argv) — materialize ``config/jobs.pin``'s commit. It cannot
+      pick up anything pushed since the pin was set, which is what makes this
+      safe to print as a remediation, safe on the boot path, and safe for an
+      agent to run. Absent/malformed pin ⇒ REFUSE (fail-closed); an unpinned
+      sync would install the default-branch HEAD as root cron.
+    * **advancing** (``--to`` + ``--manifest``) — the deliberate review act. Both
+      values are re-verified against the fetched tree (``rev-parse HEAD`` for the
+      commit, a sha256 of ``jobs/MANIFEST.sha256`` for the manifest), and
+      ``changed_scripts`` names every root-run script this advance would alter
+      BEFORE anything is written. The pin file is updated LAST, only on success.
+
+    Steps:
     1. Read ``config/jobs.source`` (root-owned). None ⇒ dormant no-op.
-    2. Clone it (hardened). For each ``jobs.d/*.yaml`` in the repo: re-validate +
-       copy into ``config/jobs.d/`` (removing local declarations the source no
-       longer provides — the source is authoritative).
-    3. Materialize each declared+enabled job's ``jobs/<name>`` → ``<home>/jobs/``
-       (root:root 0755).
-    4. LOCAL reconcile the managed crontab block.
+    2. Resolve the pin (argv, else the file). None ⇒ refuse.
+    3. Clone AT the pin and prove ``HEAD == rev``.
+    4. Verify + parse ``jobs/MANIFEST.sha256`` against the pin's digest.
+    5. Install each ``jobs.d/*.yaml`` (re-validated; the source is authoritative).
+    6. Materialize each declared+enabled ``jobs/<name>`` ONLY if it matches its
+       manifest row (root:root 0755).
+    7. LOCAL reconcile the managed crontab block; then, if advancing, write the pin.
 
-    Only the ``jobs.d/`` + ``jobs/`` subtrees of the trusted repo are read.
+    Only the ``jobs.d/`` + ``jobs/`` subtrees of the pinned tree are read.
     """
     syrvis_home = Path(syrvis_home)
     source = get_configured_source(syrvis_home)
@@ -606,14 +882,97 @@ def sync_from_source(syrvis_home: Path) -> Dict[str, Any]:
             "message": "no config/jobs.source configured — scheduled jobs dormant",
         }
 
-    ok, msg, checkout = _clone_configured_source(source)
+    advancing = to_rev is not None or to_manifest is not None
+    if advancing:
+        if not (isinstance(to_rev, str) and _REV_RE.match(to_rev or "")):
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "error": "--to must be a FULL 40-hex commit sha (an abbreviation is ambiguous)",
+            }
+        if not (isinstance(to_manifest, str) and _MANIFEST_DIGEST_RE.match(to_manifest or "")):
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "error": "--manifest must be sha256:<64 hex> (the digest of jobs/{})".format(
+                    MANIFEST_FILENAME
+                ),
+            }
+        pin = {"rev": to_rev, "manifest": to_manifest}
+    else:
+        pin = get_configured_pin(syrvis_home)
+        if pin is None:
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "pin": None,
+                "error": (
+                    "no reviewed pin: <home>/config/{} is absent or malformed, so there is no "
+                    "commit this sync may materialize. An UNPINNED sync would install whatever "
+                    "the default branch happens to point at, as root cron. Establish the pin "
+                    "with `schedule sync --to <40-hex commit> --manifest sha256:<64 hex>` "
+                    "(home-tech wiki/runbooks/jobs-pin-cutover.md)".format(PIN_CONFIG_NAME)
+                ),
+            }
+
+    ok, msg, checkout = _clone_configured_source(source, pin["rev"])
     if not ok or checkout is None:
-        return {"ok": False, "applied": False, "source": source, "error": msg}
+        return {"ok": False, "applied": False, "source": source, "pin": pin, "error": msg}
     tmp_root = checkout.parent
+    changed: List[str] = []
     try:
+        manifest_path = checkout / REPO_SCRIPTS_SUBDIR / MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "pin": pin,
+                "error": "commit {} carries no {}/{}".format(
+                    pin["rev"][:12], REPO_SCRIPTS_SUBDIR, MANIFEST_FILENAME
+                ),
+            }
+        actual_manifest = "sha256:" + _sha256_file(manifest_path)
+        if actual_manifest != pin["manifest"]:
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "pin": pin,
+                "error": (
+                    "manifest digest mismatch at {}: the pin names {} but the tree carries {} "
+                    "— the ref was rewritten under the pin, or the value was mistyped. "
+                    "NOTHING was installed".format(
+                        pin["rev"][:12], pin["manifest"], actual_manifest
+                    )
+                ),
+            }
+        try:
+            expected = parse_manifest(manifest_path.read_text())
+        except ScheduleError as exc:
+            return {
+                "ok": False,
+                "applied": False,
+                "source": source,
+                "pin": pin,
+                "error": str(exc),
+            }
+
+        # THE REVIEW SURFACE. Which root-run scripts this sync would change,
+        # named, computed BEFORE anything is written — because after the writes
+        # the evidence is gone. A pin advance whose changed set surprises you is
+        # the signal this whole design exists to produce.
+        jobs_dir = paths.get_jobs_script_dir(syrvis_home)
+        for name in sorted(expected):
+            installed = jobs_dir / name
+            if not installed.is_file() or _sha256_file(installed) != expected[name]:
+                changed.append(name)
+
         repo_decls = _repo_declarations(checkout)
         synced: List[Dict[str, Any]] = []
-        # Install (validate + copy) every declaration the source provides.
         installed_names = set()
         for name, yaml_path in repo_decls.items():
             try:
@@ -630,23 +989,31 @@ def sync_from_source(syrvis_home: Path) -> Dict[str, Any]:
                 if existing.stem not in repo_decls:
                     existing.unlink()
 
-        # Materialize scripts for the freshly installed, enabled declarations.
         declarations, _invalid = jobs_d.load_job_declarations(syrvis_home)
-        jobs_dir = paths.get_jobs_script_dir(syrvis_home)
         for name in sorted(installed_names):
             job = declarations.get(name)
             if job is None or not job.enabled:
                 continue
-            m_ok, m_msg = materialize_job_script(checkout, name, jobs_dir)
+            m_ok, m_msg = materialize_job_script(
+                checkout, name, jobs_dir, expected_sha256=expected.get(name)
+            )
             synced.append({"name": name, "ok": m_ok, "message": m_msg})
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
 
     applied = apply_schedule(syrvis_home)
+    ok_all = bool(applied["ok"]) and all(s["ok"] for s in synced)
+    pin_written = False
+    if advancing and ok_all:
+        write_pin(syrvis_home, pin["rev"], pin["manifest"])
+        pin_written = True
     return {
-        "ok": applied["ok"] and all(s["ok"] for s in synced),
+        "ok": ok_all,
         "applied": True,
         "source": source,
+        "pin": pin,
+        "pin_written": pin_written,
+        "changed_scripts": changed,
         "synced": synced,
         "reconcile": applied,
     }

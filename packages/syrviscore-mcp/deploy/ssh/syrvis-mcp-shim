@@ -20,6 +20,8 @@ is_reason()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^(ups|maintenance)$'; }
 is_shedreason() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'; }
 is_timestamp() { printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z)?$'; }
 is_bool()      { printf '%s' "$1" | LC_ALL=C grep -Eq '^(true|false)$'; }
+is_gitrev()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9a-f]{40}$'; }
+is_sha256()    { printf '%s' "$1" | LC_ALL=C grep -Eq '^sha256:[0-9a-f]{64}$'; }
 is_image()     { printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9]([a-z0-9._-]*[a-z0-9])?(:[0-9]+)?(/[a-z0-9]([a-z0-9._-]*[a-z0-9])?)+(:[A-Za-z0-9._-]+)?(@sha256:[a-f0-9]{64})?$'; }
 
 cmd="$SSH_ORIGINAL_COMMAND"
@@ -256,6 +258,9 @@ if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volu
   set -f; exec "$@"
 fi
 if [ $# -eq 6 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "sync" ] && [ "${6}" = "--json" ]; then
+  set -f; exec "$@"
+fi
+if [ $# -eq 10 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "schedule" ] && [ "${5}" = "sync" ] && [ "${6}" = "--to" ] && is_gitrev "${7}" && [ "${8}" = "--manifest" ] && is_sha256 "${9}" && [ "${10}" = "--json" ]; then
   set -f; exec "$@"
 fi
 if [ $# -eq 7 ] && [ "${1}" = "sudo" ] && [ "${2}" = "-n" ] && [ "${3}" = "/volume1/syrviscore/bin/syrvis" ] && [ "${4}" = "secret" ] && [ "${5}" = "set" ] && [ "${6}" = "--" ] && is_name "${7}"; then

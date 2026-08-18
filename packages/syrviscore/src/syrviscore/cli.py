@@ -835,6 +835,10 @@ def schedule_list(as_json):
             "jobs": jobs_out,
             "invalid": invalid,
             "source": plan.get("source"),
+            # design/66: the reviewed pin, beside the source URL. `null` here is
+            # meaningful — it says this instance is UNPINNED and a bare sync will
+            # be refused. home-tech's nas.jobs / nas.jobs-pin read this field.
+            "pin": plan.get("pin"),
             "managed_block": sorted(plan["desired"].values()),
             "plan": plan,
         }
@@ -938,23 +942,47 @@ def schedule_apply(as_json):
 
 
 @schedule.command("sync")
+@click.option(
+    "--to",
+    "to_rev",
+    default=None,
+    help="ADVANCE the pin to this FULL 40-hex commit (requires --manifest)",
+)
+@click.option(
+    "--manifest",
+    "to_manifest",
+    default=None,
+    help="sha256:<64 hex> of that commit's jobs/MANIFEST.sha256 (requires --to)",
+)
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (MCP)")
 @handle_errors
-def schedule_sync(as_json):
-    """Clone the ROOT-configured source (config/jobs.source), install its jobs, reconcile.
+def schedule_sync(to_rev, to_manifest, as_json):
+    """Materialize the REVIEWED commit of config/jobs.source, then reconcile.
 
-    Clones the SINGLE root-configured repo, copies its jobs.d/*.yaml into
-    config/jobs.d/ (each re-validated; the source is authoritative — locally removed
-    declarations are dropped), materializes each enabled job's root-owned jobs/<name>
-    script (root:root 0755), then LOCAL-reconciles the managed /etc/crontab block.
+    Bare (no options): materialize config/jobs.pin's commit. This is the SAFE
+    repair — it cannot pick up anything pushed to the source since the pin was
+    set, so it is the form to run when `nas.jobs` reports script drift. With no
+    usable pin it REFUSES rather than falling back to the default branch.
+
+    `--to <40-hex> --manifest sha256:<64-hex>`: the deliberate review act. Both
+    values are re-verified against the fetched tree, every script is checked
+    against its manifest row before it is installed, the scripts this advance
+    CHANGES are named, and the pin file is updated only on full success.
+
     With no config/jobs.source configured this is a dormant no-op.
     """
     from syrviscore import schedule as schedule_lib
 
+    if bool(to_rev) != bool(to_manifest):
+        raise click.UsageError(
+            "--to and --manifest go together: advancing the pin means naming BOTH the "
+            "commit and the digest of its jobs/MANIFEST.sha256"
+        )
+
     privilege.ensure_elevated("Syncing scheduled jobs requires elevated privileges.")
     try:
         home = get_syrvis_home()
-        result = schedule_lib.sync_from_source(home)
+        result = schedule_lib.sync_from_source(home, to_rev=to_rev, to_manifest=to_manifest)
     except Exception as e:  # noqa: BLE001 - CLI boundary
         if as_json:
             json_error(e, indent=2)
@@ -968,10 +996,19 @@ def schedule_sync(as_json):
 
     click.echo()
     if not result.get("applied"):
-        click.echo(result.get("message", "No config/jobs.source configured — dormant"))
+        click.echo(result.get("error") or result.get("message", "No config/jobs.source — dormant"))
         click.echo()
+        if not result.get("ok", True):
+            raise SystemExit(1)
         return
     click.echo("Source: {}".format(result.get("source")))
+    pin = result.get("pin") or {}
+    click.echo("Pin:    {} {}".format(pin.get("rev", "(none)")[:12], pin.get("manifest", "")))
+    changed = result.get("changed_scripts") or []
+    if changed:
+        click.echo("CHANGED root-run script(s) ({}): {}".format(len(changed), ", ".join(changed)))
+    else:
+        click.echo("CHANGED root-run script(s): none — the installed set already matches the pin")
     for m in result.get("synced", []):
         mark = "[+]" if m["ok"] else "[-]"
         click.echo("  {} {}: {}".format(mark, m["name"], m["message"]))
@@ -979,6 +1016,8 @@ def schedule_sync(as_json):
     click.echo("Scheduled: {}".format(", ".join(reconcile.get("scheduled", [])) or "(none)"))
     for row in reconcile.get("skipped", []):
         click.echo("  ~ skipped {}: {}".format(row["name"], row["reason"]))
+    if result.get("pin_written"):
+        click.echo("Pin ADVANCED and recorded at <home>/config/jobs.pin")
     click.echo()
     if not result["ok"]:
         raise SystemExit(1)
