@@ -21,6 +21,5 @@ device's measured state.
 
 ## The old contract
 
-The previous 27 KB agent contract for this repo lives in git history; recover it
-with `git log --follow -- CLAUDE.md` if a historical question needs it. It
-contains runnable v1 instructions and must not be followed.
+The previous 27 KB contract lives in git history (`git log --follow -- CLAUDE.md`).
+It carries runnable v1 instructions and must not be followed.
