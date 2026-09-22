@@ -1,8 +1,7 @@
 # SyrvisCore — RETIRED (v1)
 
-**Retired 2026-09-01.** This repo is v1 of the Synology deployment system. It
-is kept for history and for the DSM-side artifacts it documents. It is not a
-product any more and it is not a fallback.
+**Retired 2026-09-01.** This repo is v1 of the Synology deployment system. It is kept for history and for the
+DSM-side artifacts it documents. It is not a product and not a fallback.
 
 ## Do not
 
