@@ -1,5 +1,50 @@
 # SyrvisCore
 
+> # ⚠ DEPRECATED — THIS IS THE RETIRED v1 SYSTEM (2026-09-01)
+>
+> **SyrvisCore is SyrvisCore v1, and v1 is retired.** Do not install it, do not
+> run it, and do not extend it. The successor is **[syrvis
+> v2](https://github.com/kevinteg/syrvis)** (`~/code/syrvis`) — a rewrite in Go
+> as a static agent (`syrvisd`) plus a `syrvis` CLI — and it has been **live on
+> the RS1221+ since 2026-09-01**, reached over the mTLS **T-api** transport:
+>
+> ```sh
+> syrvis --context rs1221-ops status     # what the device says it is doing
+> syrvis --context rs1221-ops events     # what has happened
+> syrvis --context rs1221-ops health     # conformance
+> ```
+>
+> **What was retired, and when.** Ruling R11-1 (2026-08-26) retired v1's operator
+> seam and its `syrviscore-mcp` MCP server. `~/.config/syrviscore-mcp/` was
+> renamed `.v1-retired` on 2026-08-29, and `/volume4/syrviscore/bin/syrvis` — the
+> wrapper the seam's forced command allowlisted — was removed from the NAS by the
+> v1→v2 pivot. On 2026-09-01 the owner closed the rollback question outright: *we
+> are past rolling back to v1.* Anything in this README that reads as a live
+> instruction — installing the SPK, `syrvisctl install/activate`, the MCP's 42
+> tools, the seam call shapes — is history.
+>
+> **Do not rebuild anything shaped like the v1 seam.** That is the explicit content
+> of R11-1, and it applies to repointing the MCP as much as to re-provisioning the
+> shim. If v2 cannot yet answer a question, the answer is *we cannot see that yet* —
+> not a v1 path resurrected for one read.
+>
+> **Why the repo is kept, in full.** Two reasons, both load-bearing:
+>
+> 1. **History.** This is the most complete record of how the platform actually
+>    behaved on a real DSM box — the macvlan shim, the passwd-revert trap, the
+>    forced-command seam's argv discipline, the compose generator's create-on-absent
+>    semantics. v2's design reads it as input.
+> 2. **DSM-side artifacts still on devices.** v1 left real things on real NASes:
+>    an SPK slot, `/volume*/syrviscore*` roots, DSM Task Scheduler entries, a
+>    `syrvis-operator` account, `/etc/sudoers.d/` policy. Retiring those is owner
+>    work done from the DSM console, and this repo is what tells you what each one
+>    was for. The sweep is tracked in
+>    `~/code/home-tech/syrvis-v2/docket/12-v1-ledger.md`.
+>
+> Everything below is preserved as that record. Read it in the past tense.
+
+---
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
